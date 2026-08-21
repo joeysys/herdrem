@@ -1,0 +1,20 @@
+services:
+  herdrem:
+    build: .
+    image: herdrem
+    container_name: herdrem
+    ports:
+      - "8766:8766"
+    environment:
+      # Generate with: openssl rand -hex 16
+      HERDREM_TOKEN: ${HERDREM_TOKEN:-}
+      HERDREM_PORT: "8766"
+      # HERDR_REMOTES: "user@server1,user@server2"
+      # HERDREM_KINDS: "agent,shell"
+      # HERDR_ALLOWED_ORIGINS: "localhost:8765"
+    volumes:
+      - herdrem-data:/var/lib/herdrem
+    restart: unless-stopped
+
+volumes:
+  herdrem-data:

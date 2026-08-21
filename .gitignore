@@ -6,6 +6,7 @@
 
 # Vue build output (embedded via go:embed)
 /webdist/
+!/webdist/embed.go
 
 # Node
 web/node_modules/

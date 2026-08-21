@@ -1,0 +1,38 @@
+[Unit]
+Description=Herdrem — herdr remote relay and web PWA
+Documentation=https://herdr.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/herdrem serve --web
+Restart=on-failure
+RestartSec=3
+
+# Load secrets (HERDREM_TOKEN etc.) from an env file.
+# Copy herdrem.env.example to /etc/herdrem/herdrem.env and edit.
+EnvironmentFile=-/etc/herdrem/herdrem.env
+
+# Data directory (todo, prefs, poller state)
+# HERDREM_DATA_DIR defaults to ~/.config/herdrem under the service user.
+# Set an explicit path here for a dedicated system user:
+# Environment=HERDREM_DATA_DIR=/var/lib/herdrem
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-/var/lib/herdrem
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Dedicated system user (create with: useradd -r -s /usr/sbin/nologin -d /var/lib/herdrem herdrem)
+User=herdrem
+Group=herdrem
+WorkingDirectory=/var/lib/herdrem
+
+[Install]
+WantedBy=multi-user.target
