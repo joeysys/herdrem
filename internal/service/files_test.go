@@ -1,0 +1,137 @@
+package service
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func rootsFor(dir string) func(string) []string {
+	return func(host string) []string {
+		if host == "" || host == "local" {
+			return []string{dir}
+		}
+		return nil
+	}
+}
+
+func TestIsSafePath(t *testing.T) {
+	dir := t.TempDir()
+	roots := []string{dir}
+	if err := isSafePath(filepath.Join(dir, "a.go"), roots); err != nil {
+		t.Errorf("inside root should be safe: %v", err)
+	}
+	if err := isSafePath("/etc/passwd", roots); err == nil {
+		t.Error("outside root should be rejected")
+	}
+	if err := isSafePath(filepath.Join(dir, "..", "escape.go"), roots); err == nil {
+		t.Error(".. escape should be rejected")
+	}
+	if err := isSafePath("", roots); err == nil {
+		t.Error("empty path should be rejected")
+	}
+}
+
+func TestIsSafePath_Symlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret.txt")
+	os.WriteFile(target, []byte("x"), 0o644)
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlink not permitted")
+	}
+	if err := isSafePath(link, []string{dir}); err == nil {
+		t.Error("symlink escaping root should be rejected")
+	}
+}
+
+func TestGuessMime(t *testing.T) {
+	if _, _, img := guessMime("a.png", []byte{0x89, 0x50}); !img {
+		t.Error("png should be image")
+	}
+	mime, isText, _ := guessMime("a.go", []byte("package main\n"))
+	if !isText {
+		t.Errorf("go source should be text, got %s", mime)
+	}
+	if _, isText, _ := guessMime("a.bin", []byte{0, 1, 2, 3}); isText {
+		t.Error("binary with NUL should not be text")
+	}
+}
+
+func TestLooksText(t *testing.T) {
+	if !looksText([]byte("hello world\n")) {
+		t.Error("plain text")
+	}
+	if looksText([]byte{0xff, 0xfe, 0, 1}) {
+		t.Error("binary")
+	}
+	if !looksText(nil) {
+		t.Error("empty is text")
+	}
+}
+
+func TestFileService_ReadText(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n"), 0o644)
+	fs := NewFileService(rootsFor(dir), nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, err := fs.Read(ctx, "", filepath.Join(dir, "a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Encoding != "utf-8" || res.Content != "package main\n" {
+		t.Errorf("res = %+v", res)
+	}
+	if res.IsImage {
+		t.Error("go source should not be image")
+	}
+}
+
+func TestFileService_ReadRejectsOutside(t *testing.T) {
+	dir := t.TempDir()
+	fs := NewFileService(rootsFor(dir), nil)
+	ctx := context.Background()
+	if _, err := fs.Read(ctx, "", "/etc/hostname"); err == nil {
+		t.Error("outside root should be rejected")
+	}
+}
+
+func TestFileService_List(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("x"), 0o644)
+	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	fs := NewFileService(rootsFor(dir), nil)
+
+	entries, err := fs.List(context.Background(), "", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file, sub *FileEntry
+	for i := range entries {
+		if entries[i].Name == "a.go" {
+			file = &entries[i]
+		}
+		if entries[i].Name == "sub" {
+			sub = &entries[i]
+		}
+	}
+	if file == nil || file.Type != "file" {
+		t.Errorf("missing file entry: %+v", entries)
+	}
+	if sub == nil || sub.Type != "dir" {
+		t.Errorf("missing dir entry: %+v", entries)
+	}
+}
+
+func TestToProtocol(t *testing.T) {
+	r := &FileReadResult{Path: "/x/a.go", Content: "c", Encoding: "utf-8", MimeType: "text/plain", IsText: true, Size: 1}
+	pc := r.toProtocol()
+	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || pc.Size != 1 {
+		t.Errorf("pc = %+v", pc)
+	}
+}
