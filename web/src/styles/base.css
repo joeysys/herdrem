@@ -1,0 +1,446 @@
+/* ─────────────────────────────────────────────
+   Herdrem — operations console design system
+   Display: Space Grotesk · Terminal: JetBrains Mono
+   ───────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — deep blue-charcoal, layered */
+  --bg: #0a0e13;
+  --bg-deep: #07090d;
+  --surface: #11161d;
+  --surface-2: #171e27;
+  --surface-3: #1e2733;
+  --border: #232c38;
+  --border-strong: #2e3a49;
+
+  /* Text */
+  --text: #e8edf3;
+  --text-dim: #aeb9c7;
+  --muted: #7d8a9c;
+  --faint: #556274;
+
+  /* Status accents (multi-accent, never single-neon) */
+  --green: #34d399;
+  --green-soft: rgba(52, 211, 153, 0.14);
+  --red: #f87171;
+  --red-soft: rgba(248, 113, 113, 0.14);
+  --orange: #fb923c;
+  --orange-soft: rgba(251, 146, 60, 0.14);
+  --blue: #60a5fa;
+  --blue-soft: rgba(96, 165, 250, 0.14);
+  --amber: #fbbf24;
+  --amber-soft: rgba(251, 191, 36, 0.14);
+
+  /* Terminal */
+  --term-bg: #05070a;
+  --term-fg: #c8d2dd;
+  --term-dim: #6f7d8c;
+
+  /* Type */
+  --font-display: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Type scale — strong contrast */
+  --text-2xs: 0.625rem;  /* 10 */
+  --text-xs: 0.6875rem;  /* 11 */
+  --text-sm: 0.8125rem;  /* 13 */
+  --text-md: 0.9375rem;  /* 15 */
+  --text-lg: 1.125rem;   /* 18 */
+  --text-xl: 1.5rem;     /* 24 */
+
+  /* Shape & depth */
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+
+  /* Ambient background layers (body::before / body::after) — per-theme overridable */
+  --ambient-1: rgba(96, 165, 250, 0.07);
+  --ambient-2: rgba(52, 211, 153, 0.05);
+  --grid-line: rgba(125, 138, 156, 0.045);
+  --bg-image: none;  /* optional top layer: texture (data URI) or /bg/* asset */
+
+  /* Glassmorphism opt-in: blur applied to topbar/cards; themes enable via --glass */
+  --glass: none;
+
+  /* Split-mode sidebar backdrop (App.vue .split-list) */
+  --pane-bg: var(--bg-deep);
+  --term-input-bg: var(--surface);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+}
+
+#app { height: 100%; }
+
+/* Layered ambient background: soft top glow + fine engineering grid.
+   Evokes an ops console / CRT without aurora blobs. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    var(--bg-image),
+    radial-gradient(1000px 420px at 50% -8%, var(--ambient-1), transparent 62%),
+    radial-gradient(720px 480px at 108% 112%, var(--ambient-2), transparent 60%),
+    var(--bg);
+  background-size: cover, auto, auto, auto;
+  background-position: center, 0 0, 0 0, 0 0;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 18%, #000 30%, transparent 100%);
+}
+
+a { color: var(--blue); }
+button { font-family: inherit; cursor: pointer; }
+code, pre { font-family: var(--font-mono); }
+
+::selection { background: rgba(96, 165, 250, 0.3); }
+
+/* ── App shell ─────────────────────────────── */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+}
+/* Desktop: use full width for split layout */
+@media (min-width: 900px) {
+  .app { max-width: none; }
+}
+
+/* ── Top bar ───────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--topbar-bg, linear-gradient(180deg, rgba(23, 30, 39, 0.6), rgba(23, 30, 39, 0)));
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  flex-shrink: 0;
+  max-height: 60px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+}
+.topbar.auto-hidden {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  border-bottom-color: transparent;
+}
+.topbar.dropdown-open {
+  overflow: visible;
+}
+.topbar.hide-mobile { display: flex; }
+@media (max-width: 899px) {
+  .topbar.hide-mobile { display: none; }
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+.brand-glyph {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--text-lg);
+  color: var(--green);
+  letter-spacing: -1px;
+  text-shadow: 0 0 14px rgba(52, 211, 153, 0.5);
+}
+.brand h1 {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.brand .tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Connection chip */
+.conn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface);
+  transition: color 0.25s, border-color 0.25s, background 0.25s;
+  flex-shrink: 0;
+}
+.conn-chip .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--faint);
+  transition: background 0.25s;
+}
+.conn-chip.connected { color: var(--green); border-color: rgba(52,211,153,.35); background: var(--green-soft); }
+.conn-chip.connected .dot { background: var(--green); }
+.conn-chip.connecting { color: var(--orange); border-color: rgba(251,146,60,.35); background: var(--orange-soft); }
+.conn-chip.connecting .dot { background: var(--orange); }
+.conn-chip.disconnected .dot { background: var(--red); }
+
+/* ── Main region ──────────────────────────── */
+.main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden; /* prevent drawer-in animation from causing horizontal scroll */
+}
+
+/* ── Agent list ────────────────────────────── */
+.list-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overscroll-behavior: contain;
+}
+.list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 28px;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 0;
+  flex-shrink: 0;
+  max-height: 62px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+}
+.list-head.auto-hidden {
+  max-height: 0;
+  padding-top: 0;
+  opacity: 0;
+}
+
+/* Auto-hide for AgentFilters root (.filters) */
+.filters {
+  max-height: 200px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+}
+.filters.auto-hidden {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+}
+.list-head .count {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.list-head .count.shells {
+  font-size: var(--text-md);
+  color: var(--muted);
+}
+.list-head .label {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  margin-left: 8px;
+}
+.list-head .blocked-note {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--red);
+}
+
+.agent-list { display: flex; flex-direction: column; gap: 9px; }
+
+.agent-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px 13px 17px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s, background 0.16s, box-shadow 0.16s;
+  overflow: hidden;
+}
+.agent-card::before {           /* status rail */
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--faint);
+  transition: background 0.2s;
+}
+.agent-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-2);
+}
+.agent-card:active { transform: translateY(0); }
+
+.agent-card .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--faint);
+}
+.agent-card .body { flex: 1; min-width: 0; }
+.agent-card .name {
+  font-weight: 600;
+  font-size: var(--text-md);
+  letter-spacing: 0.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent-card .meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden;
+}
+.agent-card .meta .pane-id { color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+.agent-card .chevron {
+  color: var(--faint);
+  font-size: var(--text-lg);
+  transition: transform 0.16s, color 0.16s;
+  flex-shrink: 0;
+}
+.agent-card:hover .chevron { transform: translateX(3px); color: var(--muted); }
+
+/* status variants */
+.agent-card.working .dot { background: var(--orange); }
+.agent-card.working::before { background: var(--orange); }
+.agent-card.blocked { border-color: rgba(248,113,113,.4); background: linear-gradient(90deg, var(--red-soft), var(--surface) 55%); }
+.agent-card.blocked .dot { background: var(--red); }
+.agent-card.blocked::before { background: var(--red); }
+.agent-card.blocked .name { color: #ffd9d9; }
+.agent-card.done .dot { background: var(--green); }
+.agent-card.done::before { background: var(--green); }
+
+/* selected pane in desktop split mode (left list → right terminal)
+   Declared after status variants so active highlight wins the cascade. */
+.agent-card.active {
+  border-color: rgba(96,165,250,.55) !important;
+  background: var(--blue-soft) !important;
+  box-shadow: inset 3px 0 0 var(--blue) !important;
+}
+.agent-card.active::before { background: var(--blue) !important; }
+.agent-card.active:hover { background: var(--blue-soft) !important; }
+
+/* quick approve on blocked cards */
+.quick-approve { display: flex; gap: 6px; flex-shrink: 0; }
+.qa-btn {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  min-width: 34px;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  border: 1px solid;
+  transition: transform 0.1s, filter 0.15s;
+}
+.qa-btn:active { transform: scale(0.92); }
+.qa-btn.yes { color: var(--green); border-color: rgba(52,211,153,.5); background: var(--green-soft); }
+.qa-btn.yes:hover { filter: brightness(1.25); }
+.qa-btn.no { color: var(--red); border-color: rgba(248,113,113,.5); background: var(--red-soft); }
+.qa-btn.no:hover { filter: brightness(1.25); }
+.qa-btn.neutral { color: var(--text-dim); border-color: var(--border-strong); background: var(--surface-2); }
+.qa-btn.neutral:hover { filter: brightness(1.25); }
+
+/* empty / idle states */
+.empty {
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--muted);
+}
+.empty .glyph {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  color: var(--faint);
+  margin-bottom: 14px;
+  opacity: 0.7;
+}
+.empty .title { font-size: var(--text-md); font-weight: 600; color: var(--text-dim); }
+.empty .hint { font-size: var(--text-sm); margin-top: 6px; color: var(--faint); }
+.empty .hint code {
+  font-size: var(--text-xs);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--blue);
+}
+
+/* ── Animations ────────────────────────────── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.view-enter { animation: view-in 0.22s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

@@ -1,0 +1,113 @@
+import type { ServerMessage, ClientMessage } from './types'
+
+type MessageHandler = (msg: ServerMessage) => void
+
+export class WSClient {
+  private ws: WebSocket | null = null
+  private url = ''
+  private token = ''
+  private handlers: Set<MessageHandler> = new Set()
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private shouldReconnect = true
+  private connId = 0 // increments on each connect; callbacks check identity
+  public status: 'disconnected' | 'connecting' | 'connected' = 'disconnected'
+
+  connect(url: string, token?: string) {
+    // Close existing connection and clear pending reconnect
+    this.shouldReconnect = false
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (this.ws) {
+      this.ws.onclose = null
+      this.ws.onerror = null
+      this.ws.onmessage = null
+      this.ws.onopen = null
+      this.ws.close()
+      this.ws = null
+    }
+    this.url = url
+    this.token = token || ''
+    this.shouldReconnect = true
+    this.doConnect()
+  }
+
+  private doConnect() {
+    this.status = 'connecting'
+    this.notifyStatus()
+    const myId = ++this.connId
+    // Relay's WS endpoint is /ws (root serves the SPA). normalizeRelayUrl
+    // strips /ws for storage/display, so re-append it here if missing.
+    let base = this.url
+    if (!/\/ws$/i.test(base)) base = base.replace(/\/+$/, '') + '/ws'
+    const wsUrl = this.token ? `${base}?token=${encodeURIComponent(this.token)}` : base
+    const socket = new WebSocket(wsUrl)
+    this.ws = socket
+
+    socket.onopen = () => {
+      if (myId !== this.connId) return // stale connection
+      this.status = 'connected'
+      this.notifyStatus()
+    }
+
+    socket.onmessage = (ev) => {
+      if (myId !== this.connId) return // stale connection
+      try {
+        const msg = JSON.parse(ev.data) as ServerMessage
+        this.handlers.forEach((h) => h(msg))
+      } catch (e) {
+        console.error('ws parse error:', e)
+      }
+    }
+
+    socket.onclose = () => {
+      if (myId !== this.connId) return // stale connection, ignore
+      this.status = 'disconnected'
+      this.notifyStatus()
+      if (this.shouldReconnect) {
+        this.reconnectTimer = setTimeout(() => this.doConnect(), 2000)
+      }
+    }
+
+    socket.onerror = () => {
+      if (myId !== this.connId) return
+      socket.close()
+    }
+  }
+
+  disconnect() {
+    this.shouldReconnect = false
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.ws?.close()
+    this.ws = null
+    this.status = 'disconnected'
+    this.notifyStatus()
+  }
+
+  send(msg: ClientMessage) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg))
+      return true
+    }
+    return false
+  }
+
+  onMessage(handler: MessageHandler): () => void {
+    this.handlers.add(handler)
+    return () => this.handlers.delete(handler)
+  }
+
+  private statusHandlers: Set<(s: string) => void> = new Set()
+  onStatus(handler: (s: string) => void): () => void {
+    this.statusHandlers.add(handler)
+    handler(this.status)
+    return () => this.statusHandlers.delete(handler)
+  }
+
+  private notifyStatus() {
+    this.statusHandlers.forEach((h) => h(this.status))
+  }
+}
+
+export const ws = new WSClient()

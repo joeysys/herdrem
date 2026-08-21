@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="herdr">
+  <defs>
+    <linearGradient id="wool" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#wool)">
+    <circle cx="190" cy="210" r="58"/>
+    <circle cx="250" cy="185" r="68"/>
+    <circle cx="318" cy="205" r="60"/>
+    <circle cx="175" cy="270" r="52"/>
+    <circle cx="256" cy="255" r="72"/>
+    <circle cx="340" cy="265" r="54"/>
+    <circle cx="220" cy="310" r="48"/>
+    <circle cx="300" cy="305" r="50"/>
+  </g>
+  <ellipse cx="256" cy="268" rx="62" ry="70" fill="#1f2937"/>
+  <ellipse cx="198" cy="230" rx="18" ry="28" fill="#1f2937" transform="rotate(-25 198 230)"/>
+  <ellipse cx="314" cy="230" rx="18" ry="28" fill="#1f2937" transform="rotate(25 314 230)"/>
+  <ellipse cx="198" cy="232" rx="10" ry="16" fill="#f9a8d4" transform="rotate(-25 198 232)"/>
+  <ellipse cx="314" cy="232" rx="10" ry="16" fill="#f9a8d4" transform="rotate(25 314 232)"/>
+  <circle cx="232" cy="258" r="9" fill="#f8fafc"/>
+  <circle cx="280" cy="258" r="9" fill="#f8fafc"/>
+  <circle cx="234" cy="260" r="4.5" fill="#0f172a"/>
+  <circle cx="282" cy="260" r="4.5" fill="#0f172a"/>
+  <ellipse cx="256" cy="288" rx="12" ry="8" fill="#334155"/>
+  <path d="M240 302 Q256 316 272 302" fill="none" stroke="#94a3b8" stroke-width="4" stroke-linecap="round"/>
+</svg>
