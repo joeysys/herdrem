@@ -80,13 +80,7 @@
   background-position: center, 0 0, 0 0, 0 0, 0 0;
   background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, no-repeat;
 }
-/* gradient brand glyph + gradient relay chip */
-[data-theme='modern-dark'] .brand-glyph {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text; background-clip: text;
-  color: transparent; -webkit-text-fill-color: transparent;
-  text-shadow: none;
-}
+/* gradient relay chip */
 /* App.vue .relay-chip is scoped (0,3,0); .topbar ancestor lifts this to (0,4,0) */
 [data-theme='modern-dark'] .topbar .relay-chip.connected {
   color: var(--accent-2);
@@ -130,13 +124,7 @@
   --pane-bg: rgba(240,241,247,0.85);
   --term-input-bg: rgba(255,255,255,0.9);
 }
-/* gradient brand glyph + gradient relay chip */
-[data-theme='modern-light'] .brand-glyph {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text; background-clip: text;
-  color: transparent; -webkit-text-fill-color: transparent;
-  text-shadow: none;
-}
+/* gradient relay chip */
 /* App.vue .relay-chip is scoped (0,3,0); .topbar ancestor lifts this to (0,4,0) */
 [data-theme='modern-light'] .topbar .relay-chip.connected {
   color: var(--accent);
@@ -239,7 +227,6 @@
 [data-theme='e-ink'] body::before,
 [data-theme='e-ink'] body::after { display: none; }
 [data-theme='e-ink'] .topbar { background: #ffffff; }
-[data-theme='e-ink'] .brand-glyph { text-shadow: none; }
 [data-theme='e-ink'] .agent-card.blocked { background: #f0f0f0; }
 [data-theme='e-ink'] .agent-card:hover { box-shadow: none; }
 [data-theme='e-ink'] * { animation: none !important; transition: none !important; }

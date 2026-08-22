@@ -5,6 +5,54 @@ import { useConnectionStore } from './connection'
 import type { ReadPane, SendText, SendKeys, Respond } from '../api/types'
 import { safeStorage } from '../utils/storage'
 
+const MIN_POLL_OVERLAP_LINES = 20
+
+function hasLoneCR(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\r' && text[i + 1] !== '\n') return true
+  }
+  return false
+}
+
+function lineCount(text: string): number {
+  if (!text) return 0
+  let lines = text.endsWith('\n') ? 0 : 1
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') lines++
+  }
+  return lines
+}
+
+// Merge an unversioned 50-line poll response only when it proves continuity
+// with retained content. Return null for redraws/discontinuities so the caller
+// can request one authoritative full snapshot instead.
+function mergePollTail(current: string, tail: string): string | null {
+  if (current === tail) return current
+  if (!current || !tail) return null
+
+  if (tail.startsWith(current)) {
+    const delta = tail.slice(current.length)
+    return hasLoneCR(delta) ? null : tail
+  }
+
+  // A rolling-tail merge is only safe when we retained more history than the
+  // poll returned. This excludes fixed-height TUI screens that merely redraw.
+  if (lineCount(current) <= lineCount(tail)) return null
+
+  const starts = [0]
+  for (let i = 0; i < current.length; i++) {
+    if (current[i] === '\n' && i + 1 < current.length) starts.push(i + 1)
+  }
+  for (const start of starts.slice(-64)) {
+    const overlap = current.slice(start)
+    if (lineCount(overlap) < MIN_POLL_OVERLAP_LINES || !tail.startsWith(overlap)) continue
+    const delta = tail.slice(overlap.length)
+    if (hasLoneCR(delta)) return null
+    return current + delta
+  }
+  return null
+}
+
 export const useTerminalStore = defineStore('terminal', () => {
   // Upper bounds on retained terminal text per pane. Rendering only shows the
   // tail (tailWindow), so retaining the entire unbounded history wastes memory
@@ -175,8 +223,19 @@ export const useTerminalStore = defineStore('terminal', () => {
           delete contentRevs.value[paneId]
           if (paneId === activePane.value) requestRead(500)
         }
+        return
       }
-      return
+
+      const merged = mergePollTail(content.value, text)
+      if (merged === null) {
+        requestRead(500)
+        return
+      }
+      if (merged === content.value) return
+      content.value = merged
+      // The server supplied no revision, so a later versioned delta cannot be
+      // proven to extend this locally merged content.
+      delete contentRevs.value[paneId]
     } else {
       content.value = text
       if (rev !== undefined) contentRevs.value[paneId] = rev

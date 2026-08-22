@@ -562,7 +562,7 @@ onUnmounted(() => {
   <div class="app">
     <header class="topbar" :class="{ 'hide-mobile': view === 'term' && !splitMode, 'auto-hidden': hideHeader, 'dropdown-open': showRelaySwitch || showNewPane }">
       <div class="brand">
-        <span class="brand-glyph" aria-hidden="true">▞▚</span>
+        <img class="brand-mark" src="/brand-mark.png" alt="" width="24" height="22" aria-hidden="true" />
         <h1>Herdrem</h1>
       </div>
 

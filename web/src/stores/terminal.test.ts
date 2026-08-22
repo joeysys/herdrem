@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useTerminalStore } from './terminal'
+import { ws } from '../api/ws'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -137,6 +138,64 @@ describe('useTerminalStore cache clearing', () => {
 })
 
 describe('setContent poll mode (N2)', () => {
+  it('merges an unversioned poll tail when it cleanly overlaps retained history', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const lines = Array.from({ length: 60 }, (_, i) => `line-${i}`)
+    term.setContent('p1', lines.join('\n') + '\n', false, 5)
+
+    term.setContent('p1', [...lines.slice(11), 'new-output'].join('\n') + '\n', false, undefined, undefined, true)
+
+    expect(term.content).toBe([...lines, 'new-output'].join('\n') + '\n')
+    expect(send).not.toHaveBeenCalled()
+    send.mockRestore()
+  })
+
+  it('does nothing when an unversioned poll tail already matches', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const lines = Array.from({ length: 60 }, (_, i) => `line-${i}`)
+    const full = lines.join('\n') + '\n'
+    term.setContent('p1', full, false, 5)
+
+    term.setContent('p1', lines.slice(10).join('\n') + '\n', false, undefined, undefined, true)
+
+    expect(term.content).toBe(full)
+    expect(send).not.toHaveBeenCalled()
+    send.mockRestore()
+  })
+
+  it('requests a full resync when an unversioned poll tail cannot be merged safely', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'old content\n', false, 5)
+
+    term.setContent('p1', 'redrawn screen\n', false, undefined, undefined, true)
+
+    expect(term.content).toBe('old content\n')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'read_pane', pane_id: 'p1', lines: 500, purpose: 'term',
+    }))
+    send.mockRestore()
+  })
+
+  it('does not append a shifted fixed-height TUI screen', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const screen = Array.from({ length: 30 }, (_, i) => `row-${i}`)
+    term.setContent('p1', screen.join('\n') + '\n', false, 5)
+
+    term.setContent('p1', [...screen.slice(1), 'redrawn-row'].join('\n') + '\n', false, undefined, undefined, true)
+
+    expect(term.content).toBe(screen.join('\n') + '\n')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 500 }))
+    send.mockRestore()
+  })
+
   it('poll full response with matching rev does not replace delta-grown content', () => {
     const term = useTerminalStore()
     term.activePane = 'p1' as any
