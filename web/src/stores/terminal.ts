@@ -199,7 +199,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       // snapshot: request a paired full snapshot first.
       if (cur === '' || (baseRev !== undefined && baseRev !== last)) {
         // mismatch: request a full resync (guarded by activePane still matching)
-        if (paneId === activePane.value) requestRead(500)
+        if (paneId === activePane.value) requestResync()
         return
       }
       content.value = cur + text
@@ -221,14 +221,14 @@ export const useTerminalStore = defineStore('terminal', () => {
           // content is stale would let a delta splice onto the wrong baseline
           // and silently drop real output (N2 verify-reject).
           delete contentRevs.value[paneId]
-          if (paneId === activePane.value) requestRead(500)
+          if (paneId === activePane.value) requestResync()
         }
         return
       }
 
       const merged = mergePollTail(content.value, text)
       if (merged === null) {
-        requestRead(500)
+        requestResync()
         return
       }
       if (merged === content.value) return
@@ -266,6 +266,12 @@ export const useTerminalStore = defineStore('terminal', () => {
     // snapshots only).
     if (useConnectionStore().hasFeature('incremental-terminal')) msg.incremental = true
     ws.send(msg)
+  }
+
+  // A corrective full snapshot must not be shorter than the history it will
+  // replace. Add one poll window for output produced during the round trip.
+  function requestResync() {
+    requestRead(Math.max(500, lineCount(content.value) + 50))
   }
 
   function sendText(text: string, submit = true) {

@@ -167,18 +167,35 @@ describe('setContent poll mode (N2)', () => {
     send.mockRestore()
   })
 
-  it('requests a full resync when an unversioned poll tail cannot be merged safely', () => {
+  it('requests a resync large enough to preserve retained history when an unversioned poll tail cannot merge', () => {
     const send = vi.spyOn(ws, 'send').mockReturnValue(true)
     const term = useTerminalStore()
     term.activePane = 'p1' as any
-    term.setContent('p1', 'old content\n', false, 5)
+    const history = Array.from({ length: 600 }, (_, i) => `old-${i}`).join('\n') + '\n'
+    term.setContent('p1', history, false, 5)
 
-    term.setContent('p1', 'redrawn screen\n', false, undefined, undefined, true)
+    term.setContent('p1', '\x1b[31mredrawn screen\x1b[0m\n', false, undefined, undefined, true)
 
-    expect(term.content).toBe('old content\n')
+    expect(term.content).toBe(history)
     expect(send).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'read_pane', pane_id: 'p1', lines: 500, purpose: 'term',
+      type: 'read_pane', pane_id: 'p1', lines: 650, purpose: 'term',
     }))
+    send.mockRestore()
+  })
+
+  it('preserves merged history when the next versioned delta needs a resync', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const lines = Array.from({ length: 600 }, (_, i) => `line-${i}`)
+    term.setContent('p1', lines.join('\n') + '\n', false, 5)
+    term.setContent('p1', [...lines.slice(551), 'merged'].join('\n') + '\n', false, undefined, undefined, true)
+    expect(term.content).toBe([...lines, 'merged'].join('\n') + '\n')
+
+    term.setContent('p1', 'next-delta\n', true, 6, 5)
+
+    expect(term.content).toBe([...lines, 'merged'].join('\n') + '\n')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 651 }))
     send.mockRestore()
   })
 
