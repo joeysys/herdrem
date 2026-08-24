@@ -144,13 +144,12 @@ code, pre { font-family: var(--font-mono); }
   flex-shrink: 0;
   max-height: 60px;
   overflow: hidden;
-  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+  transition: max-height 0.25s ease, padding 0.25s ease;
 }
 .topbar.auto-hidden {
   max-height: 0;
   padding-top: 0;
   padding-bottom: 0;
-  opacity: 0;
   border-bottom-color: transparent;
 }
 .topbar.dropdown-open {
