@@ -90,6 +90,7 @@ func TestServeRemoteStreamWholeFile(t *testing.T) {
 
 	fs := NewFileService(func(string) []string { return []string{"/"} }, nil)
 	w := httptest.NewRecorder()
+	w.Header().Set("Cache-Control", "private, no-cache")
 	r := httptest.NewRequest("GET", "/preview/x", nil)
 
 	if err := fs.serveRemoteStream(w, r, "remote", "/page.html"); err != nil {
@@ -103,6 +104,9 @@ func TestServeRemoteStreamWholeFile(t *testing.T) {
 	}
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("missing nosniff header")
+	}
+	if got := w.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Errorf("Cache-Control = %q, want caller policy", got)
 	}
 }
 

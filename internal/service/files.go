@@ -24,7 +24,7 @@ const maxFileRead = 1 << 20 // 1 MiB
 // FileEntry is one directory entry in a listing.
 type FileEntry struct {
 	Name  string `json:"name"`
-	Type  string `json:"type"`  // "file" | "dir" | "link"
+	Type  string `json:"type"` // "file" | "dir" | "link"
 	Size  int64  `json:"size"`
 	Mtime int64  `json:"mtime"` // unix seconds, 0 if unknown
 }
@@ -212,7 +212,9 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 	// prevents MIME sniffing in browsers; ServeContent will set Content-Type
 	// only if it can infer it, so we provide a fallback for unknown extensions.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, max-age=300")
+	}
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
 	return nil
 }
@@ -317,7 +319,9 @@ func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request,
 	mime, _, _ := guessMime(path, head)
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, max-age=300")
+	}
 
 	written, copyErr := io.Copy(w, io.LimitReader(br, maxStreamBytes))
 

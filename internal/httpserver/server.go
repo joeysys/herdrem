@@ -124,6 +124,9 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
+	// Workspace files are mutable: revalidate a reopened image instead of
+	// showing the browser's cached copy for up to five minutes.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	if err := s.files.ServeStream(w, r, host, path); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
