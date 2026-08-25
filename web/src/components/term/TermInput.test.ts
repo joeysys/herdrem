@@ -59,7 +59,7 @@ describe('TermInput', () => {
   it('exposes keyboard-accessible special keys', () => {
     const wrapper = mount(TermInput, { props: { pane } })
     expect(wrapper.get('input.cmd').attributes('aria-label')).toBe('Command to send to pane')
-    expect(wrapper.get('[aria-label="Enter"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="Ctrl modifier"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="Enter"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="Ctrl modifier"]').exists()).toBe(true)
   })
 })

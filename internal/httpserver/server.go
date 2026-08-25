@@ -28,7 +28,7 @@ const previewCapabilityTTL = 10 * time.Minute
 
 // spaCSP is the Content-Security-Policy for the Vue SPA and JSON APIs.
 // Preview responses set their own sandbox CSP and must not inherit this.
-const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' ws: wss: http: https:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: http: https:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'"
 
 type previewCapability struct {
 	host      string

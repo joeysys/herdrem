@@ -13,18 +13,31 @@ export interface RelayEntry {
 const STORAGE_KEY = 'herdrem_relays'
 const CURRENT_KEY = 'herdrem_relays_current'
 
+function persistRelays(list: RelayEntry[]) {
+  // F3: never write tokens to localStorage. Keep them on the in-memory
+  // entries for this session only.
+  const meta = list.map(({ id, name, url }) => ({ id, name, url }))
+  safeStorage.setItem(STORAGE_KEY, JSON.stringify(meta))
+}
+
 function loadRelays(): RelayEntry[] {
   try {
     const raw = safeStorage.getItem(STORAGE_KEY)
     if (!raw) return []
-    return JSON.parse(raw) as RelayEntry[]
+    const parsed = JSON.parse(raw) as RelayEntry[]
+    if (!Array.isArray(parsed)) return []
+    // One-session migration: keep any previously stored token in memory so
+    // this tab still connects, then immediately strip credentials from disk.
+    persistRelays(parsed)
+    return parsed.map((r) => ({
+      id: r.id,
+      name: r.name,
+      url: r.url,
+      token: r.token,
+    }))
   } catch {
     return []
   }
-}
-
-function saveRelays(list: RelayEntry[]) {
-  safeStorage.setItem(STORAGE_KEY, JSON.stringify(list))
 }
 
 export const useRelaysStore = defineStore('relays', () => {
@@ -32,7 +45,7 @@ export const useRelaysStore = defineStore('relays', () => {
   const currentId = ref<string>(safeStorage.getItem(CURRENT_KEY) || '')
 
   function save() {
-    saveRelays(relays.value)
+    persistRelays(relays.value)
   }
 
   function add(name: string, url: string, token?: string): RelayEntry {

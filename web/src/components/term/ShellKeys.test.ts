@@ -31,7 +31,7 @@ describe('ShellKeys', () => {
 
   it('keeps commands and ctrl controls keyboard-accessible', () => {
     const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
-    expect(wrapper.get('[aria-label="Shell commands"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="Ctrl modifier"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="Shell commands"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="Ctrl modifier"]').exists()).toBe(true)
   })
 })

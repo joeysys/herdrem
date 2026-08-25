@@ -32,7 +32,7 @@ describe('TermView', () => {
     const region = wrapper.get('[aria-label="Terminal"]')
     expect(region.attributes('aria-busy')).toBe('true')
     expect(wrapper.get('.term-loading').attributes('aria-live')).toBe('polite')
-    expect(wrapper.get('[aria-label="Back to agent list"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="Back to agent list"]').exists()).toBe(true)
   })
 
   it('emits back from the labelled back control', async () => {
