@@ -52,7 +52,7 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
         aria-label="Skills"
         title="Skills"
         @click.stop="togglePopover('skills')"
-      >⚡</button>
+      ><svg class="skill-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
       <div v-if="openPopover === 'skills'" class="qc-pop" @click.stop>
         <button
           v-for="(s, i) in skillChips"
@@ -113,6 +113,7 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
 .qc-btn:disabled { opacity: 0.35; cursor: default; }
 .qc-btn.skills.on { color: var(--amber); border-color: rgba(251,191,36,.5); background: var(--amber-soft); }
 .qc-btn.cmds.on { color: var(--blue); border-color: rgba(96,165,250,.5); background: var(--blue-soft); }
+.skill-icon { display: block; }
 
 .qc-pop {
   position: absolute;

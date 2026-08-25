@@ -58,6 +58,12 @@ function add() {
   newText.value = ''
 }
 
+// Ctrl+Enter shortcut: only add when a workspace is already selected
+function ctrlEnterAdd() {
+  if (!newBindingKey.value) return
+  add()
+}
+
 function startEdit(item: Todo) {
   editingID.value = item.id
   editText.value = item.body
@@ -98,7 +104,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </header>
 
       <form class="tm-add" @submit.prevent="add">
-        <textarea v-model="newText" rows="2" maxlength="65536" placeholder="Add a note or snippet…" aria-label="New todo"></textarea>
+        <textarea v-model="newText" rows="2" maxlength="65536" placeholder="Add a note or snippet…" aria-label="New todo" @keydown.ctrl.enter.prevent="ctrlEnterAdd"></textarea>
         <select v-model="newBindingKey" aria-label="Workspace for new todo">
           <option value="">Unbound</option>
           <option v-for="binding in workspaces" :key="bindingKey(binding)" :value="bindingKey(binding)">{{ bindingLabel(binding) }}</option>

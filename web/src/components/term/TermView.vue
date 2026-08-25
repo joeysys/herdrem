@@ -164,7 +164,13 @@ function shellSubmit() {
 
 function onShellFill(t: string) {
   shellText.value = t
-  nextTick(() => shellInputEl.value?.focus())
+  nextTick(() => {
+    const el = shellInputEl.value
+    if (!el) return
+    el.focus()
+    const len = el.value.length
+    el.setSelectionRange(len, len)
+  })
 }
 
 function focusShellInput() {

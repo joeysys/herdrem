@@ -162,6 +162,7 @@ function onArrowKey(key: string) {
       <button
         v-for="opt in approveOptions"
         :key="opt.payload + opt.index"
+        type="button"
         class="appr-btn"
         :class="[opt.tone, { sticky: opt.sticky }]"
         :title="opt.full"
@@ -173,6 +174,7 @@ function onArrowKey(key: string) {
       <div class="qp-wrap" @mouseleave="qp.hoverClose()">
         <button
           ref="qpBtnCmdsEl"
+          type="button"
           class="key qp-btn cmds"
           :class="{ on: qp.open.value === 'shellCmds' }"
           :disabled="!qp.shellCmdItems.value.length"
@@ -185,6 +187,7 @@ function onArrowKey(key: string) {
       </div>
       <button
         ref="arrowBtnEl"
+        type="button"
         class="key arrows"
         :class="{ active: showArrows }"
         aria-label="Arrow pad"
@@ -195,6 +198,7 @@ function onArrowKey(key: string) {
       <button
         v-for="k in SPECIAL_KEYS"
         :key="k.key"
+        type="button"
         class="key"
         :class="{ danger: k.danger }"
         :title="k.key"
@@ -203,6 +207,7 @@ function onArrowKey(key: string) {
         @pointerleave="stop"
       >{{ k.label }}</button>
       <button
+        type="button"
         class="key ctrl"
         :class="{ active: ctrlActive }"
         :aria-pressed="ctrlActive"
@@ -216,11 +221,12 @@ function onArrowKey(key: string) {
         <button
           v-for="(c, i) in qp.shellCmdItems.value"
           :key="'sc' + i"
+          type="button"
           class="qp-item"
           :title="c"
           @click="qpFill(c)"
         >{{ c.length > 30 ? c.slice(0, 30) + '…' : c }}</button>
-        <button class="qp-edit" @click="qpEdit">✎ edit commands</button>
+        <button type="button" class="qp-edit" @click="qpEdit">✎ edit commands</button>
       </div>
     </Teleport>
 

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
+import { useTheme } from '../../composables/useTheme'
 import RelayManager from './RelayManager.vue'
 import PreferencesSection from './PreferencesSection.vue'
 import { useBackground } from '../../composables/useBackground'
@@ -10,6 +11,8 @@ import { buildId } from 'virtual:build-id'
 
 const conn = useConnectionStore()
 const term = useTerminalStore()
+const { theme } = useTheme()
+const isModernTheme = computed(() => theme.value === 'modern-dark' || theme.value === 'modern-light')
 const props = defineProps<{ focusSection?: 'shell_cmds' | 'skills' | 'agent_cmds' | null }>()
 const emit = defineEmits<{ close: []; switched: [] }>()
 
@@ -86,7 +89,7 @@ async function reloadPage() {
           <PreferencesSection :focus-section="props.focusSection" />
         </section>
 
-        <section class="sp-section">
+        <section v-if="isModernTheme" class="sp-section">
           <h3>background</h3>
           <div class="bg-current" v-if="bgImage">
             <span class="bg-label" :title="bgName">{{ bgName }}</span>

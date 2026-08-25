@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
 import { useTunnelsStore } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
@@ -19,6 +19,7 @@ const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
 
 const text = ref('')
+const cmdInputEl = ref<HTMLInputElement | null>(null)
 const showArrows = ref(false)
 const arrowBtnEl = ref<HTMLElement | null>(null)
 const arrowPos = ref({ left: -1, right: -1, bottom: 0 })
@@ -55,6 +56,12 @@ const isBlocked = computed(() => (props.pane?.status || '').toLowerCase().includ
 const agentName = computed(() => String(props.pane?.display_agent || props.pane?.agent || ''))
 const isCursor = computed(() => isCursorAgent(agentName.value))
 
+// Disarm filled text when the approve-bar appears so a stale armed state
+// can't cause an extra Enter to be sent after the user approves.
+watch(isBlocked, (blocked) => {
+  if (blocked) filledText.value = ''
+})
+
 // --- quick popover (skills / agent cmds) ---
 const qp = useQuickPopover(() => agentName.value, 'agent')
 const qpBtnSkillsEl = ref<HTMLElement | null>(null)
@@ -79,6 +86,14 @@ function qpFill(text: string) {
   haptic()
   onFill(text)
   qp.close()
+  // Auto-focus input at end of text so Enter fills, Ctrl+Enter quick-sends
+  nextTick(() => {
+    const el = cmdInputEl.value
+    if (!el) return
+    el.focus()
+    const len = el.value.length
+    el.setSelectionRange(len, len)
+  })
 }
 function qpEdit() {
   emit('edit')
@@ -233,6 +248,16 @@ function onInput() {
   filledText.value = ''
 }
 
+// Ctrl+Enter: quick send — fill text + Enter in one shot (skips two-phase)
+function quickSend() {
+  haptic()
+  const t = text.value
+  if (!t) return
+  term.sendText(t, true)
+  text.value = ''
+  filledText.value = ''
+}
+
 function onFill(t: string) {
   text.value = t
   filledText.value = '' // chip fill doesn't send to term, so disarm
@@ -254,6 +279,7 @@ watch(
       <button
         v-for="opt in approveOptions"
         :key="opt.payload + opt.index"
+        type="button"
         class="appr-btn"
         :class="[opt.tone, { sticky: opt.sticky }]"
         :title="opt.full"
@@ -265,6 +291,7 @@ watch(
       <div class="qp-wrap" @mouseleave="qp.hoverClose()">
         <button
           ref="qpBtnSkillsEl"
+          type="button"
           class="key qp-btn skills"
           :class="{ on: qp.open.value === 'skills' }"
           :disabled="!qp.skillItems.value.length"
@@ -273,11 +300,12 @@ watch(
           @click.stop="openSkills"
           @pointerdown.prevent
           @mouseenter="hoverSkills"
-        >⚡</button>
+        ><svg class="skill-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
       </div>
       <div class="qp-wrap" @mouseleave="qp.hoverClose()">
         <button
           ref="qpBtnCmdsEl"
+          type="button"
           class="key qp-btn cmds"
           :class="{ on: qp.open.value === 'agentCmds' }"
           :disabled="!qp.agentCmdItems.value.length"
@@ -290,6 +318,7 @@ watch(
       </div>
       <button
         ref="arrowBtnEl"
+        type="button"
         class="key arrows"
         :class="{ active: showArrows }"
         aria-label="Arrow pad"
@@ -300,6 +329,7 @@ watch(
       <button
         v-for="k in SPECIAL_KEYS"
         :key="k.key"
+        type="button"
         class="key"
         :class="{ danger: k.danger }"
         :title="k.key"
@@ -308,6 +338,7 @@ watch(
         @pointerleave="stop"
       >{{ k.label }}</button>
       <button
+        type="button"
         class="key ctrl"
         :class="{ active: ctrlActive }"
         :aria-pressed="ctrlActive"
@@ -321,27 +352,30 @@ watch(
         <button
           v-for="(s, i) in qp.skillItems.value"
           :key="'sk' + i"
+          type="button"
           class="qp-item"
           :title="s.text"
           @click="qpFill(s.text)"
         >{{ s.label }}</button>
-        <button class="qp-edit" @click="qpEdit">✎ edit skills</button>
+        <button type="button" class="qp-edit" @click="qpEdit">✎ edit skills</button>
       </div>
       <div v-if="qp.open.value === 'agentCmds'" class="qp-pop" :style="{ left: qp.pos.value.left + 'px', bottom: qp.pos.value.bottom + 'px' }" @click.stop @mouseenter="qp.cancelClose()" @mouseleave="qp.hoverClose()">
         <button
           v-for="(c, i) in qp.agentCmdItems.value"
           :key="'ac' + i"
+          type="button"
           class="qp-item"
           :title="c"
           @click="qpFill(c)"
         >{{ c.length > 30 ? c.slice(0, 30) + '…' : c }}</button>
-        <button class="qp-edit" @click="qpEdit">✎ edit commands</button>
+        <button type="button" class="qp-edit" @click="qpEdit">✎ edit commands</button>
       </div>
     </Teleport>
 
     <form class="input-row" @submit.prevent="submit">
       <span class="prompt" aria-hidden="true">❯</span>
       <input
+        ref="cmdInputEl"
         v-model="text"
         class="cmd"
         type="text"
@@ -353,6 +387,7 @@ watch(
         enterkeyhint="send"
         aria-label="Command to send to pane"
         @input="onInput"
+        @keydown.ctrl.enter.prevent="quickSend"
       />
       <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed">
         {{ isArmed ? 'send' : 'fill' }}
@@ -492,6 +527,7 @@ watch(
 .qp-btn:active { transform: none; border-bottom-width: 2px; }
 .qp-btn.skills.on { color: var(--amber); border-color: rgba(251,191,36,.5); background: var(--amber-soft); }
 .qp-btn.cmds.on { color: var(--blue); border-color: rgba(96,165,250,.5); background: var(--blue-soft); }
+.skill-icon { display: block; }
 </style>
 
 <style>
