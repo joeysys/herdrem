@@ -332,6 +332,7 @@ watch(
         type="button"
         class="key"
         :class="{ danger: k.danger }"
+        :aria-label="k.key"
         :title="k.key"
         @pointerdown="pressSpecial(k)"
         @pointerup="stop"
@@ -341,6 +342,7 @@ watch(
         type="button"
         class="key ctrl"
         :class="{ active: ctrlActive }"
+        aria-label="Ctrl modifier"
         :aria-pressed="ctrlActive"
         title="Ctrl modifier (next key sent as Ctrl+key)"
         @click="toggleCtrl"
@@ -389,7 +391,7 @@ watch(
         @input="onInput"
         @keydown.ctrl.enter.prevent="quickSend"
       />
-      <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed">
+      <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed" :aria-label="isArmed ? 'Send command to pane' : 'Fill command into terminal'">
         {{ isArmed ? 'send' : 'fill' }}
       </button>
     </form>

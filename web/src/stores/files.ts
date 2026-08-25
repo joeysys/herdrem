@@ -76,6 +76,20 @@ export const useFilesStore = defineStore('files', () => {
     browserOpen.value = false
   }
 
+  /** Drop all browser/preview state — used when switching relays. */
+  function reset() {
+    browserOpen.value = false
+    host.value = 'local'
+    root.value = '/'
+    path.value = '/'
+    entries.value = []
+    loading.value = false
+    preview.value = null
+    previewMax.value = false
+    fullMax.value = false
+    scrollToFile.value = null
+  }
+
   /** Close only the preview, back to the file tree */
   function closePreview() {
     preview.value = null
@@ -184,7 +198,7 @@ export const useFilesStore = defineStore('files', () => {
     browserOpen, host, root, path, entries, loading, preview, previewMax,
     fullMax, scrollToFile,
     breadcrumbs, canGoUp,
-    openBrowser, closeBrowser, closePreview, navigate, goUp, openFile, openPath,
+    openBrowser, closeBrowser, closePreview, reset, navigate, goUp, openFile, openPath,
     setListing, setContent, setError, toggleMax, showTree, toggleFullMax,
     clearScrollTarget,
   }

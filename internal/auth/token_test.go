@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -34,5 +35,18 @@ func TestCheckSecWebSocketProtocol(t *testing.T) {
 	r.Header.Set("Sec-WebSocket-Protocol", "secret")
 	if !Check(r, "secret") {
 		t.Error("correct Sec-WebSocket-Protocol should pass")
+	}
+}
+
+func TestCheckSessionCookie(t *testing.T) {
+	r := httptest.NewRequest("GET", "/ws", nil)
+	r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret"})
+	if !Check(r, "secret") {
+		t.Error("correct session cookie should pass")
+	}
+	r = httptest.NewRequest("GET", "/ws", nil)
+	r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "wrong"})
+	if Check(r, "secret") {
+		t.Error("wrong session cookie should fail")
 	}
 }

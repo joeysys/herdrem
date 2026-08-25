@@ -15,12 +15,29 @@ export const useConnectionStore = defineStore('connection', () => {
     return `${proto}//${location.host}/ws`
   })()
   const url = ref(safeStorage.getItem('herdrem_url') || defaultUrl)
-  const token = ref(safeStorage.getItem('herdrem_token') || '')
+  // F19: keep the live relay token in memory only. A persisted copy in
+  // localStorage can be stolen by XSS; same-origin sessions use an HttpOnly
+  // cookie minted below, and the relays store still holds per-relay tokens
+  // in memory for switching.
+  safeStorage.removeItem('herdrem_token')
+  const token = ref('')
 
   let unsubStatus: (() => void) | null = null
 
   function hasFeature(f: string): boolean {
     return features.value.includes(f)
+  }
+
+  function mintSessionCookie() {
+    if (typeof window === 'undefined' || !token.value) return
+    try {
+      const httpBase = url.value.replace(/^ws/i, 'http').replace(/\/ws$/i, '')
+      if (new URL(httpBase).origin !== window.location.origin) return
+      const q = `?token=${encodeURIComponent(token.value)}`
+      void fetch(`${httpBase}/session-auth${q}`, { credentials: 'include' })
+    } catch {
+      /* ignore mint failures; WS query token still authenticates */
+    }
   }
 
   function connect(targetUrl?: string, targetToken?: string) {
@@ -30,8 +47,9 @@ export const useConnectionStore = defineStore('connection', () => {
     }
     if (targetToken !== undefined) {
       token.value = targetToken
-      safeStorage.setItem('herdrem_token', targetToken)
+      safeStorage.removeItem('herdrem_token')
     }
+    mintSessionCookie()
     // Clear agent state to prevent stale data from old relay bleeding through
     const agents = useAgentsStore()
     agents.setAgents([])

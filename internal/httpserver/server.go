@@ -2,13 +2,16 @@ package httpserver
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"herdrem/internal/auth"
@@ -21,7 +24,16 @@ import (
 )
 
 // Server is the HTTP server with WS + static + health.
-const previewAuthCookieName = "herdr_preview_auth"
+const previewCapabilityTTL = 10 * time.Minute
+
+// spaCSP is the Content-Security-Policy for the Vue SPA and JSON APIs.
+// Preview responses set their own sandbox CSP and must not inherit this.
+const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' ws: wss: http: https:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+
+type previewCapability struct {
+	host      string
+	expiresAt time.Time
+}
 
 type Server struct {
 	cfg         config.Config
@@ -35,6 +47,8 @@ type Server struct {
 	logger      *slog.Logger
 	staticFS    fs.FS // embedded or override
 	gateLimiter *gateRateLimiter
+	previewMu   sync.Mutex
+	previewCaps map[string]previewCapability
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
@@ -58,6 +72,7 @@ func New(cfg config.Config, h *hub.Hub, client herdr.Client, todo *store.Store, 
 		logger:      logger,
 		staticFS:    staticFS,
 		gateLimiter: newGateRateLimiter(),
+		previewCaps: make(map[string]previewCapability),
 	}
 }
 
@@ -75,6 +90,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/file", s.handleFile)
 	mux.HandleFunc("/preview/", s.handleFilePreview)
 	mux.HandleFunc("/preview-auth", s.handlePreviewAuth)
+	mux.HandleFunc("/session-auth", s.handleSessionAuth)
 	mux.HandleFunc("/api/tunnel-gate/", s.handleTunnelGate)
 	// Static SPA — catch-all
 	if s.staticFS != nil {
@@ -84,6 +100,9 @@ func (s *Server) Routes() http.Handler {
 		if strings.HasSuffix(r.Host, ".tunnel.local") {
 			s.handleTunnelGateByHost(w, r)
 			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/preview/") {
+			w.Header().Set("Content-Security-Policy", spaCSP)
 		}
 		mux.ServeHTTP(w, r)
 	})
@@ -133,50 +152,61 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleFilePreview serves files via a path-based URL (/preview/<path>) so that
+// handleFilePreview serves files via a path-based URL (/preview/<cap>/<path>) so that
 // relative URLs in HTML documents resolve against the file's directory rather
 // than the /file endpoint. This enables HTML previews with linked CSS/JS/images.
-// GET /preview/<path>?host=<host>&token=<token>
+// The short-lived capability keeps the relay token out of the sandboxed iframe.
 func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	if s.files == nil {
 		http.Error(w, "files not available", http.StatusServiceUnavailable)
 		return
 	}
-	if !s.checkPreviewAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	// The host is encoded into the first path segment so relative resource
-	// requests keep the remote-host context. Auth is via scoped cookie only —
-	// no token in URL to prevent sandboxed scripts from exfiltrating it (F1).
+	// The capability is in the path because an opaque-origin sandbox cannot send
+	// SameSite cookies with relative subresource requests. It is short-lived and
+	// host-bound, so leaking it cannot expose the relay token or another host.
 	path := strings.TrimPrefix(r.URL.Path, "/preview/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	parts := strings.SplitN(path, "/", 3)
+	if s.cfg.Token == "" {
+		parts = strings.SplitN(path, "/", 2)
+	}
+	if (s.cfg.Token != "" && len(parts) != 3) || (s.cfg.Token == "" && len(parts) != 2) {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
-	hostBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	capability := ""
+	hostPart := parts[0]
+	filePart := parts[1]
+	if s.cfg.Token != "" {
+		capability, hostPart, filePart = parts[0], parts[1], parts[2]
+	}
+	hostBytes, err := base64.RawURLEncoding.DecodeString(hostPart)
 	if err != nil || len(hostBytes) == 0 {
 		http.Error(w, "invalid host", http.StatusBadRequest)
 		return
 	}
 	host := string(hostBytes)
-	filePath := "/" + strings.TrimPrefix(parts[1], "/")
+	if s.cfg.Token != "" && !s.validPreviewCapability(capability, host) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	filePath := "/" + strings.TrimPrefix(filePart, "/")
 
 	// F2: Force the response into a sandboxed context even if loaded via
 	// top-level navigation. This prevents scripts in previewed HTML from
-	// executing in the Relay's origin when the cookie allows access.
+	// executing in the Relay's origin when the capability allows access.
 	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := s.files.ServeStream(w, r, host, filePath); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 }
 
-// handlePreviewAuth sets the preview auth cookie. Called via fetch from the SPA
-// (same-origin, carries Relay token in query param), NOT from the iframe src.
-// This keeps the token out of the iframe URL (F1) while enabling cookie-based
-// auth for relative resource requests.
+// handlePreviewAuth mints a short-lived, host-bound capability. Called via
+// fetch from the SPA (same-origin, carries Relay token in query param), NOT
+// from the iframe src. The capability is safe to put in the iframe path: it
+// grants only preview reads and never authenticates relay APIs.
 func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 	// b231a6ac: Do NOT reflect Origin unconditionally — that creates a
 	// reflective CORS with credentials. Same-origin fetch (the normal case)
@@ -200,25 +230,52 @@ func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// N2: Determine Secure flag from X-Forwarded-Proto so HTTP LAN access works.
-	// cloudflared sets X-Forwarded-Proto: https; direct HTTP access won't have it.
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		host = "local"
+	}
+	capability, err := s.issuePreviewCapability(host)
+	if err != nil {
+		http.Error(w, "preview capability unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"capability": capability})
+}
+
+// handleSessionAuth sets the HttpOnly relay session cookie. Same-origin SPA
+// fetch only — cross-origin is refused so the relay token cannot leak via CORS.
+func (s *Server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != "" {
+		origin := r.Header.Get("Origin")
+		if !sameOriginCheck(origin, r.Host) {
+			http.Error(w, "Cross-origin session auth not supported", http.StatusForbidden)
+			return
+		}
+	}
+	if s.cfg.Token == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !auth.Check(r, s.cfg.Token) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	secure := r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil
-	// 85a62a85: Restore SameSite=Strict when secure (HTTPS) for F2 defense in
-	// depth — blocks cross-site top-level navigation from carrying the cookie.
-	// Use Lax only for HTTP LAN where Strict would be overly restrictive and
-	// CSP sandbox remains the primary defense.
 	sameSite := http.SameSiteLaxMode
 	if secure {
 		sameSite = http.SameSiteStrictMode
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     previewAuthCookieName,
+		Name:     auth.SessionCookieName,
 		Value:    s.cfg.Token,
-		Path:     "/preview/",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
 	})
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -236,14 +293,40 @@ func sameOriginCheck(origin, host string) bool {
 	return originHost == host
 }
 
-func (s *Server) checkPreviewAuth(r *http.Request) bool {
-	if s.cfg.Token == "" {
-		return true
+func (s *Server) issuePreviewCapability(host string) (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
 	}
-	// Only accept cookie auth for /preview/ — NOT query param token.
-	// This prevents token from appearing in iframe URLs (F1).
-	cookie, err := r.Cookie(previewAuthCookieName)
-	return err == nil && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.cfg.Token)) == 1
+	token := hex.EncodeToString(raw[:])
+	now := time.Now()
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewCaps == nil {
+		s.previewCaps = make(map[string]previewCapability)
+	}
+	// ponytail: bounded expiry sweep keeps this small without a cleanup goroutine.
+	for key, capability := range s.previewCaps {
+		if !capability.expiresAt.After(now) {
+			delete(s.previewCaps, key)
+		}
+	}
+	s.previewCaps[token] = previewCapability{host: host, expiresAt: now.Add(previewCapabilityTTL)}
+	return token, nil
+}
+
+func (s *Server) validPreviewCapability(token, host string) bool {
+	now := time.Now()
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	capability, ok := s.previewCaps[token]
+	if !ok || !capability.expiresAt.After(now) || capability.host != host {
+		if ok && !capability.expiresAt.After(now) {
+			delete(s.previewCaps, token)
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {

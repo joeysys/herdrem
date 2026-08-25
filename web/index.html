@@ -19,15 +19,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Herdrem" />
     <title>Herdrem</title>
-    <script>
-      (function() {
-        try {
-          var u = new URLSearchParams(window.location.search).get('theme');
-          var t = u || localStorage.getItem('herdrem_theme') || 'dark';
-          document.documentElement.dataset.theme = t;
-        } catch (e) {}
-      })();
-    </script>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' ws: wss: http: https:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+    <script src="/theme-boot.js"></script>
   </head>
   <body>
     <div id="app"></div>

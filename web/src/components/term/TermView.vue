@@ -308,13 +308,13 @@ onUnmounted(() => {
       <!-- Mobile: collapse into dropdown menu -->
       <div class="head-actions mobile-only">
         <button class="icon-btn" :class="{ active: showMenu }" aria-label="More actions" title="More" @click.stop="showMenu = !showMenu">⋮</button>
-        <div v-if="showMenu" class="head-menu" @click.stop>
-          <button @click.stop="openFiles(); showMenu = false">🗂 Files</button>
-          <button :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false">✎ Todo</button>
-          <button :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false">⤢ Zoom</button>
-          <button :class="{ active: term.fullscreen }" @click="term.toggleFullscreen(); showMenu = false">⛶ Fullscreen</button>
-          <button @click="term.clearPaneCache(props.paneId); showMenu = false">⟳ Refresh</button>
-          <button @click="emit('openSettings'); showMenu = false">⚙ Settings</button>
+        <div v-if="showMenu" class="head-menu" role="menu" aria-label="Terminal actions" @click.stop>
+          <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false">🗂 Files</button>
+          <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false">✎ Todo</button>
+          <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false">⤢ Zoom</button>
+          <button type="button" role="menuitem" aria-label="Toggle fullscreen" :class="{ active: term.fullscreen }" @click="term.toggleFullscreen(); showMenu = false">⛶ Fullscreen</button>
+          <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false">⟳ Refresh</button>
+          <button type="button" role="menuitem" aria-label="Open settings" @click="emit('openSettings'); showMenu = false">⚙ Settings</button>
         </div>
       </div>
     </header>

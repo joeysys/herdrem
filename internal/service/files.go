@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ func NewFileService(roots func(host string) []string, logger *slog.Logger) *File
 func isLocal(host string) bool { return host == "" || host == "local" }
 
 // isSafePath reports whether path resolves (through symlinks) inside roots.
+// Prefer openWithinRoots for reads so the root check applies to the same FD.
 func isSafePath(path string, roots []string) error {
 	if path == "" {
 		return fmt.Errorf("empty path")
@@ -57,13 +59,53 @@ func isSafePath(path string, roots []string) error {
 		// Path may not exist yet for listing a missing dir; fall back to clean.
 		real = clean
 	}
+	return pathInRoots(real, roots)
+}
+
+func pathInRoots(real string, roots []string) error {
+	real = filepath.Clean(real)
 	for _, root := range roots {
 		r := filepath.Clean(root)
+		if rr, err := filepath.EvalSymlinks(r); err == nil {
+			r = rr
+		}
 		if real == r || strings.HasPrefix(real, r+string(os.PathSeparator)) {
 			return nil
 		}
 	}
-	return fmt.Errorf("path %q outside allowed roots", path)
+	return fmt.Errorf("path %q outside allowed roots", real)
+}
+
+// fdPath returns the path of the file already opened in f.
+// On Linux this uses /proc/self/fd so the check follows the FD, not a
+// later symlink swap of the original path (F22).
+func fdPath(f *os.File) (string, error) {
+	proc := "/proc/self/fd/" + strconv.Itoa(int(f.Fd()))
+	if target, err := os.Readlink(proc); err == nil && target != "" {
+		return filepath.Clean(target), nil
+	}
+	return filepath.EvalSymlinks(f.Name())
+}
+
+// openWithinRoots opens path and verifies the opened FD resolves inside roots.
+func openWithinRoots(path string, roots []string) (*os.File, error) {
+	if path == "" {
+		return nil, fmt.Errorf("empty path")
+	}
+	f, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := fdPath(f)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := pathInRoots(resolved, roots); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // guessMime determines the MIME type and whether the data is text/image.
@@ -142,14 +184,14 @@ type FileReadResult struct {
 // Read reads a file within the sandbox (local or remote).
 func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadResult, error) {
 	roots := fs.roots(host)
-	if err := isSafePath(path, roots); err != nil {
-		return nil, err
-	}
 	var data []byte
 	var err error
 	if isLocal(host) {
-		data, err = readLocal(path)
+		data, err = readLocalWithinRoots(path, roots)
 	} else {
+		if err := isSafePath(path, roots); err != nil {
+			return nil, err
+		}
 		data, err = readRemote(ctx, host, path)
 	}
 	if err != nil {
@@ -180,10 +222,10 @@ func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadRe
 // Safe-path checked. Bypasses 1 MiB maxFileRead truncation.
 func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host, path string) error {
 	roots := fs.roots(host)
-	if err := isSafePath(path, roots); err != nil {
-		return err
-	}
 	if !isLocal(host) {
+		if err := isSafePath(path, roots); err != nil {
+			return err
+		}
 		// F5: Stream the remote file straight through. The previous version
 		// ran `base64` over SSH and held both the encoded buffer and the
 		// decoded copy in memory (~2.3x file size, unbounded), so a single
@@ -193,7 +235,7 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 		return fs.serveRemoteStream(w, r, host, path)
 	}
 
-	f, err := os.Open(path)
+	f, err := openWithinRoots(path, roots)
 	if err != nil {
 		return err
 	}
@@ -361,22 +403,22 @@ func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request,
 // Does not read the file content — just a stat. Safe-path checked.
 func (fs *FileService) Exists(ctx context.Context, host, path string) bool {
 	roots := fs.roots(host)
+	if isLocal(host) {
+		f, err := openWithinRoots(path, roots)
+		if err != nil {
+			return false
+		}
+		f.Close()
+		return true
+	}
 	if err := isSafePath(path, roots); err != nil {
 		return false
-	}
-	if isLocal(host) {
-		_, err := os.Stat(path)
-		return err == nil
 	}
 	// remote: ssh test -e
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(checkCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, "test", "-e", shellQuote(path), "&&", "echo", "ok")
 	return cmd.Run() == nil
-}
-
-func readLocal(path string) ([]byte, error) {
-	return os.ReadFile(path)
 }
 
 func readRemote(ctx context.Context, host, path string) ([]byte, error) {
@@ -395,17 +437,31 @@ func readRemote(ctx context.Context, host, path string) ([]byte, error) {
 // List returns the entries of a directory within the sandbox (local or remote).
 func (fs *FileService) List(ctx context.Context, host, path string) ([]FileEntry, error) {
 	roots := fs.roots(host)
+	if isLocal(host) {
+		return listLocalWithinRoots(path, roots)
+	}
 	if err := isSafePath(path, roots); err != nil {
 		return nil, err
-	}
-	if isLocal(host) {
-		return listLocal(path)
 	}
 	return listRemote(ctx, host, path)
 }
 
-func listLocal(path string) ([]FileEntry, error) {
-	ents, err := os.ReadDir(path)
+func readLocalWithinRoots(path string, roots []string) ([]byte, error) {
+	f, err := openWithinRoots(path, roots)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+func listLocalWithinRoots(path string, roots []string) ([]FileEntry, error) {
+	f, err := openWithinRoots(path, roots)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	ents, err := f.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}

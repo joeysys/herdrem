@@ -1,11 +1,23 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { computed, ref } from 'vue'
-import { relTime, useAgentsStore } from './connection'
+import { relTime, useAgentsStore, useConnectionStore } from './connection'
 import { useTodoStore } from './todo'
+
+vi.mock('../api/ws', () => ({
+  ws: {
+    send: vi.fn(() => true),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    onMessage: vi.fn(() => () => {}),
+    onStatus: vi.fn(() => () => {}),
+    status: 'disconnected',
+  },
+}))
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  localStorage.clear()
 })
 
 describe('useAgentsStore', () => {
@@ -43,5 +55,18 @@ describe('useAgentsStore', () => {
     agents.toggleStatusFilter('todo')
     expect(agents.filtered.map((pane) => pane.pane_id)).toEqual(['%1', '%2'])
     expect(agents.counts.todo).toBe(1)
+  })
+})
+
+describe('useConnectionStore token storage', () => {
+  it('keeps the relay token in memory and scrubs localStorage copies', () => {
+    localStorage.setItem('herdrem_token', 'stale')
+    const conn = useConnectionStore()
+    expect(conn.token).toBe('')
+    expect(localStorage.getItem('herdrem_token')).toBeNull()
+
+    conn.connect('ws://relay.example', 'live-token')
+    expect(conn.token).toBe('live-token')
+    expect(localStorage.getItem('herdrem_token')).toBeNull()
   })
 })

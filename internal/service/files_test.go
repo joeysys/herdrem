@@ -92,6 +92,68 @@ func TestFileService_ReadText(t *testing.T) {
 	}
 }
 
+func TestOpenWithinRoots_SymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skip("symlink not permitted")
+	}
+	fs := NewFileService(rootsFor(dir), nil)
+	if _, err := fs.Read(context.Background(), "", link); err == nil {
+		t.Fatal("symlink escaping root should be rejected on the opened FD")
+	}
+	if fs.Exists(context.Background(), "", link) {
+		t.Fatal("Exists should reject symlink escape")
+	}
+}
+
+func TestReadUsesOpenedFDAfterPathSwap(t *testing.T) {
+	dir := t.TempDir()
+	inside := filepath.Join(dir, "ok.txt")
+	if err := os.WriteFile(inside, []byte("inside-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openWithinRoots(inside, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(inside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, inside); err != nil {
+		t.Skip("symlink not permitted")
+	}
+
+	buf := make([]byte, 32)
+	n, err := f.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buf[:n]); got != "inside-data" {
+		t.Fatalf("read after swap = %q, want original FD content", got)
+	}
+
+	resolved, err := fdPath(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pathInRoots(resolved, []string{dir}); err != nil {
+		t.Fatalf("opened FD should still resolve inside root, got %q: %v", resolved, err)
+	}
+}
+
 func TestFileService_ReadRejectsOutside(t *testing.T) {
 	dir := t.TempDir()
 	fs := NewFileService(rootsFor(dir), nil)

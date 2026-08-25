@@ -1,9 +1,13 @@
 // useRelayConnection.ts — switch/connect relays with proper state cleanup.
+import { watch } from 'vue'
 import { useConnectionStore, useAgentsStore } from '../stores/connection'
 import { useRelaysStore, type RelayEntry } from '../stores/relays'
 import { useTerminalStore } from '../stores/terminal'
 import { useTunnelsStore } from '../stores/tunnels'
 import { useTodoStore } from '../stores/todo'
+import { usePreviewsStore } from '../stores/preview'
+import { useFilesStore } from '../stores/files'
+import { safeStorage } from '../utils/storage'
 
 export function useRelayConnection() {
   const conn = useConnectionStore()
@@ -12,14 +16,26 @@ export function useRelayConnection() {
   const term = useTerminalStore()
   const tunnels = useTunnelsStore()
   const todo = useTodoStore()
+  const previews = usePreviewsStore()
+  const files = useFilesStore()
 
   /** connect to a relay entry, clearing pane/agent/tunnel state to avoid cross-talk */
   function connectRelay(r: RelayEntry) {
     relays.setCurrent(r.id)
     term.closePane()
+    term.clearAllCache()
     agents.setAgents([])
+    agents.resetSnapshotKey()
     todo.setAll([])
     tunnels.clear()
+    files.reset()
+    previews.clear()
+    const stop = watch(() => conn.status, (s) => {
+      if (s === 'connected') {
+        tunnels.fetchTunnels()
+        stop()
+      }
+    })
     conn.connect(r.url, r.token ?? '')
   }
 
@@ -34,6 +50,7 @@ export function useRelayConnection() {
    * one is set, otherwise default to same-origin /ws.
    */
   function boot() {
+    safeStorage.removeItem('herdrem_token')
     const cur = relays.current()
     if (cur) {
       conn.connect(cur.url, cur.token ?? '')

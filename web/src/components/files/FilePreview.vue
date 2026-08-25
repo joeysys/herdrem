@@ -74,31 +74,31 @@ const rawFileUrl = computed(() => {
 
 // previewUrl uses a path-based URL (/preview/<path>) so that relative URLs in
 // HTML documents (CSS, JS, images) resolve against the file's directory.
-// No token in URL — auth is via /preview/ scoped cookie set by previewAuthUrl.
+// The URL carries only a short-lived preview capability, never the relay token.
+const previewCapability = ref('')
 const previewUrl = computed(() => {
   if (!preview.value?.path) return ''
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
   const encodedHost = btoa(files.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   const encodedPath = preview.value.path.split('/').map(encodeURIComponent).join('/')
-  return `${base}/preview/${encodedHost}/${encodedPath}`
+  const capability = previewCapability.value ? `${previewCapability.value}/` : ''
+  return `${base}/preview/${capability}${encodedHost}/${encodedPath}`
 })
 
-// previewAuthUrl sets the /preview/ auth cookie via a same-origin fetch.
-// Called before loading the iframe so the cookie is available for relative
-// resource requests, without putting the token in the iframe URL (F1).
+// previewAuthUrl mints a scoped preview capability via a same-origin fetch.
+// The relay token stays in this parent-page request, never in the iframe URL.
 const previewAuthUrl = computed(() => {
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
-  const token = conn.token ? `?token=${encodeURIComponent(conn.token)}` : ''
-  return `${base}/preview-auth${token}`
+  const params = new URLSearchParams({ host: files.host || 'local' })
+  if (conn.token) params.set('token', conn.token)
+  return `${base}/preview-auth?${params.toString()}`
 })
 
-// Set preview auth cookie before loading iframe (F1: keep token out of iframe URL).
-// N1: Gate iframe rendering on authReady to avoid race with cookie landing.
-// N2: Show visible error if cookie prefetch fails (cross-origin, HTTP LAN, dev mode).
-// F4: The /preview/ cookie can only be set same-origin — the relay refuses
-// cross-origin preview auth rather than reflecting credentialed CORS. Detect
-// that up front so we can explain it instead of loading an iframe that is
-// guaranteed to 401.
+// Mint the preview capability before loading the iframe (F1).
+// N1: Gate iframe rendering on authReady to avoid a capability race.
+// N2: Show visible error if capability minting fails.
+// F4: Preview auth can only be minted same-origin — the relay refuses
+// cross-origin requests rather than reflecting credentialed CORS.
 const relayOrigin = computed(() => {
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
   try {
@@ -112,19 +112,18 @@ const isCrossOrigin = computed(() => {
   return !!o && typeof window !== 'undefined' && o !== window.location.origin
 })
 
-// Set preview auth cookie before loading iframe (F1: keep token out of iframe URL).
-// N1: Gate iframe rendering on authReady to avoid race with cookie landing.
 // F4: authReady stays false on any failure, so the iframe is never rendered
 // into a known-broken state; the message below explains what to do instead.
-watch(previewUrl, async (url) => {
+watch([() => preview.value?.path, () => files.host, () => conn.url], async ([path]) => {
   authReady.value = false
   authError.value = ''
-  if (!url) return
+  previewCapability.value = ''
+  if (!path) return
 
   if (isCrossOrigin.value) {
     authError.value =
       `Rendered HTML preview needs a same-origin Relay. This Web App is on ${window.location.origin} ` +
-      `but the Relay is ${relayOrigin.value}, so the preview cookie cannot be set. ` +
+      `but the Relay is ${relayOrigin.value}, so the preview capability cannot be minted. ` +
       'Open the Relay URL directly to use rendered preview — or use the "source" toggle above, which works anywhere.'
     return
   }
@@ -133,9 +132,17 @@ watch(previewUrl, async (url) => {
     const resp = await fetch(previewAuthUrl.value, { credentials: 'include' })
     if (!resp.ok && resp.status !== 204) {
       authError.value =
-        `Preview auth failed (${resp.status}). The Relay rejected the preview cookie request. ` +
+        `Preview auth failed (${resp.status}). The Relay rejected the capability request. ` +
         'Use the "source" toggle above to view the file contents.'
       return
+    }
+    if (resp.status !== 204) {
+      const body = (await resp.json()) as { capability?: unknown }
+      if (typeof body.capability !== 'string' || !body.capability) {
+        authError.value = 'Preview auth returned no capability. Use the "source" toggle above to view the file contents.'
+        return
+      }
+      previewCapability.value = body.capability
     }
   } catch {
     authError.value =
