@@ -19,16 +19,16 @@ func kindOverrideKey(host, paneID string) string {
 
 func (s *Service) handleFileRead(ctx context.Context, conn *websocket.Conn, data []byte) {
 	if s.files == nil {
-		s.sendErrorKey(ctx, conn, "file_read", "files not available", "unavailable")
+		s.sendErrorKeyReq(ctx, conn, "file_read", "files not available", "unavailable", "")
 		return
 	}
 	var msg protocol.FileRead
 	if err := json.Unmarshal(data, &msg); err != nil {
-		s.sendErrorKey(ctx, conn, "file_read", "invalid message: "+err.Error(), "invalid")
+		s.sendErrorKeyReq(ctx, conn, "file_read", "invalid message: "+err.Error(), "invalid", "")
 		return
 	}
 	if msg.Path == "" {
-		s.sendErrorKey(ctx, conn, "file_read", "missing path", "invalid")
+		s.sendErrorKeyReq(ctx, conn, "file_read", "missing path", "invalid", msg.ReqID)
 		return
 	}
 	res, err := s.files.Read(ctx, msg.Host, msg.Path)
@@ -37,24 +37,24 @@ func (s *Service) handleFileRead(ctx context.Context, conn *websocket.Conn, data
 		if isPermErr(err) {
 			code = "permission"
 		}
-		s.sendErrorKey(ctx, conn, "file_read", err.Error(), code)
+		s.sendErrorKeyReq(ctx, conn, "file_read", err.Error(), code, msg.ReqID)
 		return
 	}
-	s.sendJSON(ctx, conn, res.toProtocol())
+	s.sendJSON(ctx, conn, res.toProtocol(msg.ReqID))
 }
 
 func (s *Service) handleFileList(ctx context.Context, conn *websocket.Conn, data []byte) {
 	if s.files == nil {
-		s.sendErrorKey(ctx, conn, "file_list", "files not available", "unavailable")
+		s.sendErrorKeyReq(ctx, conn, "file_list", "files not available", "unavailable", "")
 		return
 	}
 	var msg protocol.FileList
 	if err := json.Unmarshal(data, &msg); err != nil {
-		s.sendErrorKey(ctx, conn, "file_list", "invalid message: "+err.Error(), "invalid")
+		s.sendErrorKeyReq(ctx, conn, "file_list", "invalid message: "+err.Error(), "invalid", "")
 		return
 	}
 	if msg.Path == "" {
-		s.sendErrorKey(ctx, conn, "file_list", "missing path", "invalid")
+		s.sendErrorKeyReq(ctx, conn, "file_list", "missing path", "invalid", msg.ReqID)
 		return
 	}
 	entries, err := s.files.List(ctx, msg.Host, msg.Path)
@@ -63,13 +63,14 @@ func (s *Service) handleFileList(ctx context.Context, conn *websocket.Conn, data
 		if isPermErr(err) {
 			code = "permission"
 		}
-		s.sendErrorKey(ctx, conn, "file_list", err.Error(), code)
+		s.sendErrorKeyReq(ctx, conn, "file_list", err.Error(), code, msg.ReqID)
 		return
 	}
 	s.sendJSON(ctx, conn, protocol.FileListing{
 		Type:    "file_listing",
 		Path:    msg.Path,
 		Entries: entries,
+		ReqID:   msg.ReqID,
 	})
 }
 

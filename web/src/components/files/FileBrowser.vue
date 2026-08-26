@@ -1,18 +1,39 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
-import FilePreview from './FilePreview.vue'
+import { safeStorage } from '../../utils/storage'
 import type { FileEntry } from '../../api/types'
 
 const files = useFilesStore()
 const term = useTerminalStore()
 const { haptic } = useHaptic()
-const emit = defineEmits<{ close: [] }>()
+defineProps<{ docked: boolean }>()
+const emit = defineEmits<{ close: []; previewOpened: []; dock: [] }>()
 
 const listEl = ref<HTMLElement | null>(null)
 const filterEl = ref<HTMLInputElement | null>(null)
+const crumbsEl = ref<HTMLElement | null>(null)
+const menuEntry = ref<FileEntry | null>(null)
+const menuPos = ref({ left: 0, top: 0 })
+const menuNotice = ref('')
+const STAR_KEY = 'herdrem_file_stars'
+const starred = ref(loadStars())
+
+// Scroll the breadcrumb path bar to the right so the current directory (the
+// last segment) is visible rather than the leading segments. Double rAF after
+// nextTick ensures layout is complete before reading scrollWidth.
+async function scrollCrumbsToRight() {
+  await nextTick()
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const el = crumbsEl.value
+      if (el) el.scrollLeft = el.scrollWidth
+    })
+  })
+}
+watch(() => files.path, scrollCrumbsToRight, { immediate: true })
 
 // --- sort / filter state ---
 type SortKey = 'name' | 'mtime'
@@ -23,7 +44,18 @@ const filterText = ref('')
 // Auto-focus the filter input when the browser opens
 onMounted(() => {
   nextTick(() => filterEl.value?.focus())
+  document.addEventListener('click', closeEntryMenu)
 })
+onUnmounted(() => document.removeEventListener('click', closeEntryMenu))
+
+function loadStars(): Set<string> {
+  try {
+    const saved = JSON.parse(safeStorage.getItem(STAR_KEY) || '[]')
+    return new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
 
 function toggleSort(key: SortKey) {
   if (sortKey.value === key) sortDesc.value = !sortDesc.value
@@ -37,6 +69,8 @@ const sortedEntries = computed(() => {
   const dirs = list.filter(e => e.type === 'dir')
   const others = list.filter(e => e.type !== 'dir')
   const cmp = (a: FileEntry, b: FileEntry) => {
+    const starOrder = Number(isStarred(b)) - Number(isStarred(a))
+    if (starOrder) return starOrder
     let r: number
     if (sortKey.value === 'mtime') r = (a.mtime || 0) - (b.mtime || 0)
     else r = a.name.localeCompare(b.name)
@@ -75,7 +109,7 @@ function icon(type: string): string {
 }
 
 function getRelativePath(e: FileEntry): string {
-  const full = (files.path.replace(/\/+$/, '') + '/' + e.name).replace(/\/+/g, '/')
+  const full = fullEntryPath(e)
   const root = files.root.replace(/\/+$/, '')
   let rel = full
   if (full === root) {
@@ -87,6 +121,25 @@ function getRelativePath(e: FileEntry): string {
     rel += '/'
   }
   return rel
+}
+
+function fullEntryPath(e: FileEntry): string {
+  return (files.path.replace(/\/+$/, '') + '/' + e.name).replace(/\/+/g, '/')
+}
+
+function starKey(e: FileEntry): string {
+  return `${files.host}:${fullEntryPath(e)}`
+}
+
+function isStarred(e: FileEntry): boolean {
+  return starred.value.has(starKey(e))
+}
+
+function toggleStar(e: FileEntry) {
+  const key = starKey(e)
+  if (starred.value.has(key)) starred.value.delete(key)
+  else starred.value.add(key)
+  safeStorage.setItem(STAR_KEY, JSON.stringify([...starred.value]))
 }
 
 function fillEntryPath(e: FileEntry) {
@@ -111,7 +164,41 @@ function fillCurrentDir() {
 function onEntry(name: string, type: string) {
   const full = (files.path.replace(/\/+$/, '') + '/' + name).replace(/\/+/g, '/')
   if (type === 'dir') files.navigate(full)
-  else files.openFile(full)
+  else {
+    files.openFile(full)
+    emit('previewOpened')
+  }
+}
+
+function toggleEntryMenu(e: MouseEvent, entry: FileEntry) {
+  haptic()
+  const button = e.currentTarget as HTMLElement
+  if (menuEntry.value && starKey(menuEntry.value) === starKey(entry)) {
+    closeEntryMenu()
+    return
+  }
+  const rect = button.getBoundingClientRect()
+  menuPos.value = {
+    left: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 198)),
+    top: rect.bottom + 160 < window.innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - 164),
+  }
+  menuEntry.value = entry
+  menuNotice.value = ''
+}
+
+function closeEntryMenu() {
+  menuEntry.value = null
+  menuNotice.value = ''
+}
+
+async function copyEntryPath(e: FileEntry) {
+  try {
+    if (!navigator.clipboard) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(getRelativePath(e))
+    menuNotice.value = 'copied'
+  } catch {
+    menuNotice.value = 'copy failed'
+  }
 }
 
 // Scroll to the target file in the tree when scrollToFile is set
@@ -143,27 +230,32 @@ watch(() => files.entries, async () => {
 </script>
 
 <template>
-  <div class="fb-drawer" :class="{ full: files.fullMax, 'tree-only': !files.preview }">
+  <aside class="fb-drawer" :class="{ docked }" aria-label="File browser">
     <header class="fb-head">
       <button class="fb-btn" aria-label="Close" title="Close" @click="emit('close')">×</button>
-      <nav class="fb-crumbs" aria-label="Breadcrumb">
+      <nav ref="crumbsEl" class="fb-crumbs" aria-label="Directory path">
         <button class="crumb root" @click="files.navigate(files.root)">⌂</button>
         <template v-for="c in files.breadcrumbs" :key="c.path">
           <span class="sep">/</span>
           <button class="crumb" @click="files.navigate(c.path)">{{ c.name }}</button>
         </template>
-        <button
-          class="crumb-fill"
-          :title="`Fill folder path (${currentDirRelPath}) into terminal input`"
-          aria-label="Fill folder path into terminal"
-          @click="fillCurrentDir"
-        >↙ term</button>
       </nav>
+      <button
+        class="fb-btn crumb-fill"
+        :title="`Fill folder path (${currentDirRelPath}) into terminal input`"
+        aria-label="Fill folder path into terminal"
+        @click="fillCurrentDir"
+      >↙</button>
+      <button
+        class="fb-btn fb-dock"
+        :aria-label="docked ? 'Float file browser' : 'Dock file browser'"
+        :title="docked ? 'Float panel' : 'Dock to terminal'"
+        @click="emit('dock')"
+      >{{ docked ? '◧' : '▥' }}</button>
     </header>
 
     <div class="fb-body">
-      <!-- File tree: side-by-side in fullMax, floating overlay otherwise -->
-      <div v-if="!files.previewMax || !files.preview" class="fb-list" :class="{ overlay: !files.fullMax }" ref="listEl">
+      <div ref="listEl" class="fb-list">
         <!-- Sort / filter toolbar (inside the tree) -->
         <div class="fb-toolbar">
           <input
@@ -216,28 +308,50 @@ watch(() => files.entries, async () => {
           >
             <span class="fe-icon" aria-hidden="true">{{ icon(e.type) }}</span>
             <span class="fe-name">{{ e.name }}</span>
+            <span v-if="isStarred(e)" class="fe-star" aria-label="Starred">★</span>
             <span class="fe-mtime">{{ fmtMtime(e.mtime) }}</span>
             <span class="fe-size">{{ e.type === 'file' ? fmtSize(e.size) : '' }}</span>
             <button
-              class="fe-fill-btn"
-              :title="`Fill ${e.type === 'dir' ? 'folder' : 'file'} path into terminal (${getRelativePath(e)})`"
-              aria-label="Fill path into terminal"
-              @click.stop="fillEntryPath(e)"
-            >↙ term</button>
+              class="fe-more-btn"
+              title="More actions"
+              :aria-label="`More actions for ${e.name}`"
+              aria-haspopup="menu"
+              :aria-expanded="menuEntry?.name === e.name"
+              @click.stop="toggleEntryMenu($event, e)"
+            >⋯</button>
           </div>
         </template>
       </div>
 
-      <FilePreview v-if="files.preview" />
     </div>
-  </div>
+  </aside>
+
+  <Teleport to="body">
+    <div v-if="menuEntry" class="fe-menu-backdrop" @click="closeEntryMenu">
+      <div class="fe-menu" :style="{ left: `${menuPos.left}px`, top: `${menuPos.top}px` }" role="menu" @click.stop>
+        <button class="fe-menu-item" role="menuitem" @click="onEntry(menuEntry.name, menuEntry.type); closeEntryMenu()">
+          <span aria-hidden="true">{{ menuEntry.type === 'dir' ? '📁' : '↗' }}</span>{{ menuEntry.type === 'dir' ? 'open folder' : 'preview' }}
+        </button>
+        <button class="fe-menu-item" role="menuitem" @click="fillEntryPath(menuEntry); closeEntryMenu()">
+          <span aria-hidden="true">↙</span>fill Terminal
+        </button>
+        <button class="fe-menu-item" role="menuitem" @click="toggleStar(menuEntry); closeEntryMenu()">
+          <span aria-hidden="true">★</span>{{ isStarred(menuEntry) ? 'unstar' : 'star' }}
+        </button>
+        <button class="fe-menu-item" role="menuitem" @click="copyEntryPath(menuEntry)">
+          <span aria-hidden="true">⧉</span>copy path
+        </button>
+        <span v-if="menuNotice" class="fe-menu-note" role="status">{{ menuNotice }}</span>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
 .fb-drawer {
   position: absolute;
   top: 0; right: 0; bottom: 0;
-  width: min(960px, 100%);
+  width: min(360px, 100%);
   z-index: 70;
   display: flex; flex-direction: column;
   background: var(--bg);
@@ -245,18 +359,15 @@ watch(() => files.entries, async () => {
   box-shadow: -8px 0 24px rgba(0,0,0,0.3);
   animation: drawer-in 0.2s ease both;
 }
-/* Split mode: cap at split-term width (subtract 340px sidebar) */
-.main.split > .fb-drawer:not(.full) {
-  width: min(960px, calc(100% - 340px));
+.fb-drawer.docked {
+  position: relative;
+  width: 360px;
+  flex: 0 0 360px;
+  z-index: 20;
+  box-shadow: none;
+  animation: none;
 }
-/* Full mode: cover entire .main regardless of split */
-.fb-drawer.full {
-  width: 100%;
-  z-index: 80;
-}
-/* Tree-only mode: shrink to tree width, use fade instead of slide to avoid
-   the visual "page shifts left" effect when only the narrow tree appears. */
-.fb-drawer.tree-only {
+.fb-drawer:not(.docked) {
   width: 360px;
   animation: drawer-fade 0.2s ease both;
 }
@@ -280,19 +391,22 @@ watch(() => files.entries, async () => {
 .fb-btn:hover:not(:disabled) { color: var(--text); }
 .fb-btn:disabled { opacity: 0.35; }
 .fb-crumbs {
-  flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 0;
-  font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden;
+  flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: nowrap; gap: 0;
+  font-family: var(--font-mono); font-size: var(--text-xs); overflow-x: auto; overflow-y: hidden;
+  white-space: nowrap; overscroll-behavior-x: contain; scrollbar-width: none;
 }
+.fb-crumbs::-webkit-scrollbar { display: none; }
+.fb-spacer { flex: 1; }
 .crumb {
   color: var(--blue); background: none; border: none;
   padding: 4px 6px; border-radius: 3px;
-  display: inline-flex; align-items: center; line-height: 1;
+  display: inline-flex; align-items: center; line-height: 1; flex-shrink: 0;
 }
 .crumb:hover { background: var(--blue-soft); }
 .crumb.root { color: var(--muted); }
-.sep { color: var(--faint); display: inline-flex; align-items: center; padding: 0 1px; line-height: 1; }
+.sep { color: var(--faint); display: inline-flex; align-items: center; padding: 0 1px; line-height: 1; flex-shrink: 0; }
 
-.fb-body { flex: 1; min-height: 0; display: flex; position: relative; }
+.fb-body { flex: 1; min-height: 0; display: flex; }
 
 /* Sort / filter toolbar — sticky inside the scrollable tree */
 .fb-toolbar {
@@ -320,39 +434,29 @@ watch(() => files.entries, async () => {
 .fb-sort:hover { color: var(--text); }
 .fb-sort.active { color: var(--blue); border-color: var(--blue); }
 
-/* File tree: default side-by-side (fullMax mode) */
 .fb-list {
-  flex: 0 0 360px;
+  flex: 1;
+  min-width: 0;
   overflow-y: auto;
   padding: 8px;
-  border-right: 1px solid var(--border);
   background: var(--bg);
 }
 
-/* Non-fullMax mode: tree floats as overlay, content keeps full width */
-.fb-list.overlay {
-  position: absolute;
-  top: 0; left: 0; bottom: 0;
-  z-index: 5;
-  width: 360px;
-  max-width: 100%;
-  box-shadow: 4px 0 12px rgba(0,0,0,0.25);
-}
-
-/* Mobile: overlay takes full width */
 @media (max-width: 639px) {
-  .fb-drawer.tree-only {
+  .fb-drawer,
+  .fb-drawer.docked,
+  .fb-drawer:not(.docked) {
+    position: absolute;
     width: 100%;
+    flex: none;
+    z-index: 70;
   }
-  .fb-list,
-  .fb-list.overlay {
+  .fb-list {
     flex: 1;
     width: 100%;
     max-width: 100%;
   }
-  .fb-list.overlay {
-    z-index: 10;
-  }
+  .fb-dock { display: none; }
 }
 
 .fb-loading, .fb-empty { text-align: center; color: var(--faint); padding: 40px; font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -372,25 +476,18 @@ watch(() => files.entries, async () => {
 .fe-name { flex: 1; min-width: 0; color: var(--text); font-size: var(--text-sm); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fe-mtime { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--faint); flex-shrink: 0; }
 .fe-size { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--faint); flex-shrink: 0; }
+.fe-star { color: var(--amber); flex-shrink: 0; }
 
 .crumb-fill {
   margin-left: 6px;
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
   color: var(--blue);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 6px;
-  cursor: pointer;
-  line-height: 1;
 }
-.crumb-fill:hover {
-  background: var(--surface-3, var(--surface));
+.fb-btn.crumb-fill:hover {
+  color: var(--blue);
   border-color: var(--blue);
 }
 
-.fe-fill-btn {
+.fe-more-btn {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -407,10 +504,28 @@ watch(() => files.entries, async () => {
   opacity: 0.65;
   transition: opacity 0.15s, color 0.15s, border-color 0.15s;
 }
-.fb-entry:hover .fe-fill-btn,
-.fe-fill-btn:hover {
+.fb-entry:hover .fe-more-btn,
+.fe-more-btn:hover {
   opacity: 1;
   color: var(--blue);
   border-color: var(--blue);
+}
+
+.fe-menu-backdrop { position: fixed; inset: 0; z-index: 95; background: transparent; }
+.fe-menu {
+  position: fixed; min-width: 190px; padding: 5px;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2); animation: view-in 0.14s ease both;
+}
+.fe-menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 11px;
+  color: var(--text-dim); background: transparent; border: 0; border-radius: var(--radius);
+  font-size: var(--text-sm); text-align: left;
+}
+.fe-menu-item:hover { color: var(--text); background: var(--surface-3); }
+.fe-menu-item span { width: 16px; text-align: center; color: var(--muted); }
+.fe-menu-note { display: block; padding: 4px 11px; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
+@media (max-width: 639px) {
+  .fe-menu { left: 12px !important; right: 12px; top: auto !important; bottom: 12px; }
 }
 </style>

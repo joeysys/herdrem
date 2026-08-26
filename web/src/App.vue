@@ -22,6 +22,7 @@ import ContextMenu from './components/agent/ContextMenu.vue'
 import SpaceView from './components/space/SpaceView.vue'
 import SettingsPanel from './components/settings/SettingsPanel.vue'
 import FileBrowser from './components/files/FileBrowser.vue'
+import FilePreview from './components/files/FilePreview.vue'
 import TunnelPanel from './components/tunnel/TunnelPanel.vue'
 import TodoManager from './components/todo/TodoManager.vue'
 
@@ -57,6 +58,10 @@ const ctxPane = ref<Pane | null>(null)
 const ctxOpen = ref(false)
 const ctxPos = ref({ x: 0, y: 0 })
 const showNewPane = ref(false)
+const directoryOverPreview = ref(false)
+watch([() => files.browserOpen, () => files.preview], ([browser, preview]) => {
+  if (!browser || !preview) directoryOverPreview.value = false
+})
 // Pane created via pane_create that is waiting for the poller to learn it
 // (so hostFor can route read_pane correctly) before we auto-open it (F8).
 let pendingOpenPane: string | null = null
@@ -100,13 +105,13 @@ function closeTopLayer(): boolean {
   if (showNewPane.value) { showNewPane.value = false; return true }
   if (ctxOpen.value) { ctxOpen.value = false; return true }
   if (showRelaySwitch.value) { showRelaySwitch.value = false; return true }
+  if (files.preview && files.browserOpen && directoryOverPreview.value) {
+    files.closeBrowser()
+    directoryOverPreview.value = false
+    return true
+  }
   if (files.preview) {
-    const fullPreview = files.previewMax
     files.closePreview()
-    // Full-screen preview (tree hidden) is a self-contained overlay opened
-    // from the terminal: one back returns straight to the terminal, no
-    // directory-tree detour. With the tree visible it's browser mode — keep it.
-    if (fullPreview) files.closeBrowser()
     return true
   }
   if (files.browserOpen) {
@@ -274,6 +279,11 @@ watch(isDesktop, (val) => {
 })
 
 const splitMode = computed(() => isDesktop.value && view.value === 'term' && activePaneId.value !== '')
+// The docked/float state is the user's choice, toggled only via the directory
+// header dock button. directoryOverPreview controls layering (mobile z-index,
+// breadcrumb visibility) but never forces float — opening the directory from
+// the preview must not change the user's dock preference.
+const directoryDocked = computed(() => isDesktop.value && files.browserDocked)
 
 const currentRelayName = computed(() => {
   const r = relays.current()
@@ -305,22 +315,18 @@ function goBackFromTerm() {
   history.back()
 }
 
-// Desktop: clicking outside an open panel (file browser, todo, settings) closes it.
-// Exception: when file preview is open, clicking a .term-file-link switches the
-// preview instead of closing the browser.
+// Desktop: a floating directory closes when the user clicks outside it.
 function onTermAreaClick(e: MouseEvent) {
   if (!isDesktop.value) return
   const target = e.target as HTMLElement
   // Ignore clicks on the term header (buttons, title, status badge)
   if (target.closest('.term-head')) return
 
-  // File browser
-  if (files.browserOpen) {
+  // File browser (float closes on outside click; docked shares the row)
+  if (files.browserOpen && !directoryDocked.value) {
     if (target.closest('.fb-drawer')) return // inside panel
-    // Exception: clicking a file link in the terminal switches preview
-    if (files.preview && target.closest('a.term-file-link')) return
-    // Everything else outside the panel closes it
     files.closeBrowser()
+    directoryOverPreview.value = false
     return
   }
 }
@@ -443,6 +449,39 @@ function onOpenFile(p: { path: string; line: number | null; paneId: string }) {
   files.openPath(full, pane?.cwd || '/', pane?.host || 'local', p.line)
 }
 
+// Opening the directory from the preview (path node or toggle) raises it above
+// the preview on every layout: on mobile via the .directory-over-preview class
+// (drops the preview z-index), on desktop by rendering the browser as a float
+// overlay (z-index 80 > preview 75) through the docked-prop override below.
+function onOpenPreviewDirectory(p: { path: string; root: string; host: string }) {
+  files.openBrowserAt(p.path, p.root, p.host)
+  directoryOverPreview.value = true
+}
+
+function onTogglePreviewDirectory(p: { path: string; root: string; host: string }) {
+  if (files.browserOpen) {
+    files.closeBrowser()
+    directoryOverPreview.value = false
+    return
+  }
+  onOpenPreviewDirectory(p)
+}
+
+// A float (non-docked) directory is a temporary picker: once a file is opened
+// from it, dismiss it so the preview is visible instead of hiding behind the
+// overlay. A docked directory stays (it shares the row with the preview).
+function onPreviewOpenedFromBrowser() {
+  if (isDesktop.value && !directoryDocked.value) {
+    files.closeBrowser()
+  }
+  directoryOverPreview.value = false
+}
+
+// Dock button: the only place that toggles the user's docked/float preference.
+function onBrowserDock() {
+  files.toggleDocked()
+}
+
 onMounted(() => {
   unsubMsg = ws.onMessage((msg: ServerMessage) => {
     handleMessage(msg)
@@ -466,9 +505,10 @@ onMounted(() => {
       }
     }
     if (msg.type === 'prefs' || msg.type === 'prefs_updated') prefs.setPrefs(msg.prefs)
-    if (msg.type === 'file_listing') files.setListing(msg.path, msg.entries || [])
+    if (msg.type === 'file_listing') files.setListing(msg.path, msg.entries || [], msg.req_id)
     if (msg.type === 'file_content') files.setContent(msg)
-    if (msg.type === 'error' && (msg.op === 'file_read' || msg.op === 'file_list')) files.setError()
+    if (msg.type === 'error' && msg.op === 'file_list') files.setListError(msg.req_id)
+    if (msg.type === 'error' && msg.op === 'file_read') files.setPreviewError(msg.req_id)
     if (msg.type === 'error' && msg.op === 'mark_pane_read') {
       notify.push({ message: `failed to mark idle: ${msg.message}`, type: 'info' })
     }
@@ -605,7 +645,7 @@ onUnmounted(() => {
       <button class="top-icon" aria-label="Settings" title="Settings" @click="showSettings = true">⚙</button>
     </header>
 
-    <main class="main" :class="{ split: splitMode }">
+    <main class="main" :class="{ split: splitMode, 'files-docked': files.browserOpen && directoryDocked, 'has-file-preview': files.preview, 'directory-over-preview': directoryOverPreview }">
       <div v-if="view === 'term' && !splitMode" class="term-wrap" @click="onTermAreaClick">
         <TermView
           :pane-id="activePaneId"
@@ -712,7 +752,21 @@ onUnmounted(() => {
           @open-settings="showSettings = true"
         />
       </div>
-      <FileBrowser v-if="files.browserOpen" @close="files.closeBrowser()" />
+      <FileBrowser
+        v-if="files.browserOpen"
+        :docked="directoryDocked"
+        @close="files.closeBrowser(); directoryOverPreview = false"
+        @preview-opened="onPreviewOpenedFromBrowser"
+        @dock="onBrowserDock"
+      />
+      <div v-if="files.preview" class="file-preview-panel">
+        <FilePreview
+          :directory-open="files.browserOpen"
+          @close="files.closePreview()"
+          @open-directory="onOpenPreviewDirectory"
+          @toggle-directory="onTogglePreviewDirectory"
+        />
+      </div>
     </main>
 
     <ContextMenu :pane="ctxPane" :open="ctxOpen && !!ctxPane" :pos="ctxPos" @close="ctxOpen = false" @action="onCtxAction" v-if="ctxPane" />
@@ -771,6 +825,31 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+.file-preview-panel {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 75;
+  width: min(960px, 100%);
+  display: flex;
+  min-width: 0;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+}
+/* A float (non-docked) directory overlays the preview on every layout, so it
+   must sit above the preview panel. :deep() is required because FileBrowser is
+   a fragment component (two roots: <aside> + <Teleport>), so Vue does NOT add
+   this file's scope attribute to its root <aside> — a plain scoped selector
+   would silently fail to match. The desktop docked layout instead shares the
+   row (file-preview-panel right: 360px). */
+.main.has-file-preview > :deep(.fb-drawer:not(.docked)) { top: 49px; z-index: 80; }
+@media (min-width: 900px) {
+  .main.split .file-preview-panel { left: 340px; width: auto; }
+  .main.files-docked .file-preview-panel { right: 360px; }
+}
+@media (max-width: 899px) {
+  .main.directory-over-preview .file-preview-panel { z-index: 65; }
 }
 .relay-chip {
   display: inline-flex; align-items: center; gap: 6px;

@@ -192,8 +192,8 @@ func TestFileService_List(t *testing.T) {
 
 func TestToProtocol(t *testing.T) {
 	r := &FileReadResult{Path: "/x/a.go", Content: "c", Encoding: "utf-8", MimeType: "text/plain", IsText: true, Size: 1}
-	pc := r.toProtocol()
-	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || pc.Size != 1 {
+	pc := r.toProtocol("req-1")
+	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || pc.Size != 1 || pc.ReqID != "req-1" {
 		t.Errorf("pc = %+v", pc)
 	}
 }

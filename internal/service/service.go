@@ -411,6 +411,17 @@ func (s *Service) sendErrorKey(ctx context.Context, conn *websocket.Conn, op, me
 	})
 }
 
+// sendErrorKeyReq is sendErrorKey with a request id echo for request-scoped ops.
+func (s *Service) sendErrorKeyReq(ctx context.Context, conn *websocket.Conn, op, message, key, reqID string) {
+	s.sendJSON(ctx, conn, protocol.ErrorMsg{
+		Type:    "error",
+		Op:      op,
+		Message: message,
+		Key:     key,
+		ReqID:   reqID,
+	})
+}
+
 // SendPrefsSnapshot pushes the current prefs to a single connection (used on connect).
 func (s *Service) SendPrefsSnapshot(ctx context.Context, conn *websocket.Conn) {
 	if s.prefsStore == nil {

@@ -11,6 +11,12 @@ const files = useFilesStore()
 const conn = useConnectionStore()
 const term = useTerminalStore()
 const { haptic } = useHaptic()
+const props = defineProps<{ directoryOpen: boolean }>()
+const emit = defineEmits<{
+  close: []
+  openDirectory: [payload: { path: string; root: string; host: string }]
+  toggleDirectory: [payload: { path: string; root: string; host: string }]
+}>()
 
 const preview = computed(() => files.preview)
 const isMd = computed(() => /\.(md|markdown)$/i.test(preview.value?.path || ''))
@@ -19,7 +25,7 @@ const isSvg = computed(() => /\.svg$/i.test(preview.value?.path || ''))
 
 const fileName = computed(() => {
   const full = preview.value?.path || ''
-  const root = files.root
+  const root = preview.value?.root || '/'
   // Show relative path if under root, otherwise just basename
   const rel = full.startsWith(root + '/') ? full.slice(root.length + 1) : full
   return rel.split('/').pop() || ''
@@ -27,11 +33,37 @@ const fileName = computed(() => {
 
 const previewRelPath = computed(() => {
   const full = preview.value?.path || ''
-  const root = files.root.replace(/\/+$/, '')
+  const root = (preview.value?.root || '/').replace(/\/+$/, '')
   if (!full) return ''
   if (full.startsWith(root + '/')) return full.slice(root.length + 1)
   return full
 })
+
+const previewDirs = computed(() => {
+  const p = preview.value
+  if (!p) return []
+  const root = p.root.replace(/\/+$/, '') || '/'
+  const parent = p.path.replace(/\/[^/]*$/, '') || '/'
+  const rel = parent === root ? '' : parent.startsWith(root + '/') ? parent.slice(root.length + 1) : parent
+  const dirs = [{ name: '⌂', path: root }]
+  let current = root === '/' ? '' : root
+  for (const name of rel.split('/').filter(Boolean)) {
+    current += `/${name}`
+    dirs.push({ name, path: current })
+  }
+  return dirs
+})
+
+function openDirectory(path: string) {
+  const p = preview.value
+  if (p) emit('openDirectory', { path, root: p.root, host: p.host })
+}
+
+function toggleDirectory() {
+  const p = preview.value
+  const dir = previewDirs.value[previewDirs.value.length - 1]
+  if (p && dir) emit('toggleDirectory', { path: dir.path, root: p.root, host: p.host })
+}
 
 function fillPreviewPath() {
   haptic()
@@ -68,7 +100,7 @@ const rawFileUrl = computed(() => {
   if (!preview.value?.path) return ''
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
   const token = conn.token ? `&token=${encodeURIComponent(conn.token)}` : ''
-  const host = files.host !== 'local' ? `&host=${encodeURIComponent(files.host)}` : ''
+  const host = preview.value.host !== 'local' ? `&host=${encodeURIComponent(preview.value.host)}` : ''
   return `${base}/file?path=${encodeURIComponent(preview.value.path)}${host}${token}`
 })
 
@@ -79,7 +111,7 @@ const previewCapability = ref('')
 const previewUrl = computed(() => {
   if (!preview.value?.path) return ''
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
-  const encodedHost = btoa(files.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const encodedHost = btoa(preview.value.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   const encodedPath = preview.value.path.split('/').map(encodeURIComponent).join('/')
   const capability = previewCapability.value ? `${previewCapability.value}/` : ''
   return `${base}/preview/${capability}${encodedHost}/${encodedPath}`
@@ -89,7 +121,7 @@ const previewUrl = computed(() => {
 // The relay token stays in this parent-page request, never in the iframe URL.
 const previewAuthUrl = computed(() => {
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
-  const params = new URLSearchParams({ host: files.host || 'local' })
+  const params = new URLSearchParams({ host: preview.value?.host || 'local' })
   if (conn.token) params.set('token', conn.token)
   return `${base}/preview-auth?${params.toString()}`
 })
@@ -114,7 +146,7 @@ const isCrossOrigin = computed(() => {
 
 // F4: authReady stays false on any failure, so the iframe is never rendered
 // into a known-broken state; the message below explains what to do instead.
-watch([() => preview.value?.path, () => files.host, () => conn.url], async ([path]) => {
+watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], async ([path]) => {
   authReady.value = false
   authError.value = ''
   previewCapability.value = ''
@@ -167,6 +199,29 @@ function reloadIframe() {
 }
 
 const scroller = ref<HTMLElement | null>(null)
+const pathNav = ref<HTMLElement | null>(null)
+
+// Scroll the preview path bar to the right so the file name (the last element)
+// is visible rather than the leading directory segments. Double rAF after
+// nextTick ensures the browser has finished layout (scrollWidth is stable)
+// before we set scrollLeft — a single rAF can fire mid-layout and leave the
+// bar a few characters short of the right edge.
+async function scrollPathToRight() {
+  await nextTick()
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const el = pathNav.value
+      if (el) el.scrollLeft = el.scrollWidth
+    })
+  })
+}
+// Re-scroll when the preview file changes or when the directory panel
+// opens/closes (docked), since that changes the preview panel width.
+watch(
+  [() => preview.value?.path, () => props.directoryOpen],
+  scrollPathToRight,
+  { immediate: true },
+)
 
 async function scrollToTarget() {
   const p = preview.value
@@ -196,16 +251,24 @@ function fmtSize(bytes: number): string {
 </script>
 
 <template>
-  <div v-if="preview" class="file-preview" :class="{ max: files.previewMax }">
+  <section v-if="preview" class="file-preview" aria-label="File preview">
     <header class="fp-head">
-      <span class="fp-name" :title="preview.path">{{ fileName }}</span>
+      <button class="fp-btn fp-close" aria-label="Close preview" title="Close preview" @click="emit('close')">×</button>
+      <nav ref="pathNav" class="fp-path" aria-label="Preview path">
+        <template v-for="(dir, index) in previewDirs" :key="dir.path">
+          <span v-if="index" class="fp-sep">/</span>
+          <button class="fp-dir" :title="`Open ${dir.path} in file browser`" @click="openDirectory(dir.path)">{{ dir.name }}</button>
+        </template>
+        <span class="fp-sep">/</span>
+        <span class="fp-name" :title="preview.path">{{ fileName }}</span>
+      </nav>
       <span class="fp-size mono">{{ fmtSize(preview.size) }}</span>
       <button
         class="fp-btn fill-path"
         :title="`Fill file path (${previewRelPath}) into terminal input`"
         aria-label="Fill file path into terminal"
         @click="fillPreviewPath"
-      >↙ term</button>
+      >↙</button>
 
       <!-- Viewport controls for HTML preview -->
       <template v-if="isHtml && htmlRendered">
@@ -250,25 +313,14 @@ function fmtSize(bytes: number): string {
       >{{ htmlRendered ? 'source' : 'preview' }}</button>
 
       <button
-        class="fp-btn"
-        :aria-label="files.previewMax ? 'Show file tree' : 'Hide file tree'"
-        :title="files.previewMax ? 'Show file tree' : 'Hide file tree'"
-        @click="files.previewMax ? files.showTree() : files.toggleMax()"
-      >☰</button>
-      <button
-        v-if="!files.fullMax"
-        class="fp-btn"
-        aria-label="Maximize"
-        title="Maximize (full width)"
-        @click="files.toggleFullMax()"
-      >⤢</button>
-      <button
-        v-else
-        class="fp-btn"
-        aria-label="Restore"
-        title="Restore width"
-        @click="files.toggleFullMax()"
-      >⤡</button>
+        class="fp-btn directory-toggle"
+        :class="{ active: props.directoryOpen }"
+        :aria-label="props.directoryOpen ? 'Hide file browser' : 'Show file browser'"
+        :title="props.directoryOpen ? 'Hide directory' : 'Show directory'"
+        :aria-pressed="props.directoryOpen"
+        @click="toggleDirectory"
+      >🗂</button>
+
     </header>
 
     <div ref="scroller" class="fp-scroll" :class="{ 'fp-html-wrap': isHtml && htmlRendered }">
@@ -319,7 +371,7 @@ function fmtSize(bytes: number): string {
         </tbody>
       </table>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
@@ -327,9 +379,14 @@ function fmtSize(bytes: number): string {
 .file-preview { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .fp-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
 }
-.fp-name { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fp-path { flex: 1; min-width: 0; display: flex; align-items: center; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; scrollbar-width: none; }
+.fp-path::-webkit-scrollbar { display: none; }
+.fp-name { flex-shrink: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text); }
+.fp-dir { flex-shrink: 0; color: var(--blue); background: none; border: 0; padding: 3px 4px; border-radius: 3px; }
+.fp-dir:hover { background: var(--blue-soft); }
+.fp-sep { flex-shrink: 0; color: var(--faint); }
 .fp-size { font-size: var(--text-2xs); color: var(--faint); flex-shrink: 0; }
 .fp-btn {
   font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted);
@@ -337,6 +394,8 @@ function fmtSize(bytes: number): string {
   padding: 4px 9px; flex-shrink: 0;
 }
 .fp-btn:hover { color: var(--text); }
+.fp-btn.directory-toggle.active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
+.fp-close { width: 30px; height: 30px; padding: 0; font-size: var(--text-md); }
 .fp-btn.mode { color: var(--blue); }
 .fp-btn.vp-btn { padding: 4px 7px; }
 .fp-btn.vp-btn.active { color: var(--blue); border-color: var(--blue); background: var(--surface-3, var(--surface)); }

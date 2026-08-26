@@ -81,6 +81,7 @@ type FileContent struct {
 	IsText   bool   `json:"is_text,omitempty"`
 	IsImage  bool   `json:"is_image,omitempty"`
 	Size     int    `json:"size,omitempty"`
+	ReqID    string `json:"req_id,omitempty"` // echoed from the matching FileRead
 }
 
 // FileListing carries directory listing.
@@ -88,6 +89,7 @@ type FileListing struct {
 	Type    string      `json:"type"`
 	Path    string      `json:"path"`
 	Entries interface{} `json:"entries"`
+	ReqID   string      `json:"req_id,omitempty"` // echoed from the matching FileList
 }
 
 // ErrorMsg is a generic error response.
@@ -96,6 +98,7 @@ type ErrorMsg struct {
 	Op      string `json:"op"`
 	Message string `json:"message"`
 	Key     string `json:"key,omitempty"`
+	ReqID   string `json:"req_id,omitempty"` // echoed when the failing request carried one
 }
 
 // --- C→S (client-to-server) ---
@@ -195,16 +198,18 @@ type MarkPaneRead struct {
 
 // FileRead requests file content.
 type FileRead struct {
-	Type string `json:"type"`
-	Path string `json:"path"`
-	Host string `json:"host,omitempty"`
+	Type  string `json:"type"`
+	Path  string `json:"path"`
+	Host  string `json:"host,omitempty"`
+	ReqID string `json:"req_id,omitempty"` // client-generated; echoed in the response
 }
 
 // FileList requests directory listing.
 type FileList struct {
-	Type string `json:"type"`
-	Path string `json:"path"`
-	Host string `json:"host,omitempty"`
+	Type  string `json:"type"`
+	Path  string `json:"path"`
+	Host  string `json:"host,omitempty"`
+	ReqID string `json:"req_id,omitempty"` // client-generated; echoed in the response
 }
 
 // AgentEvent is an optional push event.

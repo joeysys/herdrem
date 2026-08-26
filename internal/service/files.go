@@ -518,7 +518,7 @@ func shellQuote(s string) string {
 }
 
 // toProtocol converts a FileReadResult to the wire FileContent message.
-func (r *FileReadResult) toProtocol() protocol.FileContent {
+func (r *FileReadResult) toProtocol(reqID string) protocol.FileContent {
 	return protocol.FileContent{
 		Type:     "file_content",
 		Path:     r.Path,
@@ -528,5 +528,6 @@ func (r *FileReadResult) toProtocol() protocol.FileContent {
 		IsText:   r.IsText,
 		IsImage:  r.IsImage,
 		Size:     r.Size,
+		ReqID:    reqID,
 	}
 }

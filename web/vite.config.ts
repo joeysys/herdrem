@@ -1,6 +1,5 @@
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import legacy from '@vitejs/plugin-legacy'
 import { VitePWA } from 'vite-plugin-pwa'
 import { execSync } from 'node:child_process'
 
@@ -32,10 +31,6 @@ function buildIdPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     vue(),
-    legacy({
-      targets: ['chrome >= 50', 'safari >= 10', 'firefox >= 50', 'edge >= 15'],
-      renderLegacyChunks: true,
-    }),
     buildIdPlugin(),
     VitePWA({
       registerType: 'autoUpdate',

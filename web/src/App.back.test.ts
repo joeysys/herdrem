@@ -4,17 +4,15 @@
 // Bug: on mobile, pressing system back from the directory tree exits the
 // file browser (or worse) instead of climbing one directory level.
 //
-// Desired behavior from the tree screen (tree visible = browsing mode):
-//   1. preview open with the tree visible → close the preview, keep the tree
+// Desired behavior from the directory screen:
+//   1. preview open → close the preview, keep the directory
 //   2. in a subdirectory → go up one level, keep the tree
 //   3. at sandbox root   → close the file browser (back to terminal)
 //   4. no overlays left  → keep closing terminal / layers, never exit the app
 //
-// Desired behavior for a full-screen preview (tree hidden), however it was
-// opened — terminal file link OR a file tapped in the tree:
-//   the preview is a self-contained overlay — one back closes preview AND
-//   tree together, returning straight to the terminal (no directory-tree
-//   detour); the next back closes the terminal.
+// A preview opened from a terminal path is independent of the directory:
+// one back closes the preview and returns directly to the terminal. A preview
+// opened from the directory returns to that directory instead.
 //
 // Back must never exit the app without the "press again to exit" toast:
 // every view-level back re-pushes a matching history entry so the next back
@@ -25,6 +23,7 @@ import { mount } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { nextTick } from 'vue'
 import App from './App.vue'
+import { useLayoutMode } from './composables/useLayoutMode'
 import { useAgentsStore } from './stores/connection'
 import { useFilesStore } from './stores/files'
 
@@ -152,8 +151,8 @@ describe('system back from the directory tree (mobile browser)', () => {
   })
 })
 
-describe('system back from a full-screen preview (mobile browser)', () => {
-  it('opened from the tree: closes preview AND tree together, straight back to the terminal', async () => {
+describe('system back from the independent preview (mobile browser)', () => {
+  it('opened from the tree: closes preview and returns to the tree', async () => {
     setActivePinia(createPinia())
     const wrapper = mount(App)
     await flush()
@@ -162,24 +161,28 @@ describe('system back from a full-screen preview (mobile browser)', () => {
     await openTreeAtSubdir(wrapper)
 
     const files = useFilesStore()
-    // tap a file in the tree — preview opens full-screen (tree hidden)
+    // tap a file in the tree — preview opens as the top mobile screen
     files.openFile('/root/proj/sub/a.txt', null)
     await flush()
     expect(files.preview).not.toBeNull()
-    expect(files.previewMax).toBe(true)
+    expect(wrapper.find('.fp-path').exists()).toBe(true)
+    // directory breadcrumbs are always shown now (path bar is always visible)
+    expect(wrapper.find('.fb-crumbs').exists()).toBe(true)
 
-    // one back: preview + tree close together, terminal stays (no tree detour)
+    // one back: preview closes, directory remains where it was
     history.back()
     await flush()
     expect(files.preview).toBeNull()
-    expect(files.browserOpen).toBe(false)
+    expect(files.browserOpen).toBe(true)
+    expect(files.path).toBe('/root/proj/sub')
+    expect(wrapper.find('.fb-crumbs').exists()).toBe(true)
     expect(wrapper.find('.term-wrap').exists()).toBe(true)
 
-    // next back closes the terminal
+    // next back follows directory navigation, not terminal navigation
     history.back()
     await flush()
-    expect(wrapper.find('.term-wrap').exists()).toBe(false)
-    expect(wrapper.find('.agent-card').exists()).toBe(true)
+    expect(files.path).toBe('/root/proj')
+    expect(wrapper.find('.term-wrap').exists()).toBe(true)
 
     wrapper.unmount()
     await flush()
@@ -196,9 +199,9 @@ describe('system back from a full-screen preview (mobile browser)', () => {
     files.openPath('/root/proj/src/a.txt', '/root/proj', 'local', null)
     await flush()
     expect(files.preview).not.toBeNull()
-    expect(files.browserOpen).toBe(true)
+    expect(files.browserOpen).toBe(false)
 
-    // one back: preview AND tree close together, terminal stays
+    // one back: preview closes; no unrelated directory screen appears
     history.back()
     await flush()
     expect(files.preview).toBeNull()
@@ -215,7 +218,7 @@ describe('system back from a full-screen preview (mobile browser)', () => {
     await flush()
   })
 
-  it('after revealing the tree, back returns to the tree instead of the terminal', async () => {
+  it('opens a path node over the preview without closing it', async () => {
     setActivePinia(createPinia())
     const wrapper = mount(App)
     await flush()
@@ -223,14 +226,68 @@ describe('system back from a full-screen preview (mobile browser)', () => {
     await enterTerminal(wrapper)
     const files = useFilesStore()
     files.openPath('/root/proj/sub/a.txt', '/root/proj', 'local', null)
-    files.showTree() // user taps ☰ to reveal the tree → browsing mode
     await flush()
+
+    await wrapper.find('.fp-dir').trigger('click')
+    await flush()
+    expect(files.preview?.path).toBe('/root/proj/sub/a.txt')
+    expect(files.browserOpen).toBe(true)
+    expect(files.path).toBe('/root/proj')
+    expect(wrapper.find('.fb-crumbs').exists()).toBe(true)
+    expect(wrapper.find('.term-wrap').exists()).toBe(true)
 
     history.back()
     await flush()
-    expect(files.preview).toBeNull()
+    expect(files.browserOpen).toBe(false)
+    expect(files.preview?.path).toBe('/root/proj/sub/a.txt')
+
+    wrapper.unmount()
+    await flush()
+  })
+
+  it('opens the containing directory from the preview toggle', async () => {
+    setActivePinia(createPinia())
+    const wrapper = mount(App)
+    await flush()
+
+    await enterTerminal(wrapper)
+    const files = useFilesStore()
+    files.openPath('/root/proj/sub/a.txt', '/root/proj', 'local', null)
+    await flush()
+
+    const toggle = wrapper.find('.directory-toggle')
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+    await toggle.trigger('click')
+    await flush()
+
     expect(files.browserOpen).toBe(true)
-    expect(wrapper.find('.term-wrap').exists()).toBe(true)
+    expect(files.path).toBe('/root/proj/sub')
+    expect(files.preview?.path).toBe('/root/proj/sub/a.txt')
+
+    wrapper.unmount()
+    await flush()
+  })
+
+  it('raises a newly opened file preview above the mobile directory', async () => {
+    setActivePinia(createPinia())
+    const wrapper = mount(App)
+    await flush()
+
+    await enterTerminal(wrapper)
+    const files = useFilesStore()
+    files.openPath('/root/proj/sub/a.txt', '/root/proj', 'local', null)
+    await flush()
+    await wrapper.find('.fp-dir').trigger('click')
+    files.setListing('/root/proj', [{ name: 'b.txt', type: 'file', size: 1 }])
+    await flush()
+
+    expect(wrapper.find('.main').classes()).toContain('directory-over-preview')
+    await wrapper.find('.fb-entry.file').trigger('click')
+    await flush()
+
+    expect(files.preview?.path).toBe('/root/proj/b.txt')
+    expect(files.browserOpen).toBe(true)
+    expect(wrapper.find('.main').classes()).not.toContain('directory-over-preview')
 
     wrapper.unmount()
     await flush()
@@ -359,7 +416,7 @@ describe('system back from the directory tree (installed PWA)', () => {
   })
 })
 
-describe('system back from a full-screen preview (installed PWA)', () => {
+describe('system back from the independent preview (installed PWA)', () => {
   it('returns straight to the terminal, skipping the directory tree', async () => {
     ;(window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(true)
     setActivePinia(createPinia())
@@ -372,7 +429,7 @@ describe('system back from a full-screen preview (installed PWA)', () => {
     await flush()
     expect(files.preview).not.toBeNull()
 
-    // one back: preview AND tree close together, terminal stays
+    // one back: preview closes and terminal stays
     history.back()
     await flush()
     expect(files.preview).toBeNull()
@@ -387,6 +444,33 @@ describe('system back from a full-screen preview (installed PWA)', () => {
 
     wrapper.unmount()
     ;(window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(false)
+    await flush()
+  })
+})
+
+describe('desktop file panel placement', () => {
+  it('keeps the selected float mode when a preview path opens the directory', async () => {
+    setActivePinia(createPinia())
+    const wrapper = mount(App)
+    await flush()
+    await enterTerminal(wrapper)
+
+    const layout = useLayoutMode()
+    layout.setPreference('desktop')
+    const files = useFilesStore()
+    files.browserDocked = false
+    files.openPath('/root/proj/sub/a.txt', '/root/proj', 'local', null)
+    await flush()
+
+    await wrapper.find('.fp-dir').trigger('click')
+    await flush()
+    expect(files.browserOpen).toBe(true)
+    expect(files.browserDocked).toBe(false)
+    expect(wrapper.find('.fb-drawer').classes()).not.toContain('docked')
+    expect(files.preview?.path).toBe('/root/proj/sub/a.txt')
+
+    wrapper.unmount()
+    layout.setPreference('auto')
     await flush()
   })
 })

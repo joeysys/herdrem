@@ -5,6 +5,9 @@ import type { FileRead, FileList, FileEntry, FileContent } from '../api/types'
 
 export interface PreviewState {
   path: string
+  root: string
+  host: string
+  reqId: string
   content: string
   encoding: 'utf-8' | 'base64'
   mimeType: string
@@ -15,17 +18,20 @@ export interface PreviewState {
   error?: string
 }
 
-// files store drives the file browser + preview for the active pane.
+// Directory and preview state live together because they share the file protocol,
+// but opening either UI never mutates or opens the other one. Each panel tracks
+// its own request id so a stale response (different host or an earlier request
+// to the same path) cannot overwrite the current content.
 export const useFilesStore = defineStore('files', () => {
   const browserOpen = ref(false)
+  const browserDocked = ref(true)
   const host = ref('local')
   const root = ref('/') // sandbox root (pane cwd)
   const path = ref('/') // current dir
   const entries = ref<FileEntry[]>([])
   const loading = ref(false)
+  const listReqId = ref('') // request id of the in-flight file_list
   const preview = ref<PreviewState | null>(null)
-  const previewMax = ref(false) // hide file tree, show only preview
-  const fullMax = ref(false) // full-screen overlay, no width limit
   const scrollToFile = ref<string | null>(null) // file name to scroll to in tree
 
   const breadcrumbs = computed(() => {
@@ -55,21 +61,23 @@ export const useFilesStore = defineStore('files', () => {
     host.value = newHost
 
     if (validPathUnderRoot) {
-      // Preserve previously visited directory path & open preview file (if any)
+      // Preserve the previously visited directory.
       browserOpen.value = true
       list(path.value)
-      if (preview.value?.path) {
-        openFile(preview.value.path, preview.value.targetLine)
-      }
     } else {
-      // Initial open or root/host changed — reset to root directory
+      // Initial open or root/host changed — reset only the directory.
       path.value = newRoot
-      preview.value = null
-      previewMax.value = false
-      fullMax.value = false
       browserOpen.value = true
       list(path.value)
     }
+  }
+
+  function openBrowserAt(dirPath: string, paneRoot: string, paneHost: string) {
+    root.value = paneRoot || '/'
+    host.value = paneHost || 'local'
+    path.value = dirPath || root.value
+    browserOpen.value = true
+    list(path.value)
   }
 
   function closeBrowser() {
@@ -84,27 +92,30 @@ export const useFilesStore = defineStore('files', () => {
     path.value = '/'
     entries.value = []
     loading.value = false
+    listReqId.value = ''
     preview.value = null
-    previewMax.value = false
-    fullMax.value = false
     scrollToFile.value = null
   }
 
   /** Close only the preview, back to the file tree */
   function closePreview() {
     preview.value = null
-    previewMax.value = false
+  }
+
+  function newReqId(): string {
+    return crypto.randomUUID()
   }
 
   function list(dirPath: string) {
     loading.value = true
-    const msg: FileList = { type: 'file_list', path: dirPath, host: host.value }
+    const reqId = newReqId()
+    listReqId.value = reqId
+    const msg: FileList = { type: 'file_list', path: dirPath, host: host.value, req_id: reqId }
     ws.send(msg)
   }
 
   function navigate(dirPath: string) {
     path.value = dirPath
-    preview.value = null
     list(dirPath)
   }
 
@@ -117,30 +128,24 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   function openFile(filePath: string, line: number | null = null) {
-    const msg: FileRead = { type: 'file_read', path: filePath, host: host.value }
+    openPath(filePath, root.value, host.value, line)
+  }
+
+  /** Open a preview directly, without changing or opening the directory panel. */
+  function openPath(filePath: string, paneRoot: string, paneHost: string, line: number | null) {
+    const previewHost = paneHost || 'local'
+    const reqId = newReqId()
+    const msg: FileRead = { type: 'file_read', path: filePath, host: previewHost, req_id: reqId }
     ws.send(msg)
     preview.value = {
-      path: filePath, content: '', encoding: 'utf-8', mimeType: '',
+      path: filePath, root: paneRoot || '/', host: previewHost, reqId,
+      content: '', encoding: 'utf-8', mimeType: '',
       isText: true, isImage: false, size: 0, targetLine: line,
     }
-    // In full mode, keep the tree visible side-by-side; otherwise hide it
-    if (!fullMax.value) previewMax.value = true
   }
 
-  /** open a file directly in preview (from a terminal link), entering its dir */
-  function openPath(filePath: string, paneCwd: string, paneHost: string, line: number | null) {
-    root.value = paneCwd || '/'
-    host.value = paneHost || 'local'
-    const dir = filePath.replace(/\/[^/]*$/, '') || '/'
-    path.value = dir
-    browserOpen.value = true
-    previewMax.value = true // hide tree by default when opening from term
-    fullMax.value = false
-    list(dir)
-    openFile(filePath, line)
-  }
-
-  function setListing(listPath: string, list: FileEntry[]) {
+  function setListing(listPath: string, list: FileEntry[], reqId?: string) {
+    if (reqId && listReqId.value && reqId !== listReqId.value) return
     if (normalize(listPath) !== normalize(path.value)) return
     entries.value = [...list].sort((a, b) => {
       if (a.type === 'dir' && b.type !== 'dir') return -1
@@ -152,6 +157,7 @@ export const useFilesStore = defineStore('files', () => {
 
   function setContent(msg: FileContent) {
     if (!preview.value || preview.value.path !== msg.path) return
+    if (msg.req_id && preview.value.reqId && msg.req_id !== preview.value.reqId) return
     preview.value = {
       ...preview.value,
       content: msg.content,
@@ -163,31 +169,21 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
-  function setError() {
+  /** A file_list request failed — only the directory panel cares. */
+  function setListError(reqId?: string) {
+    if (reqId && listReqId.value && reqId !== listReqId.value) return
     loading.value = false
-    if (preview.value) {
-      preview.value = { ...preview.value, content: '', error: 'file not found or unreadable' }
-    }
   }
 
-  function toggleMax() {
-    previewMax.value = !previewMax.value
+  /** A file_read request failed — only the preview panel cares. */
+  function setPreviewError(reqId?: string) {
+    if (!preview.value) return
+    if (reqId && preview.value.reqId && reqId !== preview.value.reqId) return
+    preview.value = { ...preview.value, content: '', error: 'file not found or unreadable' }
   }
 
-  /** Show the file tree (restore from preview-only mode), scrolling to current file */
-  function showTree() {
-    previewMax.value = false
-    // Set scroll target so the tree can scroll to the file after listing
-    if (preview.value) {
-      const fileName = preview.value.path.split('/').pop() || ''
-      scrollToFile.value = fileName
-      // Re-list the current dir to ensure entries are loaded
-      list(path.value)
-    }
-  }
-
-  function toggleFullMax() {
-    fullMax.value = !fullMax.value
+  function toggleDocked() {
+    browserDocked.value = !browserDocked.value
   }
 
   function clearScrollTarget() {
@@ -195,11 +191,11 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   return {
-    browserOpen, host, root, path, entries, loading, preview, previewMax,
-    fullMax, scrollToFile,
+    browserOpen, browserDocked, host, root, path, entries, loading, listReqId, preview,
+    scrollToFile,
     breadcrumbs, canGoUp,
-    openBrowser, closeBrowser, closePreview, reset, navigate, goUp, openFile, openPath,
-    setListing, setContent, setError, toggleMax, showTree, toggleFullMax,
+    openBrowser, openBrowserAt, closeBrowser, closePreview, reset, navigate, goUp, openFile, openPath,
+    setListing, setContent, setListError, setPreviewError, toggleDocked,
     clearScrollTarget,
   }
 })

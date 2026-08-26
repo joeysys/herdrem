@@ -88,6 +88,7 @@ export interface ErrorMsg {
   op: string
   message: string
   key?: string
+  req_id?: string
 }
 
 export interface FileContent {
@@ -99,6 +100,7 @@ export interface FileContent {
   is_text?: boolean
   is_image?: boolean
   size?: number
+  req_id?: string
 }
 
 export interface FileEntry {
@@ -112,6 +114,7 @@ export interface FileListing {
   type: 'file_listing'
   path: string
   entries: FileEntry[]
+  req_id?: string
 }
 
 export interface Skill {
@@ -199,12 +202,14 @@ export interface FileRead {
   type: 'file_read'
   path: string
   host?: string
+  req_id?: string
 }
 
 export interface FileList {
   type: 'file_list'
   path: string
   host?: string
+  req_id?: string
 }
 
 export interface PrefsGet {
