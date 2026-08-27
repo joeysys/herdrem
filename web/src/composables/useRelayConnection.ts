@@ -7,6 +7,7 @@ import { useTunnelsStore } from '../stores/tunnels'
 import { useTodoStore } from '../stores/todo'
 import { usePreviewsStore } from '../stores/preview'
 import { useFilesStore } from '../stores/files'
+import { useDiffStore } from '../stores/diff'
 import { safeStorage } from '../utils/storage'
 
 export function useRelayConnection() {
@@ -18,6 +19,7 @@ export function useRelayConnection() {
   const todo = useTodoStore()
   const previews = usePreviewsStore()
   const files = useFilesStore()
+  const diff = useDiffStore()
 
   /** connect to a relay entry, clearing pane/agent/tunnel state to avoid cross-talk */
   function connectRelay(r: RelayEntry) {
@@ -29,6 +31,7 @@ export function useRelayConnection() {
     todo.setAll([])
     tunnels.clear()
     files.reset()
+    diff.reset()
     previews.clear()
     const stop = watch(() => conn.status, (s) => {
       if (s === 'connected') {

@@ -193,3 +193,71 @@ func isPermErr(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "outside allowed roots") || strings.Contains(msg, "permission denied")
 }
+
+func (s *Service) handleGitDiff(ctx context.Context, conn *websocket.Conn, data []byte) {
+	if s.files == nil {
+		s.sendErrorKeyReq(ctx, conn, "git_diff", "files not available", "unavailable", "")
+		return
+	}
+	var msg protocol.GitDiff
+	if err := json.Unmarshal(data, &msg); err != nil {
+		s.sendErrorKeyReq(ctx, conn, "git_diff", "invalid message: "+err.Error(), "invalid", "")
+		return
+	}
+	if msg.Cwd == "" {
+		s.sendErrorKeyReq(ctx, conn, "git_diff", "missing cwd", "invalid", msg.ReqID)
+		return
+	}
+	mode := GitDiffMode(msg.Mode)
+	if mode == "" {
+		mode = GitDiffUnstaged
+	}
+	content, err := s.files.GitDiff(ctx, msg.Host, msg.Cwd, mode, msg.Commit)
+	if err != nil {
+		code := "git_error"
+		if isPermErr(err) {
+			code = "permission"
+		}
+		s.sendErrorKeyReq(ctx, conn, "git_diff", err.Error(), code, msg.ReqID)
+		return
+	}
+	s.sendJSON(ctx, conn, protocol.GitDiffContent{
+		Type:    "git_diff_content",
+		Cwd:     msg.Cwd,
+		Mode:    string(mode),
+		Commit:  msg.Commit,
+		Content: content,
+		ReqID:   msg.ReqID,
+	})
+}
+
+func (s *Service) handleGitLog(ctx context.Context, conn *websocket.Conn, data []byte) {
+	if s.files == nil {
+		s.sendErrorKeyReq(ctx, conn, "git_log", "files not available", "unavailable", "")
+		return
+	}
+	var msg protocol.GitLog
+	if err := json.Unmarshal(data, &msg); err != nil {
+		s.sendErrorKeyReq(ctx, conn, "git_log", "invalid message: "+err.Error(), "invalid", "")
+		return
+	}
+	if msg.Cwd == "" {
+		s.sendErrorKeyReq(ctx, conn, "git_log", "missing cwd", "invalid", msg.ReqID)
+		return
+	}
+	commits, err := s.files.GitLog(ctx, msg.Host, msg.Cwd)
+	if err != nil {
+		code := "git_error"
+		if isPermErr(err) {
+			code = "permission"
+		}
+		s.sendErrorKeyReq(ctx, conn, "git_log", err.Error(), code, msg.ReqID)
+		return
+	}
+	s.sendJSON(ctx, conn, protocol.GitLogResult{
+		Type:    "git_log_result",
+		Cwd:     msg.Cwd,
+		Commits: commits,
+		ReqID:   msg.ReqID,
+	})
+}

@@ -378,7 +378,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Features: []string{
 			"agents", "terminal", "todo", "blocked", "multi-host",
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
-			"pane-create", "incremental-terminal",
+			"pane-create", "incremental-terminal", "git-diff",
 		},
 	}
 	if data, err := json.Marshal(hello); err == nil {

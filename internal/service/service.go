@@ -155,6 +155,10 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleFileRead(ctx, conn, data)
 	case "file_list":
 		s.handleFileList(ctx, conn, data)
+	case "git_diff":
+		s.handleGitDiff(ctx, conn, data)
+	case "git_log":
+		s.handleGitLog(ctx, conn, data)
 	case "prefs_get":
 		s.handlePrefsGet(ctx, conn)
 	case "prefs_set":

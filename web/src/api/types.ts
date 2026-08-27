@@ -117,6 +117,29 @@ export interface FileListing {
   req_id?: string
 }
 
+export interface CommitEntry {
+  hash: string
+  author: string
+  date: string
+  subject: string
+}
+
+export interface GitDiffContent {
+  type: 'git_diff_content'
+  cwd: string
+  mode: 'unstaged' | 'cached' | 'commit'
+  commit?: string
+  content: string
+  req_id?: string
+}
+
+export interface GitLogResult {
+  type: 'git_log_result'
+  cwd: string
+  commits: CommitEntry[]
+  req_id?: string
+}
+
 export interface Skill {
   label: string
   template: string
@@ -212,6 +235,24 @@ export interface FileList {
   req_id?: string
 }
 
+export type GitDiffMode = 'unstaged' | 'cached' | 'commit'
+
+export interface GitDiff {
+  type: 'git_diff'
+  cwd: string
+  host?: string
+  mode: GitDiffMode
+  commit?: string
+  req_id?: string
+}
+
+export interface GitLog {
+  type: 'git_log'
+  cwd: string
+  host?: string
+  req_id?: string
+}
+
 export interface PrefsGet {
   type: 'prefs_get'
 }
@@ -293,6 +334,8 @@ export type ServerMessage =
   | TodosSnapshot
   | FileContent
   | FileListing
+  | GitDiffContent
+  | GitLogResult
   | PrefsSnapshot
   | ErrorMsg
   | TunnelsSnapshot
@@ -311,6 +354,8 @@ export type ClientMessage =
   | KindOverrideClear
   | FileRead
   | FileList
+  | GitDiff
+  | GitLog
   | PrefsGet
   | PrefsSet
   | TunnelCreate

@@ -92,6 +92,24 @@ type FileListing struct {
 	ReqID   string      `json:"req_id,omitempty"` // echoed from the matching FileList
 }
 
+// GitDiffContent carries a git diff/show result.
+type GitDiffContent struct {
+	Type    string `json:"type"` // "git_diff_content"
+	Cwd     string `json:"cwd"`
+	Mode    string `json:"mode"`              // "unstaged" | "cached" | "commit"
+	Commit  string `json:"commit,omitempty"`  // echoed when mode == "commit"
+	Content string `json:"content"`           // diff text (may be empty)
+	ReqID   string `json:"req_id,omitempty"`  // echoed from the matching GitDiff
+}
+
+// GitLogResult carries a list of recent commits for the selector.
+type GitLogResult struct {
+	Type    string      `json:"type"` // "git_log_result"
+	Cwd     string      `json:"cwd"`
+	Commits interface{} `json:"commits"`
+	ReqID   string      `json:"req_id,omitempty"` // echoed from the matching GitLog
+}
+
 // ErrorMsg is a generic error response.
 type ErrorMsg struct {
 	Type    string `json:"type"`
@@ -210,6 +228,24 @@ type FileList struct {
 	Path  string `json:"path"`
 	Host  string `json:"host,omitempty"`
 	ReqID string `json:"req_id,omitempty"` // client-generated; echoed in the response
+}
+
+// GitDiff requests a git diff for a working directory.
+type GitDiff struct {
+	Type   string `json:"type"`             // "git_diff"
+	Cwd    string `json:"cwd"`              // repo path (must be inside sandbox roots)
+	Host   string `json:"host,omitempty"`
+	Mode   string `json:"mode"`             // "unstaged" | "cached" | "commit"
+	Commit string `json:"commit,omitempty"` // required when mode == "commit"
+	ReqID  string `json:"req_id,omitempty"` // client-generated; echoed in the response
+}
+
+// GitLog requests the recent commit list for a working directory.
+type GitLog struct {
+	Type  string `json:"type"` // "git_log"
+	Cwd   string `json:"cwd"`
+	Host  string `json:"host,omitempty"`
+	ReqID string `json:"req_id,omitempty"`
 }
 
 // AgentEvent is an optional push event.
