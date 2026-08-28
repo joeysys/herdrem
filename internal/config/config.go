@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 // Config holds all relay configuration from env / flags.
 type Config struct {
 	Port        string
+	Bind        string // listen address (host part); default = loopback
 	Token       string
 	HerdrBin    string
 	Remotes     string // comma-separated SSH targets
@@ -18,6 +20,10 @@ type Config struct {
 	StaticDir   string // optional override for embed (debug)
 	Web         bool   // serve embedded SPA
 	Tunnel      bool   // launch cloudflared quick tunnel
+	// RequireHerdr makes the relay exit instead of falling back to the fake
+	// client when the herdr CLI is unavailable. Set for production deployments
+	// so a missing herdr binary is loud, not silent.
+	RequireHerdr bool
 	// AllowedOrigins lists extra browser origins permitted to open a WS
 	// connection cross-origin (comma-separated HERDR_ALLOWED_ORIGINS).
 	// The relay's own host is always allowed; this only widens it, e.g. a
@@ -29,6 +35,7 @@ type Config struct {
 func FromEnv() Config {
 	return Config{
 		Port:        envOr("HERDREM_PORT", "8766"),
+		Bind:        envOr("HERDREM_BIND", "127.0.0.1"),
 		Token:       os.Getenv("HERDREM_TOKEN"),
 		HerdrBin:    os.Getenv("HERDR_BIN"),
 		Remotes:     os.Getenv("HERDR_REMOTES"),
@@ -48,7 +55,16 @@ func FromEnv() Config {
 func (c Config) Origins() []string { return splitList(c.AllowedOrigins) }
 
 // Addr returns the listen address.
-func (c Config) Addr() string { return ":" + c.Port }
+func (c Config) Addr() string { return net.JoinHostPort(strings.Trim(c.Bind, "[]"), c.Port) }
+
+// IsLoopbackBind reports whether the relay is bound to a loopback address,
+// meaning it is not reachable from the network.
+func (c Config) IsLoopbackBind() bool {
+	if c.Bind == "localhost" {
+		return true
+	}
+	return net.ParseIP(strings.Trim(c.Bind, "[]")).IsLoopback()
+}
 
 // Hosts returns the poll host list: always "local" first, then SSH remotes.
 func (c Config) Hosts() []string {

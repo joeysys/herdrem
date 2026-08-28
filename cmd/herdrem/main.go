@@ -37,6 +37,7 @@ func main() {
 	// Flags
 	web := flag.Bool("web", false, "serve embedded SPA")
 	tunnel := flag.Bool("tunnel", false, "launch cloudflared quick tunnel")
+	requireHerdr := flag.Bool("require-herdr", false, "exit instead of falling back to fake client when herdr CLI is unavailable (production)")
 	staticDir := flag.String("static", "", "override embedded static dir (debug)")
 	flag.Parse()
 
@@ -49,12 +50,21 @@ func main() {
 	}
 	cfg.Web = *web
 	cfg.Tunnel = *tunnel
+	cfg.RequireHerdr = *requireHerdr
 
-	logger.Info("starting Herdrem", "port", cfg.Port, "web", cfg.Web, "tunnel", cfg.Tunnel, "data_dir", cfg.DataDir)
+	logger.Info("starting Herdrem", "addr", cfg.Addr(), "web", cfg.Web, "tunnel", cfg.Tunnel, "data_dir", cfg.DataDir)
 
 	// --tunnel requires a token — never expose an unauthenticated relay to the public internet
 	if cfg.Tunnel && cfg.Token == "" {
 		logger.Error("--tunnel requires HERDREM_TOKEN to be set (refusing to expose unauthenticated relay)")
+		os.Exit(1)
+	}
+
+	// Fail-closed: a non-loopback bind without a token exposes an unauthenticated
+	// relay (WS, terminal input, approvals, file/command access) to the network.
+	if !cfg.IsLoopbackBind() && cfg.Token == "" {
+		logger.Error("HERDREM_TOKEN is required when binding to a non-loopback address (refusing to expose unauthenticated relay)",
+			"bind", cfg.Bind, "hint", "set HERDREM_BIND=127.0.0.1 for local-only, or set HERDREM_TOKEN")
 		os.Exit(1)
 	}
 
@@ -74,9 +84,16 @@ func main() {
 	// Hub
 	h := hub.New(logger)
 
-	// Herdr client — real CLI when available, fake otherwise (dev)
+	// Herdr client — real CLI when available, fake otherwise (dev).
+	// In production (--require-herdr), a missing CLI is a fatal error so
+	// the relay doesn't silently serve fake data.
 	var client herdr.Client
 	if cli, err := herdr.NewCLIClient(cfg.HerdrBin, logger); err != nil {
+		if cfg.RequireHerdr {
+			logger.Error("herdr CLI unavailable and --require-herdr is set (refusing to start with fake client)",
+				"err", err, "hint", "install herdr and set HERDR_BIN, or remove --require-herdr for dev mode")
+			os.Exit(1)
+		}
 		logger.Warn("herdr CLI unavailable, using fake client", "err", err)
 		client = &herdr.FakeClient{}
 	} else {

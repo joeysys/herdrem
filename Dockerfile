@@ -20,6 +20,8 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates cloudflared && \
     adduser -D -h /var/lib/herdrem herdrem
 COPY --from=go-builder /herdrem /usr/local/bin/herdrem
+# Containers must listen on their network interface; the relay requires a token.
+ENV HERDREM_BIND=0.0.0.0
 USER herdrem
 WORKDIR /var/lib/herdrem
 VOLUME /var/lib/herdrem

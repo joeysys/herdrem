@@ -7,7 +7,8 @@ services:
       - "8766:8766"
     environment:
       # Generate with: openssl rand -hex 16
-      HERDREM_TOKEN: ${HERDREM_TOKEN:-}
+      HERDREM_BIND: "0.0.0.0"
+      HERDREM_TOKEN: ${HERDREM_TOKEN:?set HERDREM_TOKEN before starting}
       HERDREM_PORT: "8766"
       # HERDR_REMOTES: "user@server1,user@server2"
       # HERDREM_KINDS: "agent,shell"

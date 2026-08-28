@@ -14,17 +14,23 @@ A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bri
 # Build web + Go binary
 make build
 
-# Run the relay (serves PWA on :8766)
+# Run the relay locally (loopback only)
 ./herdrem serve --web
 
 # Or dev mode (hot web rebuild via Vite watch)
 make dev
 ```
 
-Then open `http://localhost:8766` in a browser on your phone or another device (same LAN), or expose via Cloudflare tunnel:
+For same-LAN access from a phone or another machine, opt in to a non-loopback bind and set a token:
 
 ```bash
-./herdrem serve --web --tunnel
+HERDREM_BIND=0.0.0.0 HERDREM_TOKEN="$(openssl rand -hex 16)" ./herdrem serve --web
+```
+
+Or expose via Cloudflare tunnel (also requires a token):
+
+```bash
+HERDREM_TOKEN="$(openssl rand -hex 16)" ./herdrem serve --web --tunnel
 ```
 
 ## Architecture
@@ -54,7 +60,7 @@ deploy/                  systemd unit, env template, deployment guide
 - **File browser** — navigate, preview, and edit files remotely
 - **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
 - **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
-- **Token auth** — optional shared secret (`HERDREM_TOKEN`); when unset, auth is disabled (dev mode). Tunnels auto-generate a 128-bit token for the tunnel gate.
+- **Token auth** — optional shared secret (`HERDREM_TOKEN`) on loopback; non-loopback binds require it. Tunnels auto-generate a 128-bit token for the tunnel gate.
 - **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
 
 ## Screenshots
@@ -89,7 +95,8 @@ All config is environment-based (see `internal/config/config.go`):
 | Env | Default | Description |
 |-----|---------|-------------|
 | `HERDREM_PORT` | `8766` | Listen port |
-| `HERDREM_TOKEN` | _(empty = auth disabled)_ | Shared secret for relay auth |
+| `HERDREM_BIND` | `127.0.0.1` | Listen address; non-loopback binds require a token |
+| `HERDREM_TOKEN` | _(empty = auth disabled on loopback)_ | Shared secret for relay auth |
 | `HERDR_BIN` | `herdr` | Path to herdr binary |
 | `HERDR_REMOTES` | — | Comma-separated SSH remotes (optional) |
 | `HERDREM_KINDS` | — | Comma-separated agent kind filter (optional) |

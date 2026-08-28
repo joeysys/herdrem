@@ -1,38 +1,38 @@
 [Unit]
-Description=Herdrem — herdr remote relay and web PWA
+Description=Herdrem — per-user herdr remote relay and web PWA
 Documentation=https://herdr.dev
 After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/herdrem serve --web
+# This is a systemd user unit: it runs as the current user and uses that
+# user's Herdr socket/session. Both `herdrem` and `herdr` are resolved from
+# the PATH in the user env file. It does not start or supervise `herdr server`.
+ExecStart=herdrem serve --web --require-herdr
 Restart=on-failure
 RestartSec=3
 
 # Load secrets (HERDREM_TOKEN etc.) from an env file.
-# Copy herdrem.env.example to /etc/herdrem/herdrem.env and edit.
-EnvironmentFile=-/etc/herdrem/herdrem.env
+# The `-` prefix is omitted so systemd fails to start if the file is missing.
+EnvironmentFile=%h/.config/herdrem/herdrem.env
 
-# Data directory (todo, prefs, poller state)
-# HERDREM_DATA_DIR defaults to ~/.config/herdrem under the service user.
-# Set an explicit path here for a dedicated system user:
-# Environment=HERDREM_DATA_DIR=/var/lib/herdrem
+# Use the same HOME and data directory as the logged-in user. HERDR_BIN is
+# intentionally unset here: the relay resolves `herdr` from PATH at runtime.
+Environment=HOME=%h
+Environment=HERDREM_DATA_DIR=%h/.config/herdrem
+# Fallback PATH; setup stores the actual Herdrem/Herdr directories in the env file.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+
+# Bind to loopback by default. Set HERDREM_BIND=0.0.0.0 in the env file
+# for LAN access (requires HERDREM_TOKEN), or use --tunnel for public access.
+Environment=HERDREM_BIND=127.0.0.1
 
 # Hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=-/var/lib/herdrem
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
-# Dedicated system user (create with: useradd -r -s /usr/sbin/nologin -d /var/lib/herdrem herdrem)
-User=herdrem
-Group=herdrem
-WorkingDirectory=/var/lib/herdrem
-
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
