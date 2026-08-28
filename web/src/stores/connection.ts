@@ -12,6 +12,11 @@ export const useConnectionStore = defineStore('connection', () => {
   // True once the first WS hello has been received — gates the main UI
   // to avoid a flash of the empty agent list before data arrives.
   const booted = ref(false);
+  // F2: safety timeout so a missing hello (server bug, slow relay, auth
+  // failure after upgrade) doesn't permanently trap the user behind the
+  // boot splash. If hello doesn't arrive within 5s, reveal the main UI
+  // so the relay switch and settings remain accessible for self-recovery.
+  let bootTimer: ReturnType<typeof setTimeout> | null = null;
   // Default: derive same-origin /ws from current page (works with tunnel + embed)
   const defaultUrl = (() => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -59,6 +64,15 @@ export const useConnectionStore = defineStore('connection', () => {
     agents.resetSnapshotKey();
     features.value = [];
     if (unsubStatus) unsubStatus();
+    // F2: arm the boot timeout so a missing hello doesn't permanently
+    // trap the user behind the boot splash.
+    if (bootTimer) clearTimeout(bootTimer);
+    if (!booted.value) {
+      bootTimer = setTimeout(() => {
+        bootTimer = null;
+        booted.value = true;
+      }, 5000);
+    }
     ws.connect(url.value, token.value);
     unsubStatus = ws.onStatus((s) => {
       status.value = s as typeof status.value;
@@ -70,6 +84,10 @@ export const useConnectionStore = defineStore('connection', () => {
   }
 
   function setHello(version: string, feats: string[]) {
+    if (bootTimer) {
+      clearTimeout(bootTimer);
+      bootTimer = null;
+    }
     serverVersion.value = version;
     features.value = feats || [];
     booted.value = true;

@@ -670,10 +670,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- Boot splash: shown until the first WS hello arrives, so the user
-       never sees a flash of the empty agent list during SW registration
-       or the initial connection handshake. -->
-  <div v-if="!conn.booted" class="boot-splash">
+  <!-- Boot splash: shown only during the initial WS handshake (connecting
+       and not yet booted). If the connection fails or hello doesn't arrive
+       within 5s (see connection.ts bootTimer), booted becomes true and the
+       main UI renders so the user can access relay switch and settings. -->
+  <div v-if="!conn.booted && conn.status === 'connecting'" class="boot-splash">
     <div class="boot-splash-inner">
       <img src="/brand-mark.png" alt="" width="32" height="29" aria-hidden="true" />
       <div class="boot-spinner"></div>

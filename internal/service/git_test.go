@@ -169,3 +169,128 @@ func TestParseGitLog(t *testing.T) {
 		t.Errorf("entry 1 subject should be empty: %+v", entries[1])
 	}
 }
+
+// TestShellQuote verifies that shellQuote produces strings that are safe to
+// embed in a remote shell command, neutralising injection attempts and
+// preserving values with spaces, semicolons, and embedded single quotes.
+func TestShellQuote(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"hello", "'hello'"},
+		{"a b", "'a b'"},
+		{"/repo/x;touch /tmp/pwn;#", "'/repo/x;touch /tmp/pwn;#'"},
+		{"it's", "'it'\\''s'"},
+		{"", "''"},
+	}
+	for _, c := range cases {
+		got := shellQuote(c.in)
+		if got != c.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestGitDiff_CommitRejectsOptionInjection verifies that non-SHA commit
+// refs (e.g. --output=...) are rejected before reaching git.
+func TestGitDiff_CommitRejectsOptionInjection(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	initRepo(t, dir)
+	fs := NewFileService(rootsFor(dir), nil)
+	bad := []string{
+		"--output=/tmp/relay-owned",
+		"--format=fuller",
+		"HEAD~1",
+		"main",
+		"abc123", // too short
+		"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", // not hex
+	}
+	for _, ref := range bad {
+		if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ref); err == nil {
+			t.Errorf("commit ref %q should be rejected", ref)
+		}
+	}
+}
+
+// TestGitDiff_PathspecLimitsToCwd verifies that the `-- .` pathspec limits
+// the diff to files under cwd, not the entire repo.
+func TestGitDiff_PathspecLimitsToCwd(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	initRepo(t, dir)
+	// Create a subdirectory with its own file.
+	sub := dir + "/sub"
+	os.Mkdir(sub, 0o755)
+	mustWrite(t, sub+"/c.txt", "sub file\n")
+	// Stage a change in the root and in the subdir.
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("add", "sub/c.txt")
+
+	fs := NewFileService(rootsFor(dir), nil)
+	// Diff from the root should include both b.txt and sub/c.txt.
+	rootDiff, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "")
+	if err != nil {
+		t.Fatalf("root cached diff: %v", err)
+	}
+	if !strings.Contains(rootDiff, "staged file") {
+		t.Errorf("root diff should include b.txt:\n%s", rootDiff)
+	}
+	if !strings.Contains(rootDiff, "sub file") {
+		t.Errorf("root diff should include sub/c.txt:\n%s", rootDiff)
+	}
+
+	// Diff from the subdirectory should only include sub/c.txt, not b.txt.
+	subDiff, err := fs.GitDiff(context.Background(), "local", sub, GitDiffCached, "")
+	if err != nil {
+		t.Fatalf("sub cached diff: %v", err)
+	}
+	if strings.Contains(subDiff, "staged file") {
+		t.Errorf("sub diff should not include b.txt (outside cwd):\n%s", subDiff)
+	}
+	if !strings.Contains(subDiff, "sub file") {
+		t.Errorf("sub diff should include sub/c.txt:\n%s", subDiff)
+	}
+}
+
+// TestRunGit_BoundedStdout verifies that runGit caps stdout at maxDiffBytes
+// and kills the process early instead of buffering unbounded output.
+func TestRunGit_BoundedStdout(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	initRepo(t, dir)
+	fs := NewFileService(rootsFor(dir), nil)
+	// Generate a diff larger than maxDiffBytes by writing a big file.
+	// We need to override maxDiffBytes for the test — but since it's a
+	// const, we test the bounding indirectly by confirming runGit still
+	// works and returns at most maxDiffBytes for a normal diff.
+	// Instead, test the bounding mechanism directly with a mock command.
+	orig := remoteGitCommand
+	defer func() { remoteGitCommand = orig }()
+	remoteGitCommand = func(ctx context.Context, host, cwd string, args ...string) *exec.Cmd {
+		// Produce 2 MiB of output — well over the 1 MiB cap.
+		return exec.CommandContext(ctx, "sh", "-c", "yes hello | head -c $((2*1024*1024))")
+	}
+	out, err := fs.runGit(context.Background(), "local", dir, "fake")
+	if err != nil {
+		t.Fatalf("runGit with large output: %v", err)
+	}
+	if len(out) > maxDiffBytes {
+		t.Errorf("runGit returned %d bytes, expected <= %d", len(out), maxDiffBytes)
+	}
+	if len(out) != maxDiffBytes {
+		t.Errorf("runGit should return exactly maxDiffBytes on overflow, got %d", len(out))
+	}
+}

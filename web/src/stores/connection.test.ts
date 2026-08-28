@@ -70,3 +70,31 @@ describe('useConnectionStore token storage', () => {
     expect(localStorage.getItem('herdrem_token')).toBeNull()
   })
 })
+
+describe('useConnectionStore boot timeout (F2)', () => {
+  it('sets booted=true after 5s even if hello never arrives', () => {
+    vi.useFakeTimers()
+    const conn = useConnectionStore()
+    expect(conn.booted).toBe(false)
+    conn.connect('ws://relay.example', '')
+    // Before timeout: still not booted
+    vi.advanceTimersByTime(4999)
+    expect(conn.booted).toBe(false)
+    // After 5s: booted becomes true so the UI is not permanently trapped
+    vi.advanceTimersByTime(1)
+    expect(conn.booted).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('clears the boot timer when hello arrives', () => {
+    vi.useFakeTimers()
+    const conn = useConnectionStore()
+    conn.connect('ws://relay.example', '')
+    conn.setHello('v1', ['agents'])
+    expect(conn.booted).toBe(true)
+    // Advancing past 5s should not cause any issues (timer already cleared)
+    vi.advanceTimersByTime(6000)
+    expect(conn.booted).toBe(true)
+    vi.useRealTimers()
+  })
+})
