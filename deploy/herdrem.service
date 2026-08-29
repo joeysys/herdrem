@@ -6,9 +6,9 @@ After=network-online.target
 [Service]
 Type=simple
 # This is a systemd user unit: it runs as the current user and uses that
-# user's Herdr socket/session. Both `herdrem` and `herdr` are resolved from
-# the PATH in the user env file. It does not start or supervise `herdr server`.
-ExecStart=herdrem serve --web --require-herdr
+# user's Herdr socket/session. The installer renders this ExecStart with the
+# absolute installed Herdrem path. It does not start or supervise `herdr server`.
+ExecStart=%h/.local/bin/herdrem serve --web --require-herdr
 Restart=on-failure
 RestartSec=3
 
@@ -16,8 +16,9 @@ RestartSec=3
 # The `-` prefix is omitted so systemd fails to start if the file is missing.
 EnvironmentFile=%h/.config/herdrem/herdrem.env
 
-# Use the same HOME and data directory as the logged-in user. HERDR_BIN is
-# intentionally unset here: the relay resolves `herdr` from PATH at runtime.
+# Use the same HOME and data directory as the logged-in user. The installer
+# records HERDR_BIN in the env file; without it, the relay resolves `herdr`
+# from PATH at runtime.
 Environment=HOME=%h
 Environment=HERDREM_DATA_DIR=%h/.config/herdrem
 # Fallback PATH; setup stores the actual Herdrem/Herdr directories in the env file.

@@ -2,11 +2,48 @@
 
 ## systemd (recommended for Linux servers)
 
+### One-command install
+
+Install `herdr` first for the user who will run the relay, then run this from
+the repository root:
+
+```bash
+./deploy/install.sh
+```
+
+The installer builds `herdrem`, installs it, discovers the actual `herdr`
+executable from the current user's PATH, persists the selected executable and
+both directories for the systemd user manager, and enables `herdrem.service`.
+It renders the actual Herdrem path into `ExecStart`, preserves an existing
+customized user unit, and never starts or supervises `herdr server`.
+
+If `herdr` is not on PATH, provide its actual path without changing the unit:
+
+```bash
+HERDR_BIN=/path/to/herdr ./deploy/install.sh
+```
+
+Preview the resolved paths and planned actions without building, writing
+configuration, or touching systemd:
+
+```bash
+./deploy/install.sh --dry-run
+```
+
+Add `--linger` if the relay must keep running after logout:
+
+```bash
+./deploy/install.sh --linger
+```
+
+The remaining steps describe the equivalent manual installation.
+
 ### 1. Install the binaries
 
 This deployment uses a systemd **user** unit. Install Herdrem and Herdr
 for the same login user. Their locations are not hardcoded: both commands
-must be available on the PATH of the systemd user manager.
+must be discoverable on the current shell's PATH during installation; the
+installer persists the resolved executable and PATH for the user manager.
 
 ```bash
 make build
@@ -22,7 +59,8 @@ see that user's existing agents. It does not start or supervise `herdr
 server`. A Herdr server and the target agents must already run in this
 same user context; another user's session is not visible. If `herdr` is
 installed outside the current PATH, add that directory to PATH before the
-`command -v` checks and import it. See the
+`command -v` checks. For the one-command installer, you can instead pass
+`HERDR_BIN=/path/to/herdr`. See the
 [Herdr CLI reference](https://herdr.dev/docs/cli-reference/) and
 [socket paths](https://herdr.dev/docs/socket-api/) for details.
 
