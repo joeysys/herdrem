@@ -27,6 +27,10 @@ For same-LAN access from a phone or another machine, opt in to a non-loopback bi
 HERDREM_BIND=0.0.0.0 HERDREM_TOKEN="$(openssl rand -hex 16)" ./herdrem serve --web
 ```
 
+Open `http://<lan-ip>:8766` in a browser on the phone or another device and enter the token when the PWA
+prompts for it. The token is required even though the page is served by the
+relay, because the LAN address is not an exempt local host.
+
 Or expose via Cloudflare tunnel (also requires a token):
 
 ```bash
@@ -60,7 +64,7 @@ deploy/                  systemd unit, env template, deployment guide
 - **File browser** — navigate, preview, and edit files remotely
 - **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
 - **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
-- **Token auth** — optional shared secret (`HERDREM_TOKEN`) on loopback; non-loopback binds require it. Tunnels auto-generate a 128-bit token for the tunnel gate.
+- **Token auth** — only same-origin requests addressed to `localhost`, `127.0.0.1`, or `::1` may omit `HERDREM_TOKEN`; all other relay connections require it.
 - **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
 
 ## Screenshots
@@ -96,31 +100,20 @@ All config is environment-based (see `internal/config/config.go`):
 |-----|---------|-------------|
 | `HERDREM_PORT` | `8766` | Listen port |
 | `HERDREM_BIND` | `127.0.0.1` | Listen address; non-loopback binds require a token |
-| `HERDREM_TOKEN` | _(empty = auth disabled on loopback)_ | Shared secret for relay auth |
+| `HERDREM_TOKEN` | _(empty = local same-origin only)_ | Shared secret required for non-local or cross-origin relay access |
 | `HERDR_BIN` | `herdr` | Path to herdr binary |
 | `HERDR_REMOTES` | — | Comma-separated SSH remotes (optional) |
 | `HERDREM_KINDS` | — | Comma-separated agent kind filter (optional) |
 | `HERDREM_DATA_DIR` | `~/.config/herdrem` | Data directory |
 | `HERDREM_STATIC` | — | Override embedded static dir (debug) |
-| `HERDR_ALLOWED_ORIGINS` | _(empty = same-origin only)_ | Comma-separated browser origins allowed to open a WebSocket cross-origin |
 
-### Cross-origin WebSocket
+### Relay authentication
 
-The relay enforces a same-origin check on the `/ws` upgrade, so a UI served from
-one host cannot drive a relay on another host by default — including via the
-built-in relay switcher, which is cross-origin by nature. Two ways to authorize it:
-
-- **Set `HERDREM_TOKEN`** on the target relay and enter that token in the
-  relay switcher. A valid token authorizes any origin, because the token itself
-  is the CSRF defense. This is the right choice for tunnels and public deployments.
-- **Set `HERDR_ALLOWED_ORIGINS`** on the target relay, e.g.
-  `HERDR_ALLOWED_ORIGINS=localhost:8765`. Useful for a token-less trusted LAN or
-  dev setup. Entries are host patterns (`localhost:8765`, `*.example.com`); an
-  entry containing `://` is matched against `scheme://host`.
-
-With neither set, only same-origin connections are accepted. Do not disable this
-casually: a relay reachable cross-origin without a token can be driven by any
-website the user happens to visit.
+The embedded PWA may connect without a token only when the browser page and relay
+are same-origin and the relay host is `localhost`, `127.0.0.1`, or `::1`. Connections via
+a LAN IP, hostname, tunnel, separate UI, or non-browser client must present the
+configured `HERDREM_TOKEN`. The PWA asks for it on first connection; the
+relay switcher also accepts it when connecting to a non-local relay.
 
 ## License
 

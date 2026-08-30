@@ -4,9 +4,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -23,7 +26,8 @@ func wsOriginServer(t *testing.T, cfg config.Config) (string, *hub.Hub, context.
 	ctx, cancel := context.WithCancel(context.Background())
 	go h.Run(ctx)
 
-	s := New(cfg, h, nil, nil, nil, nil, nil, nil, logger)
+	staticFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}
+	s := New(cfg, h, nil, nil, nil, nil, nil, staticFS, logger)
 	srv := httptest.NewServer(s.Routes())
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http"), h, cancel
@@ -32,11 +36,16 @@ func wsOriginServer(t *testing.T, cfg config.Config) (string, *hub.Hub, context.
 // dialWS attempts a WS upgrade with an explicit Origin and reports whether the
 // handshake succeeded, plus the HTTP status when it did not.
 func dialWS(t *testing.T, wsURL, origin string) (bool, int) {
+	return dialWSWithHost(t, wsURL, origin, "")
+}
+
+func dialWSWithHost(t *testing.T, wsURL, origin, host string) (bool, int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, resp, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Origin": {origin}},
+		Host:       host,
 	})
 	if err != nil {
 		code := 0
@@ -49,8 +58,63 @@ func dialWS(t *testing.T, wsURL, origin string) (bool, int) {
 	return true, 0
 }
 
-// Baseline: with no token and no allowlist, cross-origin must still be
-// rejected — otherwise any website could drive the user's relay (CSRF).
+func TestWSSameOriginLocalhostAllowsConfiguredTokenWithoutToken(t *testing.T) {
+	wsURL, _, cancel := wsOriginServer(t, config.Config{Token: "s3cret"})
+	defer cancel()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(wsURL, "ws://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"localhost:" + port, "127.0.0.1:" + port} {
+		origin := "http://" + host
+		if ok, code := dialWSWithHost(t, wsURL, origin, host); !ok {
+			t.Fatalf("local same-origin host %q without token failed with status %d", host, code)
+		}
+	}
+}
+
+func TestWSSameOriginNonLocalRequiresToken(t *testing.T) {
+	wsURL, _, cancel := wsOriginServer(t, config.Config{Token: "s3cret"})
+	defer cancel()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(wsURL, "ws://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := "192.0.2.10:" + port
+	origin := "http://" + host
+	if ok, code := dialWSWithHost(t, wsURL, origin, host); ok {
+		t.Fatal("non-local same-origin dial without token succeeded")
+	} else if code != http.StatusUnauthorized {
+		t.Errorf("non-local same-origin status = %d, want %d", code, http.StatusUnauthorized)
+	}
+}
+
+func TestLocalOriginHeadersFromRemotePeerRequireToken(t *testing.T) {
+	s := &Server{cfg: config.Config{Token: "s3cret"}}
+	r := httptest.NewRequest("GET", "http://localhost:8766/ws", nil)
+	r.Header.Set("Origin", "http://localhost:8766")
+	r.RemoteAddr = "192.0.2.10:12345"
+
+	if s.relayAuthOK(r) {
+		t.Fatal("remote peer spoofing localhost headers bypassed relay token")
+	}
+}
+
+func TestIPv6LoopbackHostAllowsConfiguredTokenWithoutToken(t *testing.T) {
+	s := &Server{cfg: config.Config{Token: "s3cret"}}
+	r := httptest.NewRequest("GET", "http://[::1]:8766/ws", nil)
+	r.Header.Set("Origin", "http://[::1]:8766")
+	r.RemoteAddr = "[::1]:12345"
+
+	if !s.relayAuthOK(r) {
+		t.Fatal("IPv6 loopback same-origin request should not require a token")
+	}
+}
+
+// Cross-origin must still be rejected without a token — otherwise any website
+// could drive the user's relay (CSRF).
 func TestWSCrossOriginRejectedByDefault(t *testing.T) {
 	wsURL, _, cancel := wsOriginServer(t, config.Config{})
 	defer cancel()
@@ -60,28 +124,10 @@ func TestWSCrossOriginRejectedByDefault(t *testing.T) {
 	}
 	ok, code := dialWS(t, wsURL, "http://localhost:8765")
 	if ok {
-		t.Fatal("cross-origin dial succeeded with no token and no allowlist; relay is open to CSRF")
+		t.Fatal("cross-origin dial succeeded without a token; relay is open to CSRF")
 	}
-	if code != 403 {
-		t.Errorf("cross-origin status = %d, want 403", code)
-	}
-}
-
-// HERDR_ALLOWED_ORIGINS lets a trusted origin (e.g. a LAN dev UI) connect
-// without a token, while everything else stays rejected.
-func TestWSAllowedOriginsPermitsListedOriginOnly(t *testing.T) {
-	wsURL, _, cancel := wsOriginServer(t, config.Config{
-		AllowedOrigins: "localhost:8765, dev.example.com",
-	})
-	defer cancel()
-
-	for _, origin := range []string{"http://localhost:8765", "https://dev.example.com"} {
-		if ok, code := dialWS(t, wsURL, origin); !ok {
-			t.Errorf("allowlisted origin %q rejected (status %d)", origin, code)
-		}
-	}
-	if ok, _ := dialWS(t, wsURL, "http://evil.example.com"); ok {
-		t.Error("unlisted origin must stay rejected")
+	if code != http.StatusUnauthorized {
+		t.Errorf("cross-origin status = %d, want %d", code, http.StatusUnauthorized)
 	}
 }
 
@@ -125,7 +171,7 @@ func TestWSEmptyTokenDoesNotDisableOriginCheck(t *testing.T) {
 		conn.Close(websocket.StatusNormalClosure, "")
 		t.Fatal("token-less relay accepted a cross-origin dial carrying an arbitrary token")
 	}
-	if resp != nil && resp.StatusCode != 403 {
-		t.Errorf("status = %d, want 403", resp.StatusCode)
+	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }

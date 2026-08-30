@@ -25,6 +25,9 @@ func TestFilePreviewRevalidatesMutableFiles(t *testing.T) {
 	files := service.NewFileService(func(string) []string { return []string{dir} }, logger)
 	server := New(config.Config{}, nil, nil, nil, nil, files, nil, nil, logger)
 	req := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(path), nil)
+	req.Host = "localhost:8766"
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", "http://localhost:8766")
 	res := httptest.NewRecorder()
 
 	server.Routes().ServeHTTP(res, req)
@@ -48,6 +51,9 @@ func TestFilePreviewRevalidatesMutableFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(path), nil)
+	req.Host = "localhost:8766"
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", "http://localhost:8766")
 	req.Header.Set("If-Modified-Since", modified)
 	res = httptest.NewRecorder()
 	server.Routes().ServeHTTP(res, req)

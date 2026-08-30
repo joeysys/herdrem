@@ -80,7 +80,9 @@ unset herdrem_bin_dir herdr_bin_dir
 
 The user unit requires this file. The PATH line above is stored in the
 file, so it remains available after logout, linger, or reboot. It defaults to
-`HERDREM_BIND=127.0.0.1` (loopback only), which is safe without a token.
+`HERDREM_BIND=127.0.0.1` (loopback only). Only a same-origin page opened through
+`localhost`, `127.0.0.1`, or `::1` may omit the token; LAN addresses and other
+origins must provide `HERDREM_TOKEN` through the relay switcher.
 
 ### 3. Install and start the user unit
 
@@ -182,7 +184,8 @@ See [docker-compose.yml](../docker-compose.yml) for the full configuration.
 
 ## Security notes
 
-- **Always set `HERDREM_TOKEN`** for any non-loopback exposure.
+- **Always set `HERDREM_TOKEN`** for any non-loopback exposure or any
+  connection that is not same-origin `localhost`/`127.0.0.1`/`::1`.
 - The systemd unit defaults to `HERDREM_BIND=127.0.0.1` (loopback only).
   Set `HERDREM_BIND=0.0.0.0` in the env file for LAN access — the relay
   refuses to start with a non-loopback bind and an empty token.
@@ -192,5 +195,5 @@ See [docker-compose.yml](../docker-compose.yml) for the full configuration.
   without it. It should be `chmod 600` and readable only by the user.
 - The user unit runs as the current login user, so it can access that
   user's Herdr socket/session.
-- For tunnel deployments, the token is also the CSRF defense for
-  cross-origin WebSocket.
+- The token is required for LAN, tunnel, cross-origin WebSocket, and
+  non-browser connections.

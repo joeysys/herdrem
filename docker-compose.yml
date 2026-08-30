@@ -12,7 +12,6 @@ services:
       HERDREM_PORT: "8766"
       # HERDR_REMOTES: "user@server1,user@server2"
       # HERDREM_KINDS: "agent,shell"
-      # HERDR_ALLOWED_ORIGINS: "localhost:8765"
     volumes:
       - herdrem-data:/var/lib/herdrem
     restart: unless-stopped

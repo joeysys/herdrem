@@ -26,7 +26,7 @@ import { useHaptic } from './composables/useHaptic';
 import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/useHistoryTrap';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
-import { relayHostLabel } from './utils/relay';
+import { relayHostLabel, relayNeedsToken } from './utils/relay';
 import TermView from './components/term/TermView.vue';
 import AgentIcon from './components/agent/AgentIcon.vue';
 import AgentFilters from './components/agent/AgentFilters.vue';
@@ -68,6 +68,12 @@ const showSettings = ref(false);
 const showTodoManager = ref(false);
 const settingsSection = ref<'shell_cmds' | 'skills' | 'agent_cmds' | null>(null);
 const showRelaySwitch = ref(false);
+const bootToken = ref('');
+const showBootAuth = computed(() => {
+  const current = relays.current();
+  const targetUrl = current?.url || conn.url;
+  return conn.status !== 'connected' && relayNeedsToken(targetUrl) && !conn.token && !current?.token;
+});
 const ctxPane = ref<Pane | null>(null);
 const ctxOpen = ref(false);
 const ctxPos = ref({ x: 0, y: 0 });
@@ -490,6 +496,11 @@ function onSwitchRelay(id: string) {
   view.value = 'list';
   switchTo(id);
 }
+
+function submitBootToken() {
+  const token = bootToken.value.trim();
+  if (token) boot(token);
+}
 function onEditCommands(section: 'shell_cmds' | 'skills' | 'agent_cmds') {
   settingsSection.value = section;
   showSettings.value = true;
@@ -670,11 +681,31 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <div v-if="showBootAuth" class="boot-splash">
+    <div class="boot-splash-inner">
+      <img src="/brand-mark.png" alt="" width="32" height="29" aria-hidden="true" />
+      <form class="relay-auth-form" @submit.prevent="submitBootToken">
+        <h2>relay token required</h2>
+        <p>Enter HERDREM_TOKEN for this address.</p>
+        <label for="boot-relay-token">Relay token</label>
+        <input
+          id="boot-relay-token"
+          v-model="bootToken"
+          class="relay-auth-input"
+          type="password"
+          autocomplete="current-password"
+          required
+          autofocus
+        />
+        <button class="relay-auth-button" type="submit">connect</button>
+      </form>
+    </div>
+  </div>
   <!-- Boot splash: shown only during the initial WS handshake (connecting
        and not yet booted). If the connection fails or hello doesn't arrive
        within 5s (see connection.ts bootTimer), booted becomes true and the
        main UI renders so the user can access relay switch and settings. -->
-  <div v-if="!conn.booted && conn.status === 'connecting'" class="boot-splash">
+  <div v-else-if="!conn.booted && conn.status === 'connecting'" class="boot-splash">
     <div class="boot-splash-inner">
       <img src="/brand-mark.png" alt="" width="32" height="29" aria-hidden="true" />
       <div class="boot-spinner"></div>
@@ -1453,6 +1484,51 @@ onUnmounted(() => {
   border-top-color: var(--blue);
   border-radius: 50%;
   animation: bp-spin 0.8s linear infinite;
+}
+.relay-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(86vw, 360px);
+  color: var(--text-dim);
+  text-align: left;
+}
+.relay-auth-form h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-lg);
+  text-align: center;
+}
+.relay-auth-form p {
+  margin: 0 0 4px;
+  font-size: var(--text-sm);
+  text-align: center;
+}
+.relay-auth-form label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.relay-auth-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--term-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  outline: none;
+}
+.relay-auth-input:focus { border-color: rgba(96,165,250,.5); }
+.relay-auth-button {
+  padding: 10px 12px;
+  color: var(--bg);
+  background: var(--blue);
+  border: 0;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-weight: 700;
 }
 @keyframes bp-spin {
   to {

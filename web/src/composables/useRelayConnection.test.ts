@@ -38,6 +38,38 @@ function seedRelay(name: string, url: string, token: string) {
 }
 
 describe('useRelayConnection', () => {
+  it('passes a boot token to the default same-origin relay', () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({} as Response)
+    const { boot } = useRelayConnection()
+
+    try {
+      boot('lan-token')
+
+      expect(ws.connect).toHaveBeenCalledWith(`ws://${location.host}`, 'lan-token')
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it('does not boot a non-local relay without a token', () => {
+    const relay = seedRelay('LAN', 'ws://192.168.1.10:8766', '')
+    useRelaysStore().setCurrent(relay.id)
+    const { boot } = useRelayConnection()
+
+    boot()
+
+    expect(ws.connect).not.toHaveBeenCalled()
+  })
+
+  it('does not switch to a non-local relay without a token', () => {
+    const relay = seedRelay('LAN', 'ws://192.168.1.10:8766', '')
+    const { connectRelay } = useRelayConnection()
+
+    connectRelay(relay)
+
+    expect(ws.connect).not.toHaveBeenCalled()
+  })
+
   it('clears tunnels, panes, previews, files and todos when switching A → B', () => {
     const a = seedRelay('A', 'ws://a.example/ws', 'tok-a')
     const b = seedRelay('B', 'ws://b.example/ws', 'tok-b')

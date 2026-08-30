@@ -24,11 +24,6 @@ type Config struct {
 	// client when the herdr CLI is unavailable. Set for production deployments
 	// so a missing herdr binary is loud, not silent.
 	RequireHerdr bool
-	// AllowedOrigins lists extra browser origins permitted to open a WS
-	// connection cross-origin (comma-separated HERDR_ALLOWED_ORIGINS).
-	// The relay's own host is always allowed; this only widens it, e.g. a
-	// dev UI on localhost:8765 driving a LAN relay via the relay switcher.
-	AllowedOrigins string
 }
 
 // FromEnv builds Config from HERDREM_*/HERDR_* environment variables.
@@ -42,17 +37,8 @@ func FromEnv() Config {
 		KindsFilter: os.Getenv("HERDREM_KINDS"),
 		DataDir:     envOr("HERDREM_DATA_DIR", defaultDataDir()),
 		StaticDir:   os.Getenv("HERDREM_STATIC"),
-
-		AllowedOrigins: os.Getenv("HERDR_ALLOWED_ORIGINS"),
 	}
 }
-
-// Origins returns the configured cross-origin allowlist for WS upgrades
-// (empty = same-origin only, unless the request carries a valid token).
-// Entries are matched by coder/websocket's OriginPatterns: a bare host
-// ("localhost:8765") is matched against the origin host, and an entry
-// containing "://" is matched against "scheme://host".
-func (c Config) Origins() []string { return splitList(c.AllowedOrigins) }
 
 // Addr returns the listen address.
 func (c Config) Addr() string { return net.JoinHostPort(strings.Trim(c.Bind, "[]"), c.Port) }

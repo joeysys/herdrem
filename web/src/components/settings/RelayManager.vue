@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRelaysStore, type RelayEntry } from '../../stores/relays'
 import { useRelayConnection } from '../../composables/useRelayConnection'
-import { relayHostLabel } from '../../utils/relay'
+import { relayHostLabel, relayNeedsToken } from '../../utils/relay'
 
 const relays = useRelaysStore()
 const { switchTo, connectRelay } = useRelayConnection()
@@ -14,6 +14,7 @@ const editingId = ref<string | null>(null)
 const name = ref('')
 const url = ref('')
 const token = ref('')
+const missingToken = computed(() => Boolean(url.value.trim()) && relayNeedsToken(url.value) && !token.value.trim())
 
 function startAdd() {
   editingId.value = null
@@ -32,7 +33,7 @@ function startEdit(r: RelayEntry) {
 }
 
 function save() {
-  if (!url.value.trim()) return
+  if (!url.value.trim() || missingToken.value) return
   const displayName = name.value.trim() || relayHostLabel(url.value)
   if (editingId.value) {
     relays.update(editingId.value, { name: displayName, url: url.value, token: token.value || undefined })
@@ -65,10 +66,11 @@ function onRemove(id: string) {
     <div v-if="showForm" class="rm-form">
       <input v-model="name" class="fld" placeholder="name (optional)" aria-label="Relay name" />
       <input v-model="url" class="fld mono" placeholder="wss://your-tunnel…" aria-label="Relay URL" />
-      <input v-model="token" class="fld mono" type="password" placeholder="token (optional)" aria-label="Relay token" />
+      <input v-model="token" class="fld mono" type="password" placeholder="token (required for non-local)" aria-label="Relay token" />
+      <p v-if="missingToken" class="rm-hint">A token is required for this relay address.</p>
       <div class="rm-form-actions">
         <button class="btn ghost" @click="showForm = false">cancel</button>
-        <button class="btn primary" :disabled="!url.trim()" @click="save">{{ editingId ? 'save' : 'add & connect' }}</button>
+        <button class="btn primary" :disabled="!url.trim() || missingToken" @click="save">{{ editingId ? 'save' : 'add & connect' }}</button>
       </div>
     </div>
 
@@ -125,6 +127,7 @@ function onRemove(id: string) {
 .fld.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
 .fld:focus { border-color: rgba(96,165,250,.5); }
 .rm-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.rm-hint { margin: -2px 0 0; color: var(--red); font-size: var(--text-xs); }
 
 .btn { font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700; padding: 7px 14px; border-radius: var(--radius); border: 1px solid; }
 .btn.ghost { color: var(--muted); background: transparent; border-color: var(--border); }

@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"herdrem/internal/auth"
 	"herdrem/internal/protocol"
 )
 
@@ -133,9 +132,9 @@ func (s *Server) handleTunnelGate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Relay-level auth: local direct access must carry the Relay token.
+	// Relay-level auth: only local same-origin browser access may omit the token.
 	// cloudflared-forwarded traffic uses the .tunnel.local host route, not this path.
-	if !auth.Check(r, s.cfg.Token) {
+	if !s.relayAuthOK(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}

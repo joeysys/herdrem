@@ -1,5 +1,11 @@
 // relay.ts — relay URL normalization and access/session helpers.
 
+/** isLocalRelayHost matches the only host names exempt from relay tokens. */
+export function isLocalRelayHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+}
+
 /** normalizeRelayUrl coerces a user-typed relay address into a ws(s):// URL. */
 export function normalizeRelayUrl(raw: string): string {
   let u = (raw || '').trim()
@@ -14,6 +20,17 @@ export function normalizeRelayUrl(raw: string): string {
   u = u.replace(/\/+$/, '')
   u = u.replace(/\/ws$/i, '')
   return u
+}
+
+/** relayNeedsToken requires auth unless the relay is a local same-origin target. */
+export function relayNeedsToken(raw: string): boolean {
+  try {
+    const relay = new URL(normalizeRelayUrl(raw))
+    const relayProtocol = relay.protocol === 'wss:' ? 'https:' : 'http:'
+    return !isLocalRelayHost(relay.hostname) || `${relayProtocol}//${relay.host}` !== location.origin
+  } catch {
+    return true
+  }
 }
 
 /** relayHostLabel returns a short host label for display.

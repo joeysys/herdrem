@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -133,7 +134,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "files not available", http.StatusServiceUnavailable)
 		return
 	}
-	if !auth.Check(r, s.cfg.Token) && !(s.staticFS != nil && isSameOrigin(r)) {
+	if !s.relayAuthOK(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -204,9 +205,9 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePreviewAuth mints a short-lived, host-bound capability. Called via
-// fetch from the SPA (same-origin, carries Relay token in query param), NOT
-// from the iframe src. The capability is safe to put in the iframe path: it
-// grants only preview reads and never authenticates relay APIs.
+// fetch from the SPA; non-local relays carry the Relay token, NOT the iframe
+// src. The capability is safe to put in the iframe path: it grants only
+// preview reads and never authenticates relay APIs.
 func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 	// b231a6ac: Do NOT reflect Origin unconditionally — that creates a
 	// reflective CORS with credentials. Same-origin fetch (the normal case)
@@ -222,12 +223,12 @@ func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.cfg.Token == "" {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.relayAuthOK(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !auth.Check(r, s.cfg.Token) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if s.cfg.Token == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	host := r.URL.Query().Get("host")
@@ -254,12 +255,12 @@ func (s *Server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.cfg.Token == "" {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.relayAuthOK(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !auth.Check(r, s.cfg.Token) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if s.cfg.Token == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	secure := r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil
@@ -330,37 +331,18 @@ func (s *Server) validPreviewCapability(token, host string) bool {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	// When serving embedded SPA, allow same-origin WS without token.
-	// The page itself was served by this server, so the user already has access.
-	if s.staticFS != nil && auth.Check(r, s.cfg.Token) {
-		// token matches (or token is empty) — proceed
-	} else if s.staticFS != nil && isSameOrigin(r) {
-		// same-origin request to embedded SPA — skip token
-	} else if !auth.Check(r, s.cfg.Token) {
+	if !s.relayAuthOK(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	// Origin policy for the upgrade itself. coder/websocket enforces a
-	// same-origin check inside Accept, independently of the token gate above,
-	// so cross-origin clients are rejected there unless we widen it here.
+	// same-origin check inside Accept, independently of the token gate above.
 	//
-	// Two ways to be authorized cross-origin:
-	//
-	//   - A real token was configured AND presented. The token is then the
-	//     CSRF defense (an attacker's page cannot guess it), so the origin
-	//     check is redundant and we skip it. This is what makes the relay
-	//     switcher and a separate Pages deployment work.
-	//   - The origin is on the configured HERDR_ALLOWED_ORIGINS allowlist,
-	//     for token-less trusted setups (e.g. a LAN dev UI).
-	//
-	// With neither, the default same-origin check stands. Note this must test
-	// cfg.Token != "" explicitly: auth.Check returns true for *everyone* when
-	// no token is configured, so keying off it alone would drop the origin
-	// check on every token-less relay and let any website drive it.
+	// A valid configured token authorizes cross-origin access, so the origin
+	// check is redundant and can be skipped for the relay switcher/tunnels.
 	tokenAuthed := s.cfg.Token != "" && auth.Check(r, s.cfg.Token)
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: tokenAuthed,
-		OriginPatterns:     s.cfg.Origins(),
 	})
 	if err != nil {
 		s.logger.Error("ws accept error", "err", err)
@@ -405,7 +387,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !auth.Check(r, s.cfg.Token) {
+	if !s.relayAuthOK(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -465,12 +447,22 @@ func toAny(panes []herdr.Pane) []interface{} {
 	return out
 }
 
-// isSameOrigin checks if the request's Origin header matches the Host
-// (i.e., the SPA loaded from this server is connecting back to itself).
+// relayAuthOK permits only the explicitly local browser exception without a
+// token. Every other request needs a configured, matching relay token.
+func (s *Server) relayAuthOK(r *http.Request) bool {
+	if isLocalSameOrigin(r) {
+		return true
+	}
+	return s.cfg.Token != "" && auth.Check(r, s.cfg.Token)
+}
+
+// isSameOrigin checks if the request's Origin header matches the Host.
 func isSameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return false // non-browser clients must use token auth
+		// Resource requests such as <img> may omit Origin; Fetch Metadata still
+		// identifies a browser same-origin request without trusting Host alone.
+		return r.Header.Get("Sec-Fetch-Site") == "same-origin"
 	}
 	// Parse origin host and compare with request host
 	// Origin is like "http://localhost:8766" or "https://example.com"
@@ -481,4 +473,21 @@ func isSameOrigin(r *http.Request) bool {
 		originHost = origin[i+3:]
 	}
 	return originHost == host
+}
+
+// isLocalSameOrigin is the only token-free browser path: the request must be
+// same-origin, arrive from a loopback peer, and be addressed to localhost,
+// exactly 127.0.0.1, or ::1. The peer check prevents a remote client from
+// spoofing the Host and Origin headers to look local.
+func isLocalSameOrigin(r *http.Request) bool {
+	if !isLoopback(r.RemoteAddr) || !isSameOrigin(r) {
+		return false
+	}
+	host := r.Host
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		host = parsed
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
 }

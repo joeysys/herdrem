@@ -8,6 +8,7 @@ import { useTodoStore } from '../stores/todo'
 import { usePreviewsStore } from '../stores/preview'
 import { useFilesStore } from '../stores/files'
 import { useDiffStore } from '../stores/diff'
+import { relayNeedsToken } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
 
 export function useRelayConnection() {
@@ -23,6 +24,7 @@ export function useRelayConnection() {
 
   /** connect to a relay entry, clearing pane/agent/tunnel state to avoid cross-talk */
   function connectRelay(r: RelayEntry) {
+    if (!r.token && relayNeedsToken(r.url)) return
     relays.setCurrent(r.id)
     term.closePane()
     term.clearAllCache()
@@ -52,16 +54,19 @@ export function useRelayConnection() {
    * initial boot: connect to the current relay if
    * one is set, otherwise default to same-origin /ws.
    */
-  function boot() {
+  function boot(token = '') {
     safeStorage.removeItem('herdrem_token')
     const cur = relays.current()
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const sameOrigin = `${proto}//${location.host}`
     if (cur) {
-      conn.connect(cur.url, cur.token ?? '')
+      const targetToken = cur.token || token
+      if (!targetToken && relayNeedsToken(cur.url)) return
+      conn.connect(cur.url, targetToken)
     } else {
       // No saved relay — always default to same-origin /ws
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const sameOrigin = `${proto}//${location.host}`
-      conn.connect(sameOrigin, '')
+      if (!token && relayNeedsToken(sameOrigin)) return
+      conn.connect(sameOrigin, token)
     }
   }
 
