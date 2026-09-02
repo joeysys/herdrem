@@ -12,7 +12,7 @@ import { buildId } from 'virtual:build-id'
 const conn = useConnectionStore()
 const term = useTerminalStore()
 const { theme } = useTheme()
-const isModernTheme = computed(() => theme.value === 'modern-dark' || theme.value === 'modern-light')
+const isModernTheme = computed(() => theme.value === 'modern' || theme.value === 'modern-dark' || theme.value === 'modern-light')
 const props = defineProps<{ focusSection?: 'shell_cmds' | 'skills' | 'agent_cmds' | null }>()
 const emit = defineEmits<{ close: []; switched: [] }>()
 

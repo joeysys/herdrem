@@ -197,3 +197,5 @@ See [docker-compose.yml](../docker-compose.yml) for the full configuration.
   user's Herdr socket/session.
 - The token is required for LAN, tunnel, cross-origin WebSocket, and
   non-browser connections.
+- The PWA remembers relay tokens in browser local storage for automatic
+  reconnects; do not use this on a shared or untrusted browser profile.

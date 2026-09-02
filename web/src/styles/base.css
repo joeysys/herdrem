@@ -138,7 +138,7 @@ code, pre { font-family: var(--font-mono); }
   gap: 12px;
   padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border);
-  background: var(--topbar-bg, linear-gradient(180deg, rgba(23, 30, 39, 0.6), rgba(23, 30, 39, 0)));
+  background: var(--topbar-bg, var(--bg));
   backdrop-filter: var(--glass);
   -webkit-backdrop-filter: var(--glass);
   flex-shrink: 0;

@@ -56,10 +56,10 @@ const isBlocked = computed(() => (props.pane?.status || '').toLowerCase().includ
 const agentName = computed(() => String(props.pane?.display_agent || props.pane?.agent || ''))
 const isCursor = computed(() => isCursorAgent(agentName.value))
 
-// Disarm filled text when the approve-bar appears so a stale armed state
-// can't cause an extra Enter to be sent after the user approves.
-watch(isBlocked, (blocked) => {
-  if (blocked) filledText.value = ''
+// Approval can happen while the pane is already blocked, so clear the armed
+// state both at the button and when the pane changes status.
+watch(isBlocked, () => {
+  filledText.value = ''
 })
 
 // --- quick popover (skills / agent cmds) ---
@@ -173,6 +173,7 @@ function toneFor(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
 
 function approve(opt: ApproveOption) {
   haptic(18)
+  filledText.value = ''
   if (isCursor.value) {
     term.sendKeySequence(cursorKeySequence(opt.index))
   } else {

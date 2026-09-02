@@ -28,7 +28,6 @@
   --green-soft: rgba(26,158,108,0.12); --red-soft: rgba(214,69,69,0.12);
   --orange-soft: rgba(217,122,31,0.12); --blue-soft: rgba(37,99,235,0.12); --amber-soft: rgba(184,134,11,0.12);
   --term-bg: #ffffff; --term-fg: #1c2330;
-  --topbar-bg: transparent;
 }
 
 /* dark — the classic default (formerly "modern-dark"), mirrors base.css :root */

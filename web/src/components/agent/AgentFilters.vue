@@ -139,6 +139,7 @@ const STATUSES = [
   font-family: var(--font-display);
   font-size: var(--text-sm);
 }
+.search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
 .search-input::placeholder { color: var(--faint); }
 .clear {
   color: var(--muted); background: var(--surface-2);

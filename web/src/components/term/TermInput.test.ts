@@ -16,6 +16,12 @@ vi.mock('../../api/ws', () => ({
 }))
 
 const pane = { pane_id: 'p1', status: 'idle', agent: 'codex' }
+const blockedPane = {
+  ...pane,
+  status: 'blocked',
+  options: ['y', 'n'],
+  option_labels: ['approve', 'deny'],
+}
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -54,6 +60,24 @@ describe('TermInput', () => {
     await wrapper.get('input.cmd').setValue('pwd')
     await wrapper.get('input.cmd').trigger('keydown', { key: 'Enter', ctrlKey: true })
     expect(sendText).toHaveBeenCalledWith('pwd', true)
+  })
+
+  it('does not submit a filled command after approving an already-blocked pane', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    const sendKey = vi.spyOn(term, 'sendKey').mockReturnValue(true)
+    const respond = vi.spyOn(term, 'respond').mockReturnValue(true)
+
+    const wrapper = mount(TermInput, { props: { pane: blockedPane } })
+    await wrapper.get('input.cmd').setValue('echo hi')
+    await wrapper.get('form.input-row').trigger('submit')
+    await wrapper.get('button.appr-btn').trigger('click')
+    await wrapper.get('form.input-row').trigger('submit')
+
+    expect(respond).toHaveBeenCalledWith('y', 0)
+    expect(sendKey).not.toHaveBeenCalled()
+    expect(sendText).toHaveBeenCalledTimes(1)
   })
 
   it('exposes keyboard-accessible special keys', () => {

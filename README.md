@@ -113,7 +113,9 @@ The embedded PWA may connect without a token only when the browser page and rela
 are same-origin and the relay host is `localhost`, `127.0.0.1`, or `::1`. Connections via
 a LAN IP, hostname, tunnel, separate UI, or non-browser client must present the
 configured `HERDREM_TOKEN`. The PWA asks for it on first connection; the
-relay switcher also accepts it when connecting to a non-local relay.
+relay switcher also accepts it when connecting to a non-local relay. The PWA remembers each
+relay token in this browser's local storage; remove the relay entry or clear
+site data to forget it.
 
 ## License
 

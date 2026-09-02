@@ -23,10 +23,8 @@ export const useConnectionStore = defineStore('connection', () => {
     return `${proto}//${location.host}/ws`;
   })();
   const url = ref(safeStorage.getItem('herdrem_url') || defaultUrl);
-  // F19: keep the live relay token in memory only. A persisted copy in
-  // localStorage can be stolen by XSS; same-origin sessions use an HttpOnly
-  // cookie minted below, and the relays store still holds per-relay tokens
-  // in memory for switching.
+  // Standalone token keys are scrubbed below. Current relay tokens are
+  // persisted per relay by the relays store so saved connections can reconnect.
   safeStorage.removeItem('herdrem_token');
   const token = ref('');
 

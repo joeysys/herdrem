@@ -14,10 +14,14 @@ const STORAGE_KEY = 'herdrem_relays'
 const CURRENT_KEY = 'herdrem_relays_current'
 
 function persistRelays(list: RelayEntry[]) {
-  // F3: never write tokens to localStorage. Keep them on the in-memory
-  // entries for this session only.
-  const meta = list.map(({ id, name, url }) => ({ id, name, url }))
-  safeStorage.setItem(STORAGE_KEY, JSON.stringify(meta))
+  // Keep tokens with their relay so each saved address can reconnect after a reload.
+  const saved = list.map(({ id, name, url, token }) => ({
+    id,
+    name,
+    url,
+    ...(token ? { token } : {}),
+  }))
+  safeStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
 }
 
 function loadRelays(): RelayEntry[] {
@@ -26,8 +30,7 @@ function loadRelays(): RelayEntry[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as RelayEntry[]
     if (!Array.isArray(parsed)) return []
-    // One-session migration: keep any previously stored token in memory so
-    // this tab still connects, then immediately strip credentials from disk.
+    // Normalize the entry shape while retaining saved tokens for reconnect.
     persistRelays(parsed)
     return parsed.map((r) => ({
       id: r.id,

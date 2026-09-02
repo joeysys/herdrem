@@ -70,6 +70,19 @@ describe('useRelayConnection', () => {
     expect(ws.connect).not.toHaveBeenCalled()
   })
 
+  it('persists a boot token on the current non-local relay', () => {
+    const relay = seedRelay('LAN', 'ws://192.168.1.10:8766', '')
+    const relays = useRelaysStore()
+    relays.setCurrent(relay.id)
+    const { boot } = useRelayConnection()
+
+    boot('lan-token')
+
+    const stored = JSON.parse(localStorage.getItem('herdrem_relays') || '[]') as Array<{ id: string; token?: string }>
+    expect(stored.find((entry) => entry.id === relay.id)?.token).toBe('lan-token')
+    expect(ws.connect).toHaveBeenCalledWith('ws://192.168.1.10:8766', 'lan-token')
+  })
+
   it('clears tunnels, panes, previews, files and todos when switching A → B', () => {
     const a = seedRelay('A', 'ws://a.example/ws', 'tok-a')
     const b = seedRelay('B', 'ws://b.example/ws', 'tok-b')

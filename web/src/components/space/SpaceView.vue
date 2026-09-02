@@ -109,7 +109,12 @@ function newTab() {
 <template>
   <!-- inside a space: show its panes (aligned with list view card style) -->
   <div v-if="activeSpace" class="space-inside view-enter">
-    <button class="space-back" title="Back to all spaces" @click="goBack">‹ all spaces</button>
+    <div class="space-topbar">
+      <button class="space-back" title="Back to all spaces" @click="goBack">‹ all spaces</button>
+      <div v-if="props.canCreatePane" class="space-actions">
+        <button class="split-btn" title="New tab (shell)" @click="newTab">+ tab</button>
+      </div>
+    </div>
     <div class="space-title">
       <span class="space-name">{{ activeSpace.label }}</span>
       <span class="space-id mono">{{ activeSpace.id }}</span>
@@ -120,9 +125,6 @@ function newTab() {
         :title="groupByBranch ? 'Ungroup by branch' : 'Group by branch'"
         @click="groupByBranch = !groupByBranch"
       >⎇ branch</button>
-      <div v-if="props.canCreatePane" class="space-actions">
-        <button class="split-btn" title="New tab (shell)" @click="newTab">+ tab</button>
-      </div>
     </div>
     <div class="agent-list">
       <template v-for="g in groupedPanes" :key="g.branch || '_all'">
@@ -195,7 +197,10 @@ function newTab() {
         <span class="sc-label">{{ s.label }}</span>
         <span class="sc-status mono" :class="s.status">{{ s.status }}</span>
       </div>
-      <div class="sc-id mono">{{ s.id }}</div>
+      <div class="sc-id-host mono">
+        <span class="sc-id">{{ s.id }}</span>
+        <span class="sc-host">{{ s.host }}</span>
+      </div>
       <div class="sc-counts">
         <span class="sc-count-item"><span class="sc-n">{{ s.panes.length }}</span> panes</span>
         <span class="sc-count-sep">·</span>
@@ -203,7 +208,6 @@ function newTab() {
         <span class="sc-count-sep">·</span>
         <span class="sc-count-item"><span class="sc-n shells">{{ s.shellCount }}</span> shells</span>
       </div>
-      <div class="sc-host mono">{{ s.host }}</div>
     </button>
     <div v-if="spaces.length === 0" class="space-empty">No workspaces yet.</div>
   </div>
@@ -212,10 +216,14 @@ function newTab() {
 <style scoped>
 .mono { font-family: var(--font-mono); }
 
+.space-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 12px;
+}
 .space-back {
   font-family: var(--font-mono); font-size: var(--text-xs); color: var(--blue);
   background: var(--blue-soft); border: 1px solid rgba(96,165,250,.4); border-radius: var(--radius);
-  padding: 5px 11px; margin-bottom: 12px;
+  padding: 5px 11px;
 }
 .space-back:hover { filter: brightness(1.15); }
 .space-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -333,13 +341,17 @@ function newTab() {
 .space-card.blocked .sc-status { color: var(--red); }
 .space-card.working .sc-status { color: var(--orange); }
 .space-card.done .sc-status { color: var(--green); }
-.sc-id { font-size: var(--text-2xs); color: var(--faint); }
+.sc-id-host {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: var(--text-2xs); color: var(--faint);
+}
+.sc-id-host .sc-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-id-host .sc-host { text-transform: uppercase; letter-spacing: 0.08em; flex-shrink: 0; }
 .sc-counts { display: flex; align-items: center; gap: 5px; font-size: var(--text-2xs); color: var(--muted); }
 .sc-count-item { display: inline-flex; align-items: baseline; gap: 3px; }
 .sc-n { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-dim); }
 .sc-n.agents { color: var(--green); }
 .sc-n.shells { color: var(--muted); }
 .sc-count-sep { color: var(--faint); }
-.sc-host { font-size: var(--text-2xs); color: var(--faint); text-transform: uppercase; }
 .space-empty { grid-column: 1 / -1; text-align: center; color: var(--faint); padding: 40px; }
 </style>

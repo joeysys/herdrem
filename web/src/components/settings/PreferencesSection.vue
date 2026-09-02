@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useTheme } from '../../composables/useTheme'
 import { useLayoutMode } from '../../composables/useLayoutMode'
 import { usePrefsStore } from '../../stores/prefs'
@@ -11,6 +11,81 @@ const prefs = usePrefsStore()
 const agents = useAgentsStore()
 
 const props = defineProps<{ focusSection?: 'shell_cmds' | 'skills' | 'agent_cmds' | null }>()
+
+// Theme grid: show first 2 rows by default, expandable for the rest.
+// Column count is detected from the grid's actual width so it works on
+// any screen size (3 cols on phone, 4+ on desktop).
+// The selected theme is always sorted to the first position.
+const themeExpanded = ref(false)
+const themeGridEl = ref<HTMLDivElement | null>(null)
+const colCount = ref(4)
+const SWATCH_MIN = 86
+const SWATCH_GAP = 8
+
+function updateColCount() {
+  const el = themeGridEl.value
+  if (!el) return
+  colCount.value = Math.max(1, Math.floor((el.clientWidth + SWATCH_GAP) / (SWATCH_MIN + SWATCH_GAP)))
+}
+let ro: ResizeObserver | null = null
+onMounted(() => {
+  updateColCount()
+  if (themeGridEl.value && typeof ResizeObserver !== 'undefined') {
+    ro = new ResizeObserver(updateColCount)
+    ro.observe(themeGridEl.value)
+  }
+})
+onUnmounted(() => ro?.disconnect())
+
+/** Themes reordered so the selected one is first. */
+const orderedThemes = computed(() => {
+  const sel = theme.value
+  const idx = themes.findIndex((t) => t.id === sel)
+  if (idx <= 0) return themes
+  return [themes[idx], ...themes.slice(0, idx), ...themes.slice(idx + 1)]
+})
+
+const visibleCount = computed(() => colCount.value * 2)
+const visibleThemes = computed(() =>
+  themeExpanded.value ? orderedThemes.value : orderedThemes.value.slice(0, visibleCount.value),
+)
+const hasMoreThemes = computed(() => orderedThemes.value.length > visibleCount.value)
+
+// FLIP animation: capture positions BEFORE the DOM reorders, then after
+// the reorder use the Web Animations API to animate from old → new.
+// WAAPI is used instead of CSS transitions so it works even under e-ink's
+// `transition: none !important` rule.
+function selectTheme(id: string) {
+  const grid = themeGridEl.value
+  // First: record current positions before Vue re-renders
+  const first = new Map<HTMLElement, DOMRect>()
+  if (grid) {
+    for (const el of Array.from(grid.children) as HTMLElement[]) {
+      first.set(el, el.getBoundingClientRect())
+    }
+  }
+  setTheme(id)
+  // Last + Invert + Play: after DOM updates, compute deltas and animate
+  nextTick(() => {
+    if (!grid) return
+    for (const el of Array.from(grid.children) as HTMLElement[]) {
+      const old = first.get(el)
+      if (!old) continue
+      const now = el.getBoundingClientRect()
+      const dx = old.left - now.left
+      const dy = old.top - now.top
+      if (!dx && !dy) continue
+      // Play: animate from old position to new position via WAAPI
+      el.animate(
+        [
+          { transform: `translate(${dx}px, ${dy}px)` },
+          { transform: 'translate(0, 0)' },
+        ],
+        { duration: 300, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' },
+      )
+    }
+  })
+}
 
 const shellEditEl = ref<HTMLTextAreaElement | null>(null)
 const skillsEditEl = ref<HTMLTextAreaElement | null>(null)
@@ -107,15 +182,15 @@ function clearStale() {
   <div class="pref-section">
     <section class="ps-block">
       <h3>theme</h3>
-      <div class="theme-grid">
+      <div ref="themeGridEl" class="theme-grid">
         <button
-          v-for="t in themes"
+          v-for="t in visibleThemes"
           :key="t.id"
           class="theme-swatch"
           :class="{ on: theme === t.id }"
-          :data-theme="t.id"
+          :data-theme="t.preview || t.id"
           :aria-label="t.label"
-          @click="setTheme(t.id)"
+          @click="selectTheme(t.id)"
         >
           <span class="sw-colors">
             <i class="c1"></i><i class="c2"></i><i class="c3"></i>
@@ -123,6 +198,12 @@ function clearStale() {
           <span class="sw-name">{{ t.label }}</span>
         </button>
       </div>
+      <button
+        v-if="hasMoreThemes"
+        class="theme-expand"
+        :aria-expanded="themeExpanded"
+        @click="themeExpanded = !themeExpanded"
+      >{{ themeExpanded ? '▴' : '▾' }}</button>
     </section>
 
     <section class="ps-block">
@@ -208,6 +289,13 @@ function clearStale() {
 .theme-swatch .c2 { background: var(--green); }
 .theme-swatch .c3 { background: var(--blue); }
 .sw-name { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-dim); }
+.theme-expand {
+  display: block; margin: 6px auto 0; padding: 4px 24px;
+  font-size: var(--text-xs); color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.theme-expand:hover { color: var(--text); border-color: var(--border-strong); }
 
 .ps-edit {
   width: 100%; font-family: var(--font-mono); font-size: var(--text-xs);

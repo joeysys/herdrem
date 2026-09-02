@@ -683,7 +683,7 @@ onUnmounted(() => {
 <template>
   <div v-if="showBootAuth" class="boot-splash">
     <div class="boot-splash-inner">
-      <img src="/brand-mark.png" alt="" width="32" height="29" aria-hidden="true" />
+      <img src="/brand-mark.png" alt="" width="64" height="58" aria-hidden="true" />
       <form class="relay-auth-form" @submit.prevent="submitBootToken">
         <h2>relay token required</h2>
         <p>Enter HERDREM_TOKEN for this address.</p>
@@ -707,7 +707,7 @@ onUnmounted(() => {
        main UI renders so the user can access relay switch and settings. -->
   <div v-else-if="!conn.booted && conn.status === 'connecting'" class="boot-splash">
     <div class="boot-splash-inner">
-      <img src="/brand-mark.png" alt="" width="32" height="29" aria-hidden="true" />
+      <img src="/brand-mark.png" alt="" width="64" height="58" aria-hidden="true" />
       <div class="boot-spinner"></div>
     </div>
   </div>
@@ -1475,12 +1475,12 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 24px;
 }
 .boot-spinner {
-  width: 24px;
-  height: 24px;
-  border: 2px solid var(--border);
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--border);
   border-top-color: var(--blue);
   border-radius: 50%;
   animation: bp-spin 0.8s linear infinite;

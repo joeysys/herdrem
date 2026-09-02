@@ -62,10 +62,17 @@ export function useRelayConnection() {
     if (cur) {
       const targetToken = cur.token || token
       if (!targetToken && relayNeedsToken(cur.url)) return
+      if (token && relayNeedsToken(cur.url) && !cur.token) {
+        relays.update(cur.id, { token })
+      }
       conn.connect(cur.url, targetToken)
     } else {
       // No saved relay — always default to same-origin /ws
       if (!token && relayNeedsToken(sameOrigin)) return
+      if (token && relayNeedsToken(sameOrigin)) {
+        const entry = relays.upsert({ name: 'default', url: sameOrigin, token })
+        relays.setCurrent(entry.id)
+      }
       conn.connect(sameOrigin, token)
     }
   }
