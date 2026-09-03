@@ -515,11 +515,11 @@ func TestClassifyPaneContent(t *testing.T) {
 	if classifyPaneContent(&tui) != contentFull {
 		t.Error("scroll max_offset 0 should be full (TUI)")
 	}
-	// NO scroll metadata (older herdr schema, F1) → full is the safe fallback
+	// NO scroll metadata (older herdr schema) → full is the safe fallback
 	// because we cannot prove the pane is not a TUI
 	noScroll := herdr.Pane{PaneID: "plain:1"}
 	if classifyPaneContent(&noScroll) != contentFull {
-		t.Error("pane without scroll info must fall back to full (F1)")
+		t.Error("pane without scroll info must fall back to full")
 	}
 	if classifyPaneContent(nil) != contentFull {
 		t.Error("nil pane should be full")
@@ -541,7 +541,7 @@ func TestFullGuardBypassesDiffContent(t *testing.T) {
 	}
 }
 
-// F1: a partial line completed in the overlap (streaming half-line) is NOT a
+// A partial line completed in the overlap (streaming half-line) is NOT a
 // clean window shift — emitting it as append would duplicate the partial line
 // on the client. Must fall back to full.
 func TestShiftedAppendPartialLineCompletion(t *testing.T) {
@@ -554,11 +554,11 @@ func TestShiftedAppendPartialLineCompletion(t *testing.T) {
 	cur := strings.Join(append(append([]string{}, prevLines[3:59]...), "hello world", "next"), "\n") + "\n"
 	delta, appendMode := diffContent(prev, cur)
 	if appendMode {
-		t.Fatalf("F1: partial-line completion must be FULL, got append delta=%q", delta)
+		t.Fatalf("partial-line completion must be FULL, got append delta=%q", delta)
 	}
 }
 
-// F1: a mid-overlap line rewrite is also not a clean shift → full.
+// A mid-overlap line rewrite is also not a clean shift → full.
 func TestShiftedAppendMidOverlapChanged(t *testing.T) {
 	prevLines := make([]string, 60)
 	for i := range prevLines {
@@ -571,11 +571,11 @@ func TestShiftedAppendMidOverlapChanged(t *testing.T) {
 	cur := strings.Join(curLines, "\n") + "\n"
 	delta, appendMode := diffContent(prev, cur)
 	if appendMode {
-		t.Fatalf("F1: mid-overlap rewrite must be FULL, got append delta=%q", delta)
+		t.Fatalf("mid-overlap rewrite must be FULL, got append delta=%q", delta)
 	}
 }
 
-// F5: a window shift whose new tail has NO trailing newline must not inject one
+// A window shift whose new tail has NO trailing newline must not inject one
 // (that would drift the client's content one \n past the server baseline).
 func TestShiftedAppendNoTrailingNewline(t *testing.T) {
 	prevLines := make([]string, 40)
@@ -591,6 +591,6 @@ func TestShiftedAppendNoTrailingNewline(t *testing.T) {
 		t.Fatalf("expected append for clean shift, got full")
 	}
 	if delta != "partial-no-newline" {
-		t.Errorf("F5: delta = %q, want %q (no trailing newline)", delta, "partial-no-newline")
+		t.Errorf("delta = %q, want %q (no trailing newline)", delta, "partial-no-newline")
 	}
 }

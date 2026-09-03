@@ -137,7 +137,7 @@ describe('useTerminalStore cache clearing', () => {
   })
 })
 
-describe('setContent poll mode (N2)', () => {
+describe('setContent poll mode', () => {
   it('merges an unversioned poll tail when it cleanly overlaps retained history', () => {
     const send = vi.spyOn(ws, 'send').mockReturnValue(true)
     const term = useTerminalStore()
@@ -240,7 +240,7 @@ describe('setContent poll mode (N2)', () => {
     expect(term.content).toBe('content-a\n')
   })
 
-  it('N2: delta for the poll-reported rev is rejected while baseline is unknown (no silent content loss)', () => {
+  it('delta for the poll-reported rev is rejected while baseline is unknown (no silent content loss)', () => {
     const term = useTerminalStore()
     term.activePane = 'p1' as any
     // client holds rev 10 content

@@ -14,7 +14,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-// F2: BroadcastJSONIncremental must only reach clients that declared
+// BroadcastJSONIncremental must only reach clients that declared
 // incremental support; BroadcastJSON reaches everyone.
 func TestBroadcastIncrementalTargetsDeclaredClients(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

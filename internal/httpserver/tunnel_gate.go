@@ -85,14 +85,14 @@ func (rl *gateRateLimiter) recordSuccess(ip string) {
 // handleTunnelGateByHost serves requests routed by Host header (e.g. Host: tun-5173-abcd.tunnel.local).
 // These requests come from cloudflared and do NOT carry the Relay token, so Relay-level
 // auth is skipped here — the tunnel gate's own access control (token_gate/basic_auth/direct) applies.
-// F8: Verify the request originates from loopback (cloudflared runs locally).
+// Verify the request originates from loopback (cloudflared runs locally).
 func (s *Server) handleTunnelGateByHost(w http.ResponseWriter, r *http.Request) {
 	if s.tunnels == nil {
 		http.Error(w, "tunnel service not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	// F8: Only accept host-routed gate requests from loopback addresses.
+	// Only accept host-routed gate requests from loopback addresses.
 	// cloudflared connects to localhost; non-loopback sources are attempting
 	// to bypass Relay auth via Host header spoofing.
 	if !isLoopback(r.RemoteAddr) {
@@ -193,14 +193,14 @@ func (s *Server) checkBasicAuth(r *http.Request, info *protocol.TunnelInfo) bool
 	if info.Token == "" {
 		return false
 	}
-	// F7: Use constant-time comparison instead of ==.
+	// Use constant-time comparison instead of ==.
 	userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(info.Token)) == 1
 	passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(info.Token)) == 1
 	return userMatch || passMatch
 }
 
 // checkBasicAuthGate applies the Basic Auth gate, including rate limiting.
-// F3: Basic Auth is just as public-facing as token_gate, so it must share the
+// Basic Auth is just as public-facing as token_gate, so it must share the
 // same per-client-IP failure counter — otherwise it is an unlimited
 // brute-force oracle for the user-chosen PIN that the UI explicitly allows.
 // Returns true when the request may proceed to the proxy.
@@ -225,24 +225,24 @@ func (s *Server) checkBasicAuthGate(w http.ResponseWriter, r *http.Request, info
 }
 
 func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *protocol.TunnelInfo, id string, subPath string) bool {
-	// F3: Use real client IP from cloudflared headers, not RemoteAddr (which is
+	// Use real client IP from cloudflared headers, not RemoteAddr (which is
 	// always 127.0.0.1 behind cloudflared, causing global self-lock DoS).
 	clientIP := realClientIP(r)
 
-	// F3: Rate limit auth attempts
+	// Rate limit auth attempts
 	if s.gateLimiter != nil && !s.gateLimiter.allow(clientIP) {
 		http.Error(w, "Too many failed attempts, try again later", http.StatusTooManyRequests)
 		return false
 	}
 
 	authed := false
-	redirectSent := false // 25da5e13: explicit flag instead of guessing form field
+	redirectSent := false // explicit flag instead of guessing form field
 
 	// Check query param ?token=...
 	tokenQ := r.URL.Query().Get("token")
 	if info.Token != "" && subtle.ConstantTimeCompare([]byte(tokenQ), []byte(info.Token)) == 1 {
 		s.setTunnelCookie(w, info.Token)
-		// F2: Do not proxy a request that still carries the gate token in its
+		// Do not proxy a request that still carries the gate token in its
 		// URL — the protected app (and its access logs) would see the
 		// credential. Redirect to the same URL with the token removed, exactly
 		// as the POST login path does. Only safe for GET/HEAD, where a 302
@@ -285,7 +285,7 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 		if s.gateLimiter != nil {
 			s.gateLimiter.recordSuccess(clientIP)
 		}
-		// 25da5e13: After redirect, the response is complete — must not
+		// After redirect, the response is complete — must not
 		// continue to proxy onto the same response. Return false unconditionally.
 		if redirectSent {
 			return false
@@ -293,7 +293,7 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 		return true
 	}
 
-	// F3: Record failed attempt for ALL auth paths (GET query, cookie, POST),
+	// Record failed attempt for ALL auth paths (GET query, cookie, POST),
 	// not just POST. This prevents bypassing rate limiting via GET ?token=guess.
 	if s.gateLimiter != nil {
 		s.gateLimiter.recordFailure(clientIP)
@@ -304,7 +304,7 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 	return false
 }
 
-// setTunnelCookie sets the tunnel auth cookie with Secure attribute (F7).
+// setTunnelCookie sets the tunnel auth cookie with Secure attribute.
 func (s *Server) setTunnelCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     tunnelCookieName,
@@ -312,14 +312,14 @@ func (s *Server) setTunnelCookie(w http.ResponseWriter, token string) {
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,
 		HttpOnly: true,
-		Secure:   true, // F7: Always set Secure — tunnel URLs are HTTPS via cloudflared
+		Secure:   true, // Always set Secure — tunnel URLs are HTTPS via cloudflared
 	})
 }
 
 // realClientIP extracts the real client IP from cloudflared proxy headers.
-// F3: RemoteAddr is always 127.0.0.1 behind cloudflared, so use CF-Connecting-IP
+// RemoteAddr is always 127.0.0.1 behind cloudflared, so use CF-Connecting-IP
 // or X-Forwarded-For to distinguish actual clients for rate limiting.
-// bc339ec5: XFF first item is client-controlled and forgeable. Only trust XFF
+// XFF first item is client-controlled and forgeable. Only trust XFF
 // from loopback (local proxy), and take the LAST item (added by the proxy),
 // not the first (which the client can set arbitrarily).
 func realClientIP(r *http.Request) string {
@@ -328,7 +328,7 @@ func realClientIP(r *http.Request) string {
 		return strings.TrimSpace(ip)
 	}
 	// Only trust XFF when the request comes from loopback (local cloudflared).
-	// bc339ec5: Take the last item (proxy-appended), not the first (client-set).
+	// Take the last item (proxy-appended), not the first (client-set).
 	if isLoopback(r.RemoteAddr) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
@@ -347,7 +347,7 @@ func realClientIP(r *http.Request) string {
 }
 
 // gateCleanURL returns the request's path plus its query with the gate `token`
-// parameter removed, for redirecting away from a credential-bearing URL (F2).
+// parameter removed, for redirecting away from a credential-bearing URL.
 func gateCleanURL(r *http.Request) string {
 	q := r.URL.Query()
 	q.Del("token")
@@ -358,7 +358,7 @@ func gateCleanURL(r *http.Request) string {
 }
 
 // sanitizeGateCredentials removes the gate's own credentials from a request
-// that is about to be proxied to the protected application (F2). The app is
+// that is about to be proxied to the protected application. The app is
 // not a trusted party: it must never see the gate token, the gate cookie, or
 // the Authorization header that basic_auth consumed.
 //
@@ -393,7 +393,7 @@ func sanitizeGateCredentials(req *http.Request, authMode string) {
 }
 
 // stripGateSetCookie drops any attempt by the protected application to
-// overwrite the gate cookie (F2).
+// overwrite the gate cookie.
 func stripGateSetCookie(resp *http.Response) error {
 	values := resp.Header.Values("Set-Cookie")
 	if len(values) == 0 {
@@ -443,7 +443,7 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request, targetPort in
 			req.URL.Host = targetHost
 			req.URL.Path = subPath
 			req.URL.RawQuery = r.URL.RawQuery
-			// F2: strip the gate's own credentials before they reach the app.
+			// Strip the gate's own credentials before they reach the app.
 			sanitizeGateCredentials(req, authMode)
 		},
 		ModifyResponse: stripGateSetCookie,
@@ -478,7 +478,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPo
 	r.Header.Set("X-Forwarded-Host", r.Host)
 	r.Host = fmt.Sprintf("localhost:%d", targetPort)
 	r.URL.Path = subPath
-	// F2: the WebSocket path must apply the same credential scrubbing as the
+	// The WebSocket path must apply the same credential scrubbing as the
 	// HTTP path — the upgrade request carries the same query, cookie and
 	// Authorization header.
 	sanitizeGateCredentials(r, authMode)

@@ -65,7 +65,7 @@ type Poller struct {
 	subscribers  map[string]int64     // pane_id → unix ts of last read_pane request (TTL-based subscription)
 
 	// single-flight guard so a slow pushContentDeltas goroutine is never
-	// overlapped by the next poll cycle (N1): the previous run must finish
+	// overlapped by the next poll cycle: the previous run must finish
 	// (including its slow reads and cache writes) before a new one starts.
 	deltaMu      sync.Mutex
 	deltaRunning bool
@@ -374,8 +374,8 @@ func (p *Poller) pollOnce(ctx context.Context) {
 
 	// Push incremental terminal content deltas for changed panes. Runs
 	// asynchronously so a slow remote read (ssh) can never stall the whole
-	// poll loop (F4), but is single-flight: if the previous run is still
-	// reading, this cycle skips rather than overlapping it (N1).
+	// poll loop, but is single-flight: if the previous run is still reading,
+	// this cycle skips rather than overlapping it.
 	if p.tryStartDelta() {
 		go func() {
 			defer p.deltaDone()
@@ -958,8 +958,7 @@ func (p *Poller) enrichLastActive(panes []herdr.Pane) bool {
 // pane's terminal traffic at all — it does not per-connection filter
 // delivery. Both deltas and the fallback full snapshots are routed through
 // BroadcastJSONIncremental, so they reach only incremental-capable clients;
-// older clients are served via the direct read_pane response path
-// (hub.MarkIncremental / F2).
+// older clients are served via the direct read_pane response path.
 func (p *Poller) Subscribe(paneID string) {
 	p.contentMu.Lock()
 	p.subscribers[paneID] = time.Now().Unix()
@@ -1051,7 +1050,7 @@ const minAlignRun = 20
 
 // maxShiftSearch bounds how far into prev shiftedAppend scans for the shift
 // point. A rolling window drops only a few lines per poll, so k is small; a
-// large bound would degrade to O(n²) on repetitive content (F3).
+// large bound would degrade to O(n²) on repetitive content.
 const maxShiftSearch = 256
 
 // shiftedAppend aligns cur's head against prev to recover the lines appended
@@ -1074,11 +1073,11 @@ func shiftedAppend(prev, cur string) (delta string, ok bool) {
 	// extend ALL the way to prev's end (i == len(prevLines)). If the run stops
 	// early, the overlap region itself changed (a partial line completed, a
 	// mid-window line rewritten) and emitting the tail as "append" would
-	// duplicate content the client already holds (F1).
+	// duplicate content the client already holds.
 	//
 	// k is bounded: a rolling window only drops a small number of lines per
 	// poll (herdr scrolls ~viewport rows), so scanning far into prev is wasted
-	// work on repetitive content (F3).
+	// work on repetitive content.
 	bestK := -1
 	bestRun := 0
 	maxK := len(prevLines)
@@ -1106,7 +1105,7 @@ func shiftedAppend(prev, cur string) (delta string, ok bool) {
 	}
 
 	// Reconstruct the new lines preserving cur's trailing newline: splitLines
-	// dropped it, so re-append it if cur actually ended with one (F5).
+	// dropped it, so re-append it if cur actually ended with one.
 	newLines := curLines[bestRun:]
 	if len(newLines) == 0 {
 		return "", false
@@ -1144,7 +1143,7 @@ func hasLoneCR(s string) bool {
 //     agents (scrollback 0, redraw in place) and for panes whose scroll
 //     metadata is absent — without scroll info we cannot tell a TUI from a
 //     scrollback pane, and splicing an incremental delta onto a redrawn TUI
-//     screen would corrupt it, so full is the safe fallback (F1).
+//     screen would corrupt it, so full is the safe fallback.
 //   - contentIncremental: the pane has real scrollback, so append/window-shift
 //     deltas are safe.
 type paneContentMode int
@@ -1171,8 +1170,7 @@ func classifyPaneContent(p *herdr.Pane) paneContentMode {
 
 // tryStartDelta atomically claims the single-flight slot for a delta push.
 // Returns false if a previous run is still in flight (its reads and cache
-// writes would otherwise race with this one and could reorder rev/content)
-// (N1).
+// writes would otherwise race with this one and could reorder rev/content).
 func (p *Poller) tryStartDelta() bool {
 	p.deltaMu.Lock()
 	defer p.deltaMu.Unlock()
@@ -1197,7 +1195,7 @@ func (p *Poller) deltaDone() {
 // against the cached snapshot: pure-suffix growth and clean window shifts
 // yield append deltas; anything else (in-place redraw, TUI, unknown pane
 // type) falls back to a full snapshot. Runs asynchronously from pollOnce so a
-// slow remote read cannot stall the poll loop (F4).
+// slow remote read cannot stall the poll loop.
 func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 	// No connected clients → nothing to push; skip the content reads entirely.
 	if p.hub.Count() == 0 {
@@ -1219,7 +1217,6 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		// and every change replaces the whole view, so incremental append is
 		// meaningless. Panes without scroll metadata (older herdr) are also
 		// delivered as full snapshots since we cannot prove they are not TUIs
-		// (F1).
 		full := classifyPaneContent(pane) == contentFull
 
 		p.contentMu.Lock()

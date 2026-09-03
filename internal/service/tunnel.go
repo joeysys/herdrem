@@ -24,7 +24,7 @@ type TunnelItem struct {
 	cmd    *exec.Cmd
 	cancel func()
 	// waited is closed once the monitor goroutine has reaped cmd. Exactly one
-	// goroutine ever calls cmd.Wait (F7); Close/Shutdown wait on this channel
+	// goroutine ever calls cmd.Wait; Close/Shutdown wait on this channel
 	// instead of calling Wait themselves, which would race.
 	waited chan struct{}
 }
@@ -63,7 +63,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	if authMode != "token_gate" && authMode != "basic_auth" && authMode != "direct" {
 		return nil, fmt.Errorf("invalid auth_mode %q", authMode)
 	}
-	// F3: Enforce minimum PIN length for user-provided credentials.
+	// Enforce minimum PIN length for user-provided credentials.
 	// The default (empty pin) generates a 128-bit hex token; custom PINs
 	// must be at least 8 characters to resist brute force.
 	if pin != "" && len(pin) < 8 {
@@ -74,7 +74,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	// Check if active tunnel already exists for this port
 	for _, item := range ts.tunnels {
 		if item.Info.Port == targetPort && item.Info.Status == "active" {
-			// F6: Reject reuse if auth_mode or pin doesn't match.
+			// Reject reuse if auth_mode or pin doesn't match.
 			if item.Info.AuthMode != authMode || (pin != "" && item.Info.Token != pin) {
 				ts.mu.Unlock()
 				return nil, fmt.Errorf("port %d already has an active tunnel with different auth_mode or credentials", targetPort)
@@ -85,7 +85,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 		}
 	}
 
-	// F6: Credential generation must fail closed. A silent entropy failure
+	// Credential generation must fail closed. A silent entropy failure
 	// would publish a predictable token on a public gate, so propagate the
 	// error and do not start cloudflared.
 	idSuffix, err := randomHex(4)
@@ -96,7 +96,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	id := fmt.Sprintf("tun-%d-%s", targetPort, idSuffix)
 	token := pin
 	if token == "" {
-		// F3: Use high-entropy default token instead of 6-digit PIN.
+		// Use high-entropy default token instead of 6-digit PIN.
 		// A 16-byte hex token (128 bits) makes brute-force infeasible.
 		token, err = randomHex(16)
 		if err != nil {
@@ -180,7 +180,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	}
 
 	// Read stderr in background to parse Public URL. This goroutine also owns
-	// the single cmd.Wait() for this process (F7).
+	// the single cmd.Wait() for this process.
 	go ts.monitorTunnelStderr(id, item, stderr)
 
 	return &infoCopy, nil
@@ -209,7 +209,7 @@ func (ts *TunnelService) monitorTunnelStderr(id string, item *TunnelItem, stderr
 		}
 	}
 
-	// F7: stderr EOF means the process is finishing. This goroutine is the sole
+	// stderr EOF means the process is finishing. This goroutine is the sole
 	// owner of cmd.Wait() for this process — reaping here covers the common
 	// "cloudflared exited on its own" path, not just explicit Close/Shutdown.
 	waitErr := item.cmd.Wait()
@@ -259,7 +259,7 @@ func (ts *TunnelService) CloseTunnel(id string) error {
 	delete(ts.tunnels, id)
 	ts.mu.Unlock()
 
-	// F7: do not call Wait here — the monitor goroutine owns it. Just wait for
+	// Do not call Wait here — the monitor goroutine owns it. Just wait for
 	// it to finish reaping, bounded so a wedged child cannot block the caller.
 	waitReaped(item, reapTimeout)
 
@@ -272,7 +272,7 @@ func (ts *TunnelService) CloseTunnel(id string) error {
 }
 
 // Shutdown closes all active tunnels and reaps child processes.
-// Called when the Relay server is shutting down (F4).
+// Called when the Relay server is shutting down.
 func (ts *TunnelService) Shutdown() {
 	ts.mu.Lock()
 	ids := make([]string, 0, len(ts.tunnels))
@@ -291,7 +291,7 @@ func (ts *TunnelService) Shutdown() {
 	ts.tunnels = make(map[string]*TunnelItem)
 	ts.mu.Unlock()
 
-	// F7: the monitor goroutine reaps; wait for it rather than calling Wait
+	// The monitor goroutine reaps; wait for it rather than calling Wait
 	// concurrently from here.
 	for _, item := range items {
 		waitReaped(item, reapTimeout)
@@ -347,7 +347,7 @@ func (ts *TunnelService) ListTunnels() []protocol.TunnelInfo {
 }
 
 // randomHex returns bytesLen cryptographically random bytes as hex.
-// F6: the error is returned rather than swallowed — these values are used as
+// The error is returned rather than swallowed — these values are used as
 // public-gate credentials, so an entropy failure must fail closed.
 func randomHex(bytesLen int) (string, error) {
 	b := make([]byte, bytesLen)

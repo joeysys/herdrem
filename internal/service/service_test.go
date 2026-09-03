@@ -298,7 +298,7 @@ func TestAllowedHostRejectsOptionLikeHost(t *testing.T) {
 }
 
 func TestNormalizePaneMode(t *testing.T) {
-	// Regression for the F7 mode-echo fix: an empty client mode must be
+	// Regression for the mode-echo fix: an empty client mode must be
 	// normalized to "shell" so the PaneCreated echo is concrete (matches the
 	// TS union and docs) instead of an empty string.
 	if got := normalizePaneMode(""); got != "shell" {

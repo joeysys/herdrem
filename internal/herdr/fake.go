@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// FakeClient is a mock HerdrClient for testing and M0 development.
+// FakeClient is a mock HerdrClient for testing.
 type FakeClient struct {
 	Panes []Pane
 	// ReadContent overrides the content returned by ReadPane (e.g. a numbered

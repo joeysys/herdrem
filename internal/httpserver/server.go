@@ -192,7 +192,7 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath := "/" + strings.TrimPrefix(filePart, "/")
 
-	// F2: Force the response into a sandboxed context even if loaded via
+	// Force the response into a sandboxed context even if loaded via
 	// top-level navigation. This prevents scripts in previewed HTML from
 	// executing in the Relay's origin when the capability allows access.
 	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
@@ -209,7 +209,7 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 // src. The capability is safe to put in the iframe path: it grants only
 // preview reads and never authenticates relay APIs.
 func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
-	// b231a6ac: Do NOT reflect Origin unconditionally — that creates a
+	// Do NOT reflect Origin unconditionally — that creates a
 	// reflective CORS with credentials. Same-origin fetch (the normal case)
 	// needs no CORS headers. Cross-origin is not supported for preview auth.
 	if r.Header.Get("Origin") != "" {

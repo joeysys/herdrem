@@ -191,7 +191,7 @@ func main() {
 	}
 	cancel()
 	_ = httpSrv.Shutdown(context.Background())
-	tunnelSvc.Shutdown() // F4: terminate all cloudflared processes on exit
+	tunnelSvc.Shutdown() // terminate all cloudflared processes on exit
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}

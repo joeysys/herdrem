@@ -11,7 +11,7 @@ import (
 )
 
 // writeFakeCloudflared creates a fake cloudflared binary that prints a tunnel URL
-// and stays alive until killed. This avoids real public tunnel creation (F5).
+// and stays alive until killed. This avoids real public tunnel creation.
 func writeFakeCloudflared(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -44,7 +44,7 @@ func writeFakeCloudflared(t *testing.T) string {
 }
 
 func TestTunnelServiceCreateAndList(t *testing.T) {
-	// F5: Use a fake cloudflared binary to avoid real public tunnel creation.
+	// Use a fake cloudflared binary to avoid real public tunnel creation.
 	fakeBin := writeFakeCloudflared(t)
 
 	// Override the cloudflared binary path by setting PATH to include our fake
@@ -62,7 +62,7 @@ func TestTunnelServiceCreateAndList(t *testing.T) {
 		t.Fatalf("unexpected error creating tunnel: %v", err)
 	}
 
-	// F5: Use t.Cleanup for guaranteed cleanup even on t.Fatal
+	// Use t.Cleanup for guaranteed cleanup even on t.Fatal
 	t.Cleanup(func() {
 		_ = svc.CloseTunnel(info.ID)
 	})

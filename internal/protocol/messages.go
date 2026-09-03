@@ -49,7 +49,7 @@ type PaneContent struct {
 	Append  bool   `json:"append,omitempty"`   // true = content is incremental delta
 	Rev     *int   `json:"rev,omitempty"`      // revision this content represents (nil = unknown; 0 is a real revision)
 	BaseRev *int   `json:"base_rev,omitempty"` // for append: revision of the snapshot the delta extends
-	Poll    bool   `json:"poll,omitempty"`     // echoed: response is a subscription refresh, not a content replacement (N2)
+	Poll    bool   `json:"poll,omitempty"`     // echoed: response is a subscription refresh, not a content replacement
 }
 
 // TodoUpdated signals a todo item change.
@@ -96,10 +96,10 @@ type FileListing struct {
 type GitDiffContent struct {
 	Type    string `json:"type"` // "git_diff_content"
 	Cwd     string `json:"cwd"`
-	Mode    string `json:"mode"`              // "unstaged" | "cached" | "commit"
-	Commit  string `json:"commit,omitempty"`  // echoed when mode == "commit"
-	Content string `json:"content"`           // diff text (may be empty)
-	ReqID   string `json:"req_id,omitempty"`  // echoed from the matching GitDiff
+	Mode    string `json:"mode"`             // "unstaged" | "cached" | "commit"
+	Commit  string `json:"commit,omitempty"` // echoed when mode == "commit"
+	Content string `json:"content"`          // diff text (may be empty)
+	ReqID   string `json:"req_id,omitempty"` // echoed from the matching GitDiff
 }
 
 // GitLogResult carries a list of recent commits for the selector.
@@ -163,8 +163,8 @@ type ReadPane struct {
 	Lines       int    `json:"lines,omitempty"`       // default 30
 	Purpose     string `json:"purpose,omitempty"`     // "term" | "preview", echoed back
 	Refresh     bool   `json:"refresh,omitempty"`     // force a direct herdr read, bypassing the poller cache
-	Incremental bool   `json:"incremental,omitempty"` // client declares it understands append deltas (F2)
-	Poll        bool   `json:"poll,omitempty"`        // subscription-baseline refresh; response is not used to replace content (N2)
+	Incremental bool   `json:"incremental,omitempty"` // client declares it understands append deltas
+	Poll        bool   `json:"poll,omitempty"`        // subscription-baseline refresh; response is not used to replace content
 }
 
 // TodoGet requests all todo items.
@@ -232,8 +232,8 @@ type FileList struct {
 
 // GitDiff requests a git diff for a working directory.
 type GitDiff struct {
-	Type   string `json:"type"`             // "git_diff"
-	Cwd    string `json:"cwd"`              // repo path (must be inside sandbox roots)
+	Type   string `json:"type"` // "git_diff"
+	Cwd    string `json:"cwd"`  // repo path (must be inside sandbox roots)
 	Host   string `json:"host,omitempty"`
 	Mode   string `json:"mode"`             // "unstaged" | "cached" | "commit"
 	Commit string `json:"commit,omitempty"` // required when mode == "commit"
@@ -326,7 +326,7 @@ type TunnelUpdated struct {
 }
 
 // IntPtr returns a pointer to v, for *int fields so that revision 0 survives
-// JSON serialization (F2: herdr revisions start at zero).
+// JSON serialization (herdr revisions start at zero).
 func IntPtr(v int) *int {
 	return &v
 }

@@ -208,7 +208,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       // Poll-mode full response (6s subscription refresh): the content is a
       // truncated tail that must NOT replace the delta-grown view. Only
       // revalidate the revision baseline; a mismatch means we are out of sync
-      // and a full resync is needed (N2).
+      // and a full resync is needed.
       const last = contentRevs.value[paneId]
       if (rev !== undefined) {
         if (last !== undefined && rev === last) {
@@ -219,7 +219,7 @@ export const useTerminalStore = defineStore('terminal', () => {
           // unknown (delete, not adopt) so the append path rejects any delta
           // until the full resync lands — adopting the server's rev while our
           // content is stale would let a delta splice onto the wrong baseline
-          // and silently drop real output (N2 verify-reject).
+          // and silently drop real output.
           delete contentRevs.value[paneId]
           if (paneId === activePane.value) requestResync()
         }
@@ -259,7 +259,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (refresh) msg.refresh = true
     // Poll-mode responses are subscription baseline refreshes: the client
     // keeps its delta-grown content and only revalidates the revision. A
-    // small line count keeps the poll response tiny (N2).
+    // small line count keeps the poll response tiny.
     if (poll) msg.poll = true
     // Declare incremental support so the relay only routes append deltas to
     // this client. Older clients that can't interpret deltas get full snapshots

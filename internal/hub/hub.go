@@ -17,7 +17,7 @@ type Client struct {
 	token string
 	// incremental marks a client that declared support for incremental
 	// terminal deltas (append/rev/base_rev). Deltas are only delivered to
-	// such clients; older clients receive full snapshots only (F2).
+	// such clients; older clients receive full snapshots only.
 	incremental bool
 }
 
@@ -90,7 +90,7 @@ func (h *Hub) Run(ctx context.Context) {
 
 		case msg := <-h.broadcastIncremental:
 			// Incremental terminal deltas are only sent to clients that declared
-			// support (F2); older clients would splice the delta as a full
+			// support; older clients would splice the delta as a full
 			// snapshot and corrupt their view.
 			h.mu.RLock()
 			for c := range h.clients {
@@ -156,8 +156,8 @@ func (h *Hub) BroadcastJSON(v interface{}) {
 }
 
 // BroadcastJSONIncremental broadcasts a message only to clients that declared
-// support for incremental terminal deltas (F2: never send deltas to clients
-// that would misinterpret them as full snapshots).
+// support for incremental terminal deltas. Never send deltas to clients that
+// would misinterpret them as full snapshots.
 func (h *Hub) BroadcastJSONIncremental(v interface{}) {
 	data, err := json.Marshal(v)
 	if err != nil {

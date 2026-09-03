@@ -78,7 +78,7 @@ func pathInRoots(real string, roots []string) error {
 
 // fdPath returns the path of the file already opened in f.
 // On Linux this uses /proc/self/fd so the check follows the FD, not a
-// later symlink swap of the original path (F22).
+// later symlink swap of the original path.
 func fdPath(f *os.File) (string, error) {
 	proc := "/proc/self/fd/" + strconv.Itoa(int(f.Fd()))
 	if target, err := os.Readlink(proc); err == nil && target != "" {
@@ -226,7 +226,7 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 		if err := isSafePath(path, roots); err != nil {
 			return err
 		}
-		// F5: Stream the remote file straight through. The previous version
+		// Stream the remote file straight through. The previous version
 		// ran `base64` over SSH and held both the encoded buffer and the
 		// decoded copy in memory (~2.3x file size, unbounded), so a single
 		// large asset — which HTML previews fetch automatically via relative
@@ -263,7 +263,7 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 
 // maxStreamBytes bounds a single streamed remote response. Streaming keeps
 // memory constant, but an unbounded response still ties up the connection and
-// the remote SSH session, so cap it explicitly (F5). A var rather than a const
+// the remote SSH session, so cap it explicitly. A var rather than a const
 // so tests can lower it without producing a gigabyte of data.
 var maxStreamBytes int64 = 256 << 20 // 256 MiB
 

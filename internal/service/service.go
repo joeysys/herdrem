@@ -202,7 +202,7 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 		s.subscriber.Subscribe(msg.PaneID)
 	}
 	// A client that declares incremental support may receive append deltas;
-	// mark the connection so the hub only routes deltas to capable clients (F2).
+	// mark the connection so the hub only routes deltas to capable clients.
 	if msg.Incremental {
 		s.hub.MarkIncremental(conn)
 	}
@@ -532,7 +532,7 @@ func (s *Service) handlePaneCreate(ctx context.Context, conn *websocket.Conn, da
 		return
 	}
 	// Normalize the echoed mode: shell/empty both mean split, but the client
-	// (and docs) expect a concrete value (F7).
+	// (and docs) expect a concrete value.
 	echoMode := normalizePaneMode(msg.Mode)
 	s.sendJSON(ctx, conn, protocol.PaneCreated{
 		Type:   "pane_created",
