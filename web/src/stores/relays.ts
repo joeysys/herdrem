@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { normalizeRelayUrl } from '../utils/relay'
+import { extractRelayCredentials } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
 
 export interface RelayEntry {
@@ -14,14 +14,11 @@ const STORAGE_KEY = 'herdrem_relays'
 const CURRENT_KEY = 'herdrem_relays_current'
 
 function persistRelays(list: RelayEntry[]) {
-  // Keep tokens with their relay so each saved address can reconnect after a reload.
-  const saved = list.map(({ id, name, url, token }) => ({
-    id,
-    name,
-    url,
-    ...(token ? { token } : {}),
-  }))
-  safeStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+  // Never write tokens to localStorage. Keep them on the in-memory
+  // entries for this session only. Same-origin reconnect uses the HttpOnly
+  // session cookie, not this list.
+  const meta = list.map(({ id, name, url }) => ({ id, name, url }))
+  safeStorage.setItem(STORAGE_KEY, JSON.stringify(meta))
 }
 
 function loadRelays(): RelayEntry[] {
@@ -30,14 +27,19 @@ function loadRelays(): RelayEntry[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as RelayEntry[]
     if (!Array.isArray(parsed)) return []
-    // Normalize the entry shape while retaining saved tokens for reconnect.
-    persistRelays(parsed)
-    return parsed.map((r) => ({
-      id: r.id,
-      name: r.name,
-      url: r.url,
-      token: r.token,
-    }))
+    // One-session migration: keep any previously stored token in memory so
+    // this tab still connects, then immediately strip credentials from disk.
+    const list = parsed.map((r) => {
+      const creds = extractRelayCredentials(r.url || '')
+      return {
+        id: r.id,
+        name: r.name,
+        url: creds.url,
+        token: r.token || creds.token || undefined,
+      }
+    })
+    persistRelays(list)
+    return list
   } catch {
     return []
   }
@@ -52,11 +54,12 @@ export const useRelaysStore = defineStore('relays', () => {
   }
 
   function add(name: string, url: string, token?: string): RelayEntry {
+    const creds = extractRelayCredentials(url)
     const entry: RelayEntry = {
       id: crypto.randomUUID(),
       name,
-      url: normalizeRelayUrl(url),
-      token,
+      url: creds.url,
+      token: token || creds.token || undefined,
     }
     relays.value.push(entry)
     save()
@@ -66,19 +69,24 @@ export const useRelaysStore = defineStore('relays', () => {
   function update(id: string, patch: Partial<Omit<RelayEntry, 'id'>>) {
     const idx = relays.value.findIndex((r) => r.id === id)
     if (idx === -1) return
-    if (patch.url) patch.url = normalizeRelayUrl(patch.url)
+    if (patch.url) {
+      const creds = extractRelayCredentials(patch.url)
+      patch.url = creds.url
+      if (creds.token && patch.token === undefined) patch.token = creds.token
+    }
     relays.value[idx] = { ...relays.value[idx], ...patch }
     save()
   }
 
   function upsert(input: { name: string; url: string; token?: string }): RelayEntry {
-    const norm = normalizeRelayUrl(input.url)
-    const existing = relays.value.find((r) => r.url === norm)
+    const creds = extractRelayCredentials(input.url)
+    const token = input.token || creds.token || undefined
+    const existing = relays.value.find((r) => r.url === creds.url)
     if (existing) {
-      update(existing.id, { name: input.name, token: input.token })
-      return { ...existing, name: input.name, token: input.token }
+      update(existing.id, { name: input.name, token })
+      return { ...existing, name: input.name, token }
     }
-    return add(input.name, norm, input.token)
+    return add(input.name, creds.url, token)
   }
 
   function remove(id: string) {

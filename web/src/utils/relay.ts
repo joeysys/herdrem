@@ -1,4 +1,5 @@
 // relay.ts — relay URL normalization and access/session helpers.
+import { safeStorage } from './storage'
 
 /** isLocalRelayHost matches the only host names exempt from relay tokens. */
 export function isLocalRelayHost(hostname: string): boolean {
@@ -6,20 +7,33 @@ export function isLocalRelayHost(hostname: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1'
 }
 
-/** normalizeRelayUrl coerces a user-typed relay address into a ws(s):// URL. */
-export function normalizeRelayUrl(raw: string): string {
+/** extractRelayCredentials normalizes a relay address and lifts `token` out of the query. */
+export function extractRelayCredentials(raw: string): { url: string; token: string } {
   let u = (raw || '').trim()
-  if (!u) return u
-  // add scheme based on page protocol if missing
+  if (!u) return { url: '', token: '' }
   if (!/^wss?:\/\//i.test(u)) {
     u = u.replace(/^https?:\/\//i, '')
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'
     u = proto + u
   }
-  // strip trailing slashes and a trailing /ws path
-  u = u.replace(/\/+$/, '')
-  u = u.replace(/\/ws$/i, '')
-  return u
+  try {
+    const parsed = new URL(u)
+    const token = parsed.searchParams.get('token') || ''
+    parsed.searchParams.delete('token')
+    let path = parsed.pathname.replace(/\/+$/, '').replace(/\/ws$/i, '')
+    if (!path || path === '/') path = ''
+    const search = parsed.searchParams.toString()
+    const url = `${parsed.protocol}//${parsed.host}${path}${search ? `?${search}` : ''}${parsed.hash}`
+    return { url, token }
+  } catch {
+    u = u.replace(/\/+$/, '').replace(/\/ws$/i, '')
+    return { url: u, token: '' }
+  }
+}
+
+/** normalizeRelayUrl coerces a user-typed relay address into a ws(s):// URL. */
+export function normalizeRelayUrl(raw: string): string {
+  return extractRelayCredentials(raw).url
 }
 
 /** relayNeedsToken requires auth unless the relay is a local same-origin target. */
@@ -31,6 +45,37 @@ export function relayNeedsToken(raw: string): boolean {
   } catch {
     return true
   }
+}
+
+/** relayMatchesPageOrigin is true when the relay is the origin serving this PWA. */
+export function relayMatchesPageOrigin(raw: string): boolean {
+  try {
+    const relay = new URL(normalizeRelayUrl(raw))
+    const httpOrigin = `${relay.protocol === 'wss:' ? 'https:' : 'http:'}//${relay.host}`
+    return httpOrigin === location.origin
+  } catch {
+    return false
+  }
+}
+
+const SESSION_HINT_KEY = 'herdrem_session'
+
+/** hasSessionCookieHint is a non-secret flag that a same-origin HttpOnly cookie was minted. */
+export function hasSessionCookieHint(): boolean {
+  return safeStorage.getItem(SESSION_HINT_KEY) === '1'
+}
+
+export function markSessionCookieHint(): void {
+  safeStorage.setItem(SESSION_HINT_KEY, '1')
+}
+
+export function clearSessionCookieHint(): void {
+  safeStorage.removeItem(SESSION_HINT_KEY)
+}
+
+/** canCookieReconnect allows a cookieless WS dial on this origin after a prior login. */
+export function canCookieReconnect(raw: string): boolean {
+  return relayMatchesPageOrigin(raw) && hasSessionCookieHint()
 }
 
 /** relayHostLabel returns a short host label for display.

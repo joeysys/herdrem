@@ -4,6 +4,7 @@ import { ws } from '../api/ws';
 import { useTodoStore } from './todo';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
+import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
   const status = ref<'disconnected' | 'connecting' | 'connected'>('disconnected');
@@ -12,21 +13,27 @@ export const useConnectionStore = defineStore('connection', () => {
   // True once the first WS hello has been received — gates the main UI
   // to avoid a flash of the empty agent list before data arrives.
   const booted = ref(false);
-  // F2: safety timeout so a missing hello (server bug, slow relay, auth
+  // Safety timeout so a missing hello (server bug, slow relay, auth
   // failure after upgrade) doesn't permanently trap the user behind the
   // boot splash. If hello doesn't arrive within 5s, reveal the main UI
   // so the relay switch and settings remain accessible for self-recovery.
   let bootTimer: ReturnType<typeof setTimeout> | null = null;
+  const bootTimedOut = ref(false);
   // Default: derive same-origin /ws from current page (works with tunnel + embed)
   const defaultUrl = (() => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${location.host}/ws`;
   })();
-  const url = ref(safeStorage.getItem('herdrem_url') || defaultUrl);
-  // Standalone token keys are scrubbed below. Current relay tokens are
-  // persisted per relay by the relays store so saved connections can reconnect.
+  const storedUrl = safeStorage.getItem('herdrem_url');
+  const storedCreds = storedUrl ? extractRelayCredentials(storedUrl) : { url: '', token: '' };
+  if (storedCreds.url && storedCreds.url !== storedUrl) {
+    safeStorage.setItem('herdrem_url', storedCreds.url);
+  }
+  const url = ref(storedCreds.url || defaultUrl);
+  // Standalone token keys are scrubbed below. Relay tokens stay in
+  // memory for this tab; same-origin reconnect uses the HttpOnly cookie.
   safeStorage.removeItem('herdrem_token');
-  const token = ref('');
+  const token = ref(storedCreds.token);
 
   let unsubStatus: (() => void) | null = null;
 
@@ -40,16 +47,39 @@ export const useConnectionStore = defineStore('connection', () => {
       const httpBase = url.value.replace(/^ws/i, 'http').replace(/\/ws$/i, '');
       if (new URL(httpBase).origin !== window.location.origin) return;
       const q = `?token=${encodeURIComponent(token.value)}`;
-      void fetch(`${httpBase}/session-auth${q}`, { credentials: 'include' });
+      void fetch(`${httpBase}/session-auth${q}`, { credentials: 'include' }).then((res) => {
+        if (res.ok || res.status === 204) markSessionCookieHint();
+      }).catch(() => {
+        /* ignore mint failures; WS query token still authenticates */
+      });
     } catch {
       /* ignore mint failures; WS query token still authenticates */
     }
   }
 
+  function persistRelayUrl(raw: string): string {
+    const creds = extractRelayCredentials(raw);
+    const clean = creds.url || raw;
+    url.value = clean;
+    safeStorage.setItem('herdrem_url', clean);
+    return creds.token;
+  }
+
+  function prepareAuth(targetUrl: string) {
+    const fromQuery = persistRelayUrl(targetUrl);
+    token.value = fromQuery;
+    if (bootTimer) {
+      clearTimeout(bootTimer);
+      bootTimer = null;
+    }
+    bootTimedOut.value = false;
+    disconnect();
+  }
+
   function connect(targetUrl?: string, targetToken?: string) {
     if (targetUrl) {
-      url.value = targetUrl;
-      safeStorage.setItem('herdrem_url', targetUrl);
+      const fromQuery = persistRelayUrl(targetUrl);
+      if (targetToken === undefined && fromQuery) token.value = fromQuery;
     }
     if (targetToken !== undefined) {
       token.value = targetToken;
@@ -62,13 +92,18 @@ export const useConnectionStore = defineStore('connection', () => {
     agents.resetSnapshotKey();
     features.value = [];
     if (unsubStatus) unsubStatus();
-    // F2: arm the boot timeout so a missing hello doesn't permanently
+    // Arm the boot timeout so a missing hello doesn't permanently
     // trap the user behind the boot splash.
     if (bootTimer) clearTimeout(bootTimer);
-    if (!booted.value) {
+    if (!booted.value || bootTimedOut.value) {
+      bootTimedOut.value = false;
       bootTimer = setTimeout(() => {
         bootTimer = null;
         booted.value = true;
+        bootTimedOut.value = true;
+        // Cookieless dial failed to hello: the session cookie is missing or
+        // stale, so the next reload should prompt instead of retrying blindly.
+        if (!token.value) clearSessionCookieHint();
       }, 5000);
     }
     ws.connect(url.value, token.value);
@@ -89,9 +124,23 @@ export const useConnectionStore = defineStore('connection', () => {
     serverVersion.value = version;
     features.value = feats || [];
     booted.value = true;
+    bootTimedOut.value = false;
   }
 
-  return { status, features, serverVersion, booted, url, token, connect, disconnect, hasFeature, setHello };
+  return {
+    status,
+    features,
+    serverVersion,
+    booted,
+    bootTimedOut,
+    url,
+    token,
+    connect,
+    disconnect,
+    prepareAuth,
+    hasFeature,
+    setHello,
+  };
 });
 
 export const useAgentsStore = defineStore('agents', () => {

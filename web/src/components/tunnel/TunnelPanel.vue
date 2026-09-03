@@ -16,7 +16,7 @@ const copiedId = ref<string | null>(null)
 
 function startTunnel() {
   if (!inputPort.value || inputPort.value <= 0 || inputPort.value > 65535) return
-  // F1: `direct` creates an anonymous Quick Tunnel with no gate in front of it.
+  // `direct` creates an anonymous Quick Tunnel with no gate in front of it.
   // It is NOT Cloudflare Access, so require an explicit acknowledgement before
   // publishing a local port to the internet unauthenticated.
   if (authMode.value === 'direct') {

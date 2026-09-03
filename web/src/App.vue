@@ -26,7 +26,7 @@ import { useHaptic } from './composables/useHaptic';
 import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/useHistoryTrap';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
-import { relayHostLabel, relayNeedsToken } from './utils/relay';
+import { canCookieReconnect, relayHostLabel, relayNeedsToken } from './utils/relay';
 import TermView from './components/term/TermView.vue';
 import AgentIcon from './components/agent/AgentIcon.vue';
 import AgentFilters from './components/agent/AgentFilters.vue';
@@ -72,7 +72,12 @@ const bootToken = ref('');
 const showBootAuth = computed(() => {
   const current = relays.current();
   const targetUrl = current?.url || conn.url;
-  return conn.status !== 'connected' && relayNeedsToken(targetUrl) && !conn.token && !current?.token;
+  const hasMemoryToken = Boolean(conn.token || current?.token);
+  return (
+    conn.status !== 'connected' &&
+    relayNeedsToken(targetUrl) &&
+    (conn.bootTimedOut || (!hasMemoryToken && !canCookieReconnect(targetUrl)))
+  );
 });
 const ctxPane = ref<Pane | null>(null);
 const ctxOpen = ref(false);
@@ -83,7 +88,7 @@ watch([() => files.browserOpen, () => files.preview], ([browser, preview]) => {
   if (!browser || !preview) directoryOverPreview.value = false;
 });
 // Pane created via pane_create that is waiting for the poller to learn it
-// (so hostFor can route read_pane correctly) before we auto-open it (F8).
+// (so hostFor can route read_pane correctly) before we auto-open it.
 let pendingOpenPane: string | null = null;
 const now = ref(Math.floor(Date.now() / 1000));
 let relativeTimeTimer: ReturnType<typeof setInterval> | null = null;
@@ -574,7 +579,7 @@ onMounted(() => {
     if (msg.type === 'agents') {
       notify.processSnapshot(msg.agents || []);
       // Open the terminal for a freshly created pane once it appears in an
-      // agents snapshot (poller has learned its host by then) (F8).
+      // agents snapshot (poller has learned its host by then).
       if (pendingOpenPane && msg.agents?.some((a) => a.pane_id === pendingOpenPane)) {
         openTerminal(pendingOpenPane);
         pendingOpenPane = null;
@@ -595,7 +600,7 @@ onMounted(() => {
     if (msg.type === 'pane_created') {
       // The poller learns the new pane on its next poll (~3s). Prefer opening
       // immediately when the pane is already in the agents store (the snapshot
-      // may have arrived before pane_created — F3); otherwise wait for a
+      // may have arrived before pane_created); otherwise wait for a
       // snapshot containing it.
       if (agents.agents.some((a) => a.pane_id === msg.pane_id)) {
         openTerminal(msg.pane_id);

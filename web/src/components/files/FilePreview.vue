@@ -126,10 +126,10 @@ const previewAuthUrl = computed(() => {
   return `${base}/preview-auth?${params.toString()}`
 })
 
-// Mint the preview capability before loading the iframe (F1).
-// N1: Gate iframe rendering on authReady to avoid a capability race.
-// N2: Show visible error if capability minting fails.
-// F4: Preview auth can only be minted same-origin — the relay refuses
+// Mint the preview capability before loading the iframe.
+// Gate iframe rendering on authReady to avoid a capability race.
+// Show visible error if capability minting fails.
+// Preview auth can only be minted same-origin — the relay refuses
 // cross-origin requests rather than reflecting credentialed CORS.
 const relayOrigin = computed(() => {
   const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
@@ -144,7 +144,7 @@ const isCrossOrigin = computed(() => {
   return !!o && typeof window !== 'undefined' && o !== window.location.origin
 })
 
-// F4: authReady stays false on any failure, so the iframe is never rendered
+// authReady stays false on any failure, so the iframe is never rendered
 // into a known-broken state; the message below explains what to do instead.
 watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], async ([path]) => {
   authReady.value = false
@@ -332,7 +332,7 @@ function fmtSize(bytes: number): string {
 
       <div v-else-if="!preview.content && !preview.isImage && !isHtml" class="fp-loading">reading…</div>
 
-      <!-- F4: rendered preview unavailable — explain and offer the fallback
+      <!-- Rendered preview unavailable — explain and offer the fallback
            rather than loading an iframe that is guaranteed to 401. -->
       <div v-else-if="isHtml && htmlRendered && authError" class="fp-auth-error">
         <div class="fp-auth-error-text">{{ authError }}</div>

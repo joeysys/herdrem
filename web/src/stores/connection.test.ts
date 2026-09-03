@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { computed, ref } from 'vue'
 import { relTime, useAgentsStore, useConnectionStore } from './connection'
 import { useTodoStore } from './todo'
+import { clearSessionCookieHint, markSessionCookieHint } from '../utils/relay'
 
 vi.mock('../api/ws', () => ({
   ws: {
@@ -18,6 +19,7 @@ vi.mock('../api/ws', () => ({
 beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
+  clearSessionCookieHint()
 })
 
 describe('useAgentsStore', () => {
@@ -69,9 +71,35 @@ describe('useConnectionStore token storage', () => {
     expect(conn.token).toBe('live-token')
     expect(localStorage.getItem('herdrem_token')).toBeNull()
   })
+
+  it('persists a relay URL without a token query', () => {
+    const conn = useConnectionStore()
+    conn.connect('wss://relay.example/ws?token=super-secret&keep=1')
+    expect(conn.url).toBe('wss://relay.example?keep=1')
+    expect(localStorage.getItem('herdrem_url')).toBe('wss://relay.example?keep=1')
+    expect(localStorage.getItem('herdrem_url')).not.toContain('super-secret')
+  })
+
+  it('lifts a token query into memory when connect is not given an explicit token', () => {
+    const conn = useConnectionStore()
+    conn.connect('wss://relay.example/ws?token=query-secret')
+    expect(conn.token).toBe('query-secret')
+    expect(conn.url).toBe('wss://relay.example')
+    expect(localStorage.getItem('herdrem_url')).not.toContain('query-secret')
+  })
+
+  it('marks a session cookie hint after a same-origin mint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 204 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`, 'lan-token')
+    expect(fetchMock).toHaveBeenCalled()
+    await Promise.resolve()
+    expect(localStorage.getItem('herdrem_session')).toBe('1')
+    fetchMock.mockRestore()
+  })
 })
 
-describe('useConnectionStore boot timeout (F2)', () => {
+describe('useConnectionStore boot timeout', () => {
   it('sets booted=true after 5s even if hello never arrives', () => {
     vi.useFakeTimers()
     const conn = useConnectionStore()
@@ -83,6 +111,42 @@ describe('useConnectionStore boot timeout (F2)', () => {
     // After 5s: booted becomes true so the UI is not permanently trapped
     vi.advanceTimersByTime(1)
     expect(conn.booted).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('marks a timed-out boot without clearing its token', () => {
+    vi.useFakeTimers()
+    const conn = useConnectionStore()
+    conn.connect('ws://relay.example', 'saved-token')
+
+    vi.advanceTimersByTime(5000)
+    expect(conn.bootTimedOut).toBe(true)
+    expect(conn.token).toBe('saved-token')
+
+    conn.setHello('v1', ['agents'])
+    expect(conn.bootTimedOut).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('clears the session cookie hint after a timed-out cookieless boot', () => {
+    vi.useFakeTimers()
+    markSessionCookieHint()
+    const conn = useConnectionStore()
+    conn.connect('ws://192.168.1.10:8766', '')
+    vi.advanceTimersByTime(5000)
+    expect(conn.bootTimedOut).toBe(true)
+    expect(localStorage.getItem('herdrem_session')).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('keeps the session cookie hint after a timed-out boot that had a token', () => {
+    vi.useFakeTimers()
+    markSessionCookieHint()
+    const conn = useConnectionStore()
+    conn.connect('ws://192.168.1.10:8766', 'saved-token')
+    vi.advanceTimersByTime(5000)
+    expect(conn.bootTimedOut).toBe(true)
+    expect(localStorage.getItem('herdrem_session')).toBe('1')
     vi.useRealTimers()
   })
 

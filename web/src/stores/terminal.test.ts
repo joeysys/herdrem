@@ -75,7 +75,7 @@ describe('useTerminalStore setContent', () => {
   })
 })
 
-describe('useTerminalStore content bounds (F3)', () => {
+describe('useTerminalStore content bounds', () => {
   it('caps in-memory content at MAX_CONTENT_CHARS', () => {
     const term = useTerminalStore()
     term.activePane = 'p1' as any

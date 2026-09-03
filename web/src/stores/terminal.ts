@@ -56,7 +56,7 @@ function mergePollTail(current: string, tail: string): string | null {
 export const useTerminalStore = defineStore('terminal', () => {
   // Upper bounds on retained terminal text per pane. Rendering only shows the
   // tail (tailWindow), so retaining the entire unbounded history wastes memory
-  // and localStorage; keep a generous but bounded window instead (F3).
+  // and localStorage; keep a generous but bounded window instead.
   const MAX_CONTENT_CHARS = 1_000_000 // ~1MB in-memory cap per pane
   const MAX_CACHE_TEXT = 200_000 // ~200KB persisted cap per pane
 
@@ -86,7 +86,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     try {
       // Only keep the 20 most recent entries to avoid bloating localStorage,
       // and cap each pane's persisted text so a long-running session cannot
-      // grow the quota indefinitely (F3).
+      // grow the quota indefinitely.
       const entries = Object.entries(contentCache.value)
         .sort((a, b) => b[1].ts - a[1].ts)
         .slice(0, 20)
@@ -242,7 +242,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       else delete contentRevs.value[paneId]
     }
     // Bound retained content: keep the tail so the terminal keeps working
-    // while the unbounded history is dropped (F3).
+    // while the unbounded history is dropped.
     if (content.value.length > MAX_CONTENT_CHARS) {
       content.value = content.value.slice(-MAX_CONTENT_CHARS)
     }
@@ -262,8 +262,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     // small line count keeps the poll response tiny (N2).
     if (poll) msg.poll = true
     // Declare incremental support so the relay only routes append deltas to
-    // this client (F2: older clients that can't interpret deltas get full
-    // snapshots only).
+    // this client. Older clients that can't interpret deltas get full snapshots
+    // only.
     if (useConnectionStore().hasFeature('incremental-terminal')) msg.incremental = true
     ws.send(msg)
   }

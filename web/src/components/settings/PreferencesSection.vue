@@ -65,6 +65,10 @@ function selectTheme(id: string) {
     }
   }
   setTheme(id)
+  const reduceMotion =
+    typeof matchMedia !== 'undefined' &&
+    matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (reduceMotion) return
   // Last + Invert + Play: after DOM updates, compute deltas and animate
   nextTick(() => {
     if (!grid) return
@@ -202,6 +206,7 @@ function clearStale() {
         v-if="hasMoreThemes"
         class="theme-expand"
         :aria-expanded="themeExpanded"
+        :aria-label="themeExpanded ? 'Show fewer themes' : 'Show more themes'"
         @click="themeExpanded = !themeExpanded"
       >{{ themeExpanded ? '▴' : '▾' }}</button>
     </section>

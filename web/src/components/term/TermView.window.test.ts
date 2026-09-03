@@ -34,7 +34,7 @@ describe('tailWindow', () => {
     const raw = 'a\nb\nc\n'
     expect(tailWindow(raw, 2)).toBe('b\nc\n')
   })
-  it('replays active ANSI style at the cutoff boundary (F4)', () => {
+  it('replays active ANSI style at the cutoff boundary', () => {
     // A long-lived red style opens before the cutoff and resets after it.
     // The tail must re-establish the red state so rendering stays faithful.
     const raw = 'x'.repeat(50) + '\n' + '\x1b[31m' + Array.from({ length: 30 }, (_, i) => `red${i}`).join('\n') + '\x1b[0m\n' + 'end'
@@ -44,7 +44,7 @@ describe('tailWindow', () => {
     // after 'xxx\n', i.e. at the ESC[31m start — no active style to replay.
     expect(out.startsWith('\x1b[31mred1\n')).toBe(true)
   })
-  it('replays active style when the cutoff is mid-style (F4)', () => {
+  it('replays active style when the cutoff is mid-style', () => {
     // Style opens before the first (dropped) line and continues into the tail.
     const raw = '\x1b[32m' + Array.from({ length: 30 }, (_, i) => `green${i}`).join('\n') + '\x1b[0m'
     // 30 lines, window of 10 → drop first 20, keep green20..green29

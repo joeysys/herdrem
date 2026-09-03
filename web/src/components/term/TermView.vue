@@ -84,7 +84,7 @@ const renderContent = computed(() => {
 // Track the window offset separately from the render computed: update it when
 // content changes while pinned to the bottom (the windowed state), so the
 // scroll-compensation watch below can read a stable value without the computed
-// having side effects (F6).
+// having side effects.
 watch(
   () => [term.content, term.stickBottom] as const,
   ([raw, stick]) => {
@@ -100,7 +100,7 @@ function measureLineHeight(): number {
   if (!el) return 0
   // Measure the actual rendered line height by copying the computed style of
   // a real terminal text node (inherits font/line-height from .term-body and
-  // .ansi-stream, including zoom), instead of a hard-coded probe (F6).
+  // .ansi-stream, including zoom), instead of a hard-coded probe.
   const sample = el.querySelector('.ansi-stream')
   if (!sample) return 0
   const probe = document.createElement('div')

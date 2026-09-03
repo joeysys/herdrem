@@ -214,7 +214,7 @@ function onArrowKey(key: string) {
 function submit() {
   haptic()
   const rawText = text.value.trim()
-  // F10: Use !tunnel prefix instead of /tunnel to avoid hijacking shell input.
+  // Use !tunnel prefix instead of /tunnel to avoid hijacking shell input.
   // The ! prefix is a common command-mode convention and won't conflict with
   // programs that accept /tunnel as literal input.
   const tunnelMatch = rawText.match(/^!tunnel\s+(\d+)$/i)

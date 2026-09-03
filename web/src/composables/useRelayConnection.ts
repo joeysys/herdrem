@@ -8,8 +8,13 @@ import { useTodoStore } from '../stores/todo'
 import { usePreviewsStore } from '../stores/preview'
 import { useFilesStore } from '../stores/files'
 import { useDiffStore } from '../stores/diff'
-import { relayNeedsToken } from '../utils/relay'
+import { canCookieReconnect, relayNeedsToken } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
+
+function canConnect(url: string, token: string): boolean {
+  if (token || !relayNeedsToken(url)) return true
+  return canCookieReconnect(url)
+}
 
 export function useRelayConnection() {
   const conn = useConnectionStore()
@@ -22,10 +27,7 @@ export function useRelayConnection() {
   const files = useFilesStore()
   const diff = useDiffStore()
 
-  /** connect to a relay entry, clearing pane/agent/tunnel state to avoid cross-talk */
-  function connectRelay(r: RelayEntry) {
-    if (!r.token && relayNeedsToken(r.url)) return
-    relays.setCurrent(r.id)
+  function resetSessionState() {
     term.closePane()
     term.clearAllCache()
     agents.setAgents([])
@@ -35,6 +37,16 @@ export function useRelayConnection() {
     files.reset()
     diff.reset()
     previews.clear()
+  }
+
+  /** connect to a relay entry, clearing pane/agent/tunnel state to avoid cross-talk */
+  function connectRelay(r: RelayEntry): boolean {
+    relays.setCurrent(r.id)
+    resetSessionState()
+    if (!canConnect(r.url, r.token || '')) {
+      conn.prepareAuth(r.url)
+      return false
+    }
     const stop = watch(() => conn.status, (s) => {
       if (s === 'connected') {
         tunnels.fetchTunnels()
@@ -42,6 +54,7 @@ export function useRelayConnection() {
       }
     })
     conn.connect(r.url, r.token ?? '')
+    return true
   }
 
   /** switch to a relay by id */
@@ -53,6 +66,8 @@ export function useRelayConnection() {
   /**
    * initial boot: connect to the current relay if
    * one is set, otherwise default to same-origin /ws.
+   * Tokens stay in memory. Same-origin reload reconnects via the HttpOnly
+   * session cookie (no query token) when a prior login left a session hint.
    */
   function boot(token = '') {
     safeStorage.removeItem('herdrem_token')
@@ -60,21 +75,15 @@ export function useRelayConnection() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const sameOrigin = `${proto}//${location.host}`
     if (cur) {
-      const targetToken = cur.token || token
-      if (!targetToken && relayNeedsToken(cur.url)) return
-      if (token && relayNeedsToken(cur.url) && !cur.token) {
-        relays.update(cur.id, { token })
-      }
+      const targetToken = token || cur.token || ''
+      if (!canConnect(cur.url, targetToken)) return
+      // Keep the token on the in-memory entry for this tab; persistRelays strips disk.
+      if (token) relays.update(cur.id, { token })
       conn.connect(cur.url, targetToken)
-    } else {
-      // No saved relay — always default to same-origin /ws
-      if (!token && relayNeedsToken(sameOrigin)) return
-      if (token && relayNeedsToken(sameOrigin)) {
-        const entry = relays.upsert({ name: 'default', url: sameOrigin, token })
-        relays.setCurrent(entry.id)
-      }
-      conn.connect(sameOrigin, token)
+      return
     }
+    if (!canConnect(sameOrigin, token)) return
+    conn.connect(sameOrigin, token)
   }
 
   return { connectRelay, switchTo, boot }
