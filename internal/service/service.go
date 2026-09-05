@@ -281,6 +281,23 @@ func (s *Service) handleSendKeys(ctx context.Context, conn *websocket.Conn, data
 	}
 }
 
+// isNumericChoice reports whether s represents a numeric option selection (e.g. "1", "2").
+// Interactive TUI select menus (Ink/Bubbletea) trigger immediately on the digit keypress.
+// Appending a newline leaves an unconsumed Enter in the terminal's stdin buffer, which
+// leaks into subsequent input prompts and inserts an empty blank line.
+func isNumericChoice(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return false
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data []byte) {
 	var msg protocol.Respond
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -291,9 +308,14 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 		s.sendError(ctx, conn, "respond", "missing pane_id")
 		return
 	}
-	// respond = send text + newline (approval action)
 	text := msg.Text
-	if text != "" && text[len(text)-1] != '\n' {
+	if isNumericChoice(text) {
+		// TUI numbered select choices act on the digit keypress directly;
+		// normalizing surrounding whitespace prevents an unconsumed Enter from
+		// spilling into the next input prompt as a blank line.
+		text = strings.TrimSpace(text)
+	} else if text != "" && text[len(text)-1] != '\n' {
+		// Line-buffered shell prompts (e.g. y/n) require Enter to submit.
 		text += "\n"
 	}
 	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
+import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
 import { safeStorage } from '../../utils/storage'
 import type { FileEntry } from '../../api/types'
 
 const files = useFilesStore()
+const conn = useConnectionStore()
 const term = useTerminalStore()
 const { haptic } = useHaptic()
 defineProps<{ docked: boolean }>()
@@ -180,7 +182,7 @@ function toggleEntryMenu(e: MouseEvent, entry: FileEntry) {
   const rect = button.getBoundingClientRect()
   menuPos.value = {
     left: Math.max(8, Math.min(rect.right - 190, window.innerWidth - 198)),
-    top: rect.bottom + 160 < window.innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - 164),
+    top: rect.bottom + 200 < window.innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - 204),
   }
   menuEntry.value = entry
   menuNotice.value = ''
@@ -199,6 +201,26 @@ async function copyEntryPath(e: FileEntry) {
   } catch {
     menuNotice.value = 'copy failed'
   }
+}
+
+function getEntryDownloadUrl(e: FileEntry): string {
+  const full = fullEntryPath(e)
+  const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
+  const token = conn.token ? `&token=${encodeURIComponent(conn.token)}` : ''
+  const host = files.host && files.host !== 'local' ? `&host=${encodeURIComponent(files.host)}` : ''
+  return `${base}/file?path=${encodeURIComponent(full)}${host}${token}&download=1`
+}
+
+function downloadEntry(e: FileEntry) {
+  haptic()
+  const url = getEntryDownloadUrl(e)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = e.name
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  closeEntryMenu()
 }
 
 // Scroll to the target file in the tree when scrollToFile is set
@@ -340,6 +362,9 @@ watch(() => files.entries, async () => {
         </button>
         <button class="fe-menu-item" role="menuitem" @click="copyEntryPath(menuEntry)">
           <span aria-hidden="true">⧉</span>copy path
+        </button>
+        <button v-if="menuEntry.type === 'file'" class="fe-menu-item" role="menuitem" @click="downloadEntry(menuEntry)">
+          <span aria-hidden="true">⤓</span>download
         </button>
         <span v-if="menuNotice" class="fe-menu-note" role="status">{{ menuNotice }}</span>
       </div>

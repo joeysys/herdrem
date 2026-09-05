@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
@@ -22,6 +22,82 @@ const preview = computed(() => files.preview)
 const isMd = computed(() => /\.(md|markdown)$/i.test(preview.value?.path || ''))
 const isHtml = computed(() => /\.(html|htm)$/i.test(preview.value?.path || ''))
 const isSvg = computed(() => /\.svg$/i.test(preview.value?.path || ''))
+
+const copyStatus = ref<'idle' | 'copied' | 'error'>('idle')
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+
+const canCopy = computed(() => {
+  if (!preview.value) return false
+  if (preview.value.isImage && !isSvg.value) return false
+  if (preview.value.error) return false
+  return true
+})
+
+const copyTitle = computed(() => {
+  if (preview.value?.error) return 'File content unavailable'
+  if (copyStatus.value === 'copied') return 'Copied to clipboard'
+  if (copyStatus.value === 'error') return 'Failed to copy'
+  return 'Copy file content'
+})
+
+const copyLabel = computed(() => {
+  if (copyStatus.value === 'copied') return '✓ copied'
+  if (copyStatus.value === 'error') return '⚠ failed'
+  return '⧉ copy'
+})
+
+function fallbackCopy(text: string): boolean {
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.left = '-9999px'
+    textarea.style.top = '-9999px'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.select()
+    const result = typeof document.execCommand === 'function' ? document.execCommand('copy') : false
+    document.body.removeChild(textarea)
+    return result
+  } catch {
+    return false
+  }
+}
+
+async function copyContent() {
+  haptic()
+  if (!preview.value || !canCopy.value) return
+  if (copyTimer) clearTimeout(copyTimer)
+
+  const textToCopy = preview.value.content ?? ''
+  let success = false
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(textToCopy)
+      success = true
+    } else {
+      success = fallbackCopy(textToCopy)
+    }
+  } catch {
+    success = fallbackCopy(textToCopy)
+  }
+
+  if (success) {
+    copyStatus.value = 'copied'
+  } else {
+    copyStatus.value = 'error'
+  }
+
+  copyTimer = setTimeout(() => {
+    copyStatus.value = 'idle'
+  }, 2000)
+}
+
+onBeforeUnmount(() => {
+  if (copyTimer) clearTimeout(copyTimer)
+})
 
 const fileName = computed(() => {
   const full = preview.value?.path || ''
@@ -84,6 +160,8 @@ const authError = ref('')
 watch(preview, (p) => {
   mdRendered.value = !(p && p.targetLine != null && isMd.value)
   htmlRendered.value = true
+  copyStatus.value = 'idle'
+  if (copyTimer) clearTimeout(copyTimer)
 })
 
 const lines = computed(() => {
@@ -270,6 +348,16 @@ function fmtSize(bytes: number): string {
         @click="fillPreviewPath"
       >↙</button>
 
+      <button
+        v-if="!preview.isImage || isSvg"
+        class="fp-btn copy-btn"
+        :class="{ copied: copyStatus === 'copied', error: copyStatus === 'error' }"
+        :title="copyTitle"
+        :aria-label="copyTitle"
+        :disabled="!canCopy"
+        @click="copyContent"
+      >{{ copyLabel }}</button>
+
       <!-- Viewport controls for HTML preview -->
       <template v-if="isHtml && htmlRendered">
         <button
@@ -394,6 +482,7 @@ function fmtSize(bytes: number): string {
   padding: 4px 9px; flex-shrink: 0;
 }
 .fp-btn:hover { color: var(--text); }
+.fp-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .fp-btn.directory-toggle.active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .fp-close { width: 30px; height: 30px; padding: 0; font-size: var(--text-md); }
 .fp-btn.mode { color: var(--blue); }
@@ -405,6 +494,23 @@ function fmtSize(bytes: number): string {
 }
 .fp-btn.fill-path:hover {
   background: var(--surface-3, var(--surface));
+}
+.fp-btn.copy-btn {
+  color: var(--blue);
+  border-color: var(--border-strong, var(--border));
+}
+.fp-btn.copy-btn:hover:not(:disabled) {
+  background: var(--surface-3, var(--surface));
+}
+.fp-btn.copy-btn.copied {
+  color: var(--green);
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.fp-btn.copy-btn.error {
+  color: var(--orange);
+  border-color: var(--orange);
+  background: var(--orange-soft);
 }
 
 .fp-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--term-bg); }

@@ -62,3 +62,48 @@ func TestFilePreviewRevalidatesMutableFiles(t *testing.T) {
 		t.Errorf("revalidated response = (%d, %q), want (200, new-image)", res.Code, res.Body.String())
 	}
 }
+
+func TestFileDownloadContentDisposition(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "example.txt")
+	if err := os.WriteFile(path, []byte("download-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	files := service.NewFileService(func(string) []string { return []string{dir} }, logger)
+	server := New(config.Config{}, nil, nil, nil, nil, files, nil, nil, logger)
+
+	// 1. Without download param: no Content-Disposition
+	req := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(path), nil)
+	req.Host = "localhost:8766"
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", "http://localhost:8766")
+	res := httptest.NewRecorder()
+	server.Routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	if got := res.Header().Get("Content-Disposition"); got != "" {
+		t.Errorf("Content-Disposition without download param = %q, want empty", got)
+	}
+
+	// 2. With download=1: sets Content-Disposition attachment
+	reqDl := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape(path)+"&download=1", nil)
+	reqDl.Host = "localhost:8766"
+	reqDl.RemoteAddr = "127.0.0.1:12345"
+	reqDl.Header.Set("Origin", "http://localhost:8766")
+	resDl := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resDl, reqDl)
+
+	if resDl.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resDl.Code)
+	}
+	wantDisp := `attachment; filename="example.txt"`
+	if got := resDl.Header().Get("Content-Disposition"); got != wantDisp {
+		t.Errorf("Content-Disposition = %q, want %q", got, wantDisp)
+	}
+	if resDl.Body.String() != "download-content" {
+		t.Errorf("download body = %q, want %q", resDl.Body.String(), "download-content")
+	}
+}

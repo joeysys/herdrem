@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +149,10 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	// Workspace files are mutable: revalidate a reopened image instead of
 	// showing the browser's cached copy for up to five minutes.
 	w.Header().Set("Cache-Control", "private, no-cache")
+	if dl := r.URL.Query().Get("download"); dl == "1" || dl == "true" {
+		name := filepath.Base(filepath.ToSlash(path))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	}
 	if err := s.files.ServeStream(w, r, host, path); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return

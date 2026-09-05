@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // FakeClient is a mock HerdrClient for testing.
@@ -10,7 +11,9 @@ type FakeClient struct {
 	Panes []Pane
 	// ReadContent overrides the content returned by ReadPane (e.g. a numbered
 	// menu, to exercise menu detection). Empty returns a default prompt.
-	ReadContent string
+	ReadContent    string
+	lastSentTextMu sync.RWMutex
+	lastSentText   string
 	// paneSeq is a per-instance counter for generated pane IDs, so separate
 	// FakeClient instances do not share/race on one package-level counter.
 	paneSeq int
@@ -45,7 +48,17 @@ func (f *FakeClient) ReadPane(ctx context.Context, host, paneID string, lines in
 }
 
 func (f *FakeClient) SendText(ctx context.Context, host, paneID, text string) error {
+	f.lastSentTextMu.Lock()
+	f.lastSentText = text
+	f.lastSentTextMu.Unlock()
 	return nil
+}
+
+// SentText returns the last text passed to SendText.
+func (f *FakeClient) SentText() string {
+	f.lastSentTextMu.RLock()
+	defer f.lastSentTextMu.RUnlock()
+	return f.lastSentText
 }
 
 func (f *FakeClient) SendKeys(ctx context.Context, host, paneID, keys string) error {

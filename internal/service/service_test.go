@@ -399,3 +399,97 @@ func TestHandleReadPaneRefreshBypassesCache(t *testing.T) {
 		t.Fatalf("refresh read should bypass cache, got %v", reply2["content"])
 	}
 }
+
+func TestIsNumericChoice(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"1", true},
+		{"2", true},
+		{"9", true},
+		{"10", true},
+		{" 1 \n", true},
+		{"", false},
+		{"   ", false},
+		{"y", false},
+		{"n", false},
+		{"1a", false},
+		{"a1", false},
+	}
+	for _, tt := range tests {
+		if got := isNumericChoice(tt.input); got != tt.want {
+			t.Errorf("isNumericChoice(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestHandleMessage_Respond(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := hub.New(logger)
+	client := &herdr.FakeClient{}
+	svc := New(client, nil, nil, nil, nil, h, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go h.Run(ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			svc.HandleMessage(ctx, conn, data)
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForSentText := func(want string) {
+		t.Helper()
+		deadline := time.NewTimer(time.Second)
+		ticker := time.NewTicker(time.Millisecond)
+		defer deadline.Stop()
+		defer ticker.Stop()
+		for {
+			if got := client.SentText(); got == want {
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
+				t.Fatalf("expected LastSentText to be %q, got %q", want, client.SentText())
+			}
+		}
+	}
+
+	// 1. Numeric choice: should NOT append \n so interactive TUI select doesn't leak \n to next input
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"respond","pane_id":"demo:0.1","text":"1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitForSentText("1")
+
+	// 2. Numeric choice with surrounding whitespace: should send only the digits
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"respond","pane_id":"demo:0.1","text":" 2 \n"}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitForSentText("2")
+
+	// 3. Non-numeric choice (e.g. "y"): should append \n for line-buffered shell prompts
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"respond","pane_id":"demo:0.1","text":"y"}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitForSentText("y\n")
+}
