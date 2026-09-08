@@ -36,6 +36,18 @@ export function normalizeRelayUrl(raw: string): string {
   return extractRelayCredentials(raw).url
 }
 
+export function relayHttpBase(raw: string): string {
+  return raw.replace(/^ws/i, 'http').replace(/\/ws\/?$/i, '').replace(/\/$/, '')
+}
+
+export function relayFileUrl(relayUrl: string, path: string, host = '', token = '', download = false): string {
+  const params = new URLSearchParams({ path })
+  if (host && host !== 'local') params.set('host', host)
+  if (token) params.set('token', token)
+  if (download) params.set('download', '1')
+  return `${relayHttpBase(relayUrl)}/file?${params}`
+}
+
 /** relayNeedsToken requires auth unless the relay is a local same-origin target. */
 export function relayNeedsToken(raw: string): boolean {
   try {

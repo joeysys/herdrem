@@ -13,6 +13,8 @@ export interface PreviewState {
   mimeType: string
   isText: boolean
   isImage: boolean
+  truncated: boolean
+  loaded: boolean
   size: number
   targetLine: number | null
   error?: string
@@ -140,7 +142,7 @@ export const useFilesStore = defineStore('files', () => {
     preview.value = {
       path: filePath, root: paneRoot || '/', host: previewHost, reqId,
       content: '', encoding: 'utf-8', mimeType: '',
-      isText: true, isImage: false, size: 0, targetLine: line,
+      isText: true, isImage: false, truncated: false, loaded: false, size: 0, targetLine: line,
     }
   }
 
@@ -165,6 +167,8 @@ export const useFilesStore = defineStore('files', () => {
       mimeType: msg.mime_type || '',
       isText: msg.is_text ?? true,
       isImage: msg.is_image ?? false,
+      truncated: msg.truncated ?? false,
+      loaded: true,
       size: msg.size ?? 0,
     }
   }

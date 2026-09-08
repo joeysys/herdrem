@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +22,21 @@ func TestCheckQueryToken(t *testing.T) {
 	}
 	if Check(r, "wrong") {
 		t.Error("wrong query token should fail")
+	}
+}
+
+func TestCheckDoesNotReadRequestBody(t *testing.T) {
+	r := httptest.NewRequest("POST", "/file", strings.NewReader("token=secret"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if Check(r, "secret") {
+		t.Error("form token should not be checked by common auth")
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if string(body) != "token=secret" {
+		t.Errorf("request body = %q, want token=secret", body)
 	}
 }
 

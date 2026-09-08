@@ -8,12 +8,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"herdrem/internal/config"
 	"herdrem/internal/service"
 )
+
+type countingReadCloser struct {
+	reads int
+}
+
+func (r *countingReadCloser) Read([]byte) (int, error) {
+	r.reads++
+	return 0, io.EOF
+}
+
+func (r *countingReadCloser) Close() error { return nil }
 
 func TestFilePreviewRevalidatesMutableFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -99,11 +111,66 @@ func TestFileDownloadContentDisposition(t *testing.T) {
 	if resDl.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resDl.Code)
 	}
-	wantDisp := `attachment; filename="example.txt"`
+	wantDisp := `attachment; filename="example.txt"; filename*=UTF-8''example.txt`
 	if got := resDl.Header().Get("Content-Disposition"); got != wantDisp {
 		t.Errorf("Content-Disposition = %q, want %q", got, wantDisp)
 	}
 	if resDl.Body.String() != "download-content" {
 		t.Errorf("download body = %q, want %q", resDl.Body.String(), "download-content")
+	}
+
+	// Invalid paths must not retain download headers on the error response.
+	reqBad := httptest.NewRequest(http.MethodGet, "/file?path="+url.QueryEscape("/etc/passwd")+"&download=1", nil)
+	reqBad.Host = "localhost:8766"
+	reqBad.RemoteAddr = "127.0.0.1:12345"
+	reqBad.Header.Set("Origin", "http://localhost:8766")
+	resBad := httptest.NewRecorder()
+	server.Routes().ServeHTTP(resBad, reqBad)
+	if resBad.Code != http.StatusForbidden || resBad.Header().Get("Content-Disposition") != "" {
+		t.Errorf("bad download response = (%d, %q), want 403 without Content-Disposition", resBad.Code, resBad.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestContentDispositionEncodesUTF8Filename(t *testing.T) {
+	got := contentDisposition("é.pdf")
+	want := `attachment; filename="_.pdf"; filename*=UTF-8''%C3%A9.pdf`
+	if got != want {
+		t.Errorf("contentDisposition = %q, want %q", got, want)
+	}
+}
+
+func TestFileDownloadAcceptsFormTokenWithoutReadingMultipart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "example.txt")
+	if err := os.WriteFile(path, []byte("download-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	files := service.NewFileService(func(string) []string { return []string{dir} }, logger)
+	server := New(config.Config{Token: "secret"}, nil, nil, nil, nil, files, nil, nil, logger)
+
+	req := httptest.NewRequest(http.MethodPost, "/file?path="+url.QueryEscape(path)+"&download=1", strings.NewReader("token=secret"))
+	req.Host = "relay.example"
+	req.RemoteAddr = "203.0.113.7:1234"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res := httptest.NewRecorder()
+	server.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "download-content" {
+		t.Fatalf("form download response = (%d, %q), want (200, download-content)", res.Code, res.Body.String())
+	}
+
+	body := &countingReadCloser{}
+	req = httptest.NewRequest(http.MethodPost, "/file?path="+url.QueryEscape(path)+"&download=1", nil)
+	req.Body = body
+	req.Host = "relay.example"
+	req.RemoteAddr = "203.0.113.7:1234"
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=ignored")
+	res = httptest.NewRecorder()
+	server.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Errorf("multipart response status = %d, want %d", res.Code, http.StatusUnauthorized)
+	}
+	if body.reads != 0 {
+		t.Errorf("multipart body read count = %d, want 0", body.reads)
 	}
 }

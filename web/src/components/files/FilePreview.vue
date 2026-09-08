@@ -6,6 +6,7 @@ import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
 import { renderMarkdown } from '../../utils/markdown'
 import { highlight, langForPath } from '../../utils/highlight'
+import { relayFileUrl, relayHttpBase } from '../../utils/relay'
 
 const files = useFilesStore()
 const conn = useConnectionStore()
@@ -27,14 +28,16 @@ const copyStatus = ref<'idle' | 'copied' | 'error'>('idle')
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 
 const canCopy = computed(() => {
-  if (!preview.value) return false
-  if (preview.value.isImage && !isSvg.value) return false
-  if (preview.value.error) return false
-  return true
+  const p = preview.value
+  if (!p || !p.loaded || p.truncated || p.error) return false
+  if (p.isImage && !isSvg.value) return false
+  return p.isText || isSvg.value
 })
 
 const copyTitle = computed(() => {
   if (preview.value?.error) return 'File content unavailable'
+  if (preview.value && !preview.value.loaded) return 'Reading file content'
+  if (preview.value?.truncated) return 'File content truncated'
   if (copyStatus.value === 'copied') return 'Copied to clipboard'
   if (copyStatus.value === 'error') return 'Failed to copy'
   return 'Copy file content'
@@ -176,10 +179,7 @@ const renderedMd = computed(() => {
 
 const rawFileUrl = computed(() => {
   if (!preview.value?.path) return ''
-  const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
-  const token = conn.token ? `&token=${encodeURIComponent(conn.token)}` : ''
-  const host = preview.value.host !== 'local' ? `&host=${encodeURIComponent(preview.value.host)}` : ''
-  return `${base}/file?path=${encodeURIComponent(preview.value.path)}${host}${token}`
+  return relayFileUrl(conn.url, preview.value.path, preview.value.host, conn.token)
 })
 
 // previewUrl uses a path-based URL (/preview/<path>) so that relative URLs in
@@ -188,7 +188,7 @@ const rawFileUrl = computed(() => {
 const previewCapability = ref('')
 const previewUrl = computed(() => {
   if (!preview.value?.path) return ''
-  const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
+  const base = relayHttpBase(conn.url)
   const encodedHost = btoa(preview.value.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   const encodedPath = preview.value.path.split('/').map(encodeURIComponent).join('/')
   const capability = previewCapability.value ? `${previewCapability.value}/` : ''
@@ -198,7 +198,7 @@ const previewUrl = computed(() => {
 // previewAuthUrl mints a scoped preview capability via a same-origin fetch.
 // The relay token stays in this parent-page request, never in the iframe URL.
 const previewAuthUrl = computed(() => {
-  const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
+  const base = relayHttpBase(conn.url)
   const params = new URLSearchParams({ host: preview.value?.host || 'local' })
   if (conn.token) params.set('token', conn.token)
   return `${base}/preview-auth?${params.toString()}`

@@ -71,29 +71,21 @@ describe('FileBrowser actions', () => {
     const downloadBtn = [...actions].find((btn) => btn.textContent?.includes('download'))
     expect(downloadBtn).toBeDefined()
 
-    // Mock document.createElement('a') click
-    let clickedHref = ''
-    let clickedDownload = ''
-    const origCreateElement = document.createElement.bind(document)
-    vi.spyOn(document, 'createElement').mockImplementation((tagName: string, options?: ElementCreationOptions) => {
-      const el = origCreateElement(tagName, options)
-      if (tagName.toLowerCase() === 'a') {
-        el.click = () => {
-          clickedHref = (el as HTMLAnchorElement).href
-          clickedDownload = (el as HTMLAnchorElement).download
-        }
-      }
-      return el
+    let submittedAction = ''
+    let submittedToken = ''
+    vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function (this: HTMLFormElement) {
+      submittedAction = this.action
+      submittedToken = this.querySelector('input[name="token"]')?.getAttribute('value') || ''
     })
 
     downloadBtn?.click()
     await nextTick()
 
-    expect(clickedDownload).toBe('main.go')
-    expect(clickedHref).toContain('/file?path=%2Fworkspace%2Fsrc%2Fmain.go')
-    expect(clickedHref).toContain('host=remote-host')
-    expect(clickedHref).toContain('token=secret-token')
-    expect(clickedHref).toContain('download=1')
+    expect(submittedAction).toContain('/file?path=%2Fworkspace%2Fsrc%2Fmain.go')
+    expect(submittedAction).toContain('host=remote-host')
+    expect(submittedAction).toContain('download=1')
+    expect(submittedAction).not.toContain('secret-token')
+    expect(submittedToken).toBe('secret-token')
 
     // Menu should be closed after clicking download
     expect(document.querySelector('.fe-menu')).toBeNull()

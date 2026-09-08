@@ -15,7 +15,7 @@ func Check(r *http.Request, expected string) bool {
 	if expected == "" {
 		return true
 	}
-	// Token via query param ?token=…
+	// Token via query param ?token=….
 	q := r.URL.Query().Get("token")
 	if subtle.ConstantTimeCompare([]byte(q), []byte(expected)) == 1 {
 		return true

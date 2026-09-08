@@ -99,6 +99,7 @@ export interface FileContent {
   mime_type?: string
   is_text?: boolean
   is_image?: boolean
+  truncated?: boolean
   size?: number
   req_id?: string
 }
@@ -170,6 +171,7 @@ export interface Respond {
   text: string
   pane_id: string
   opt_index?: number
+  submit?: boolean
 }
 
 export interface SendText {

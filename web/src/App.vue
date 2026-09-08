@@ -410,7 +410,8 @@ function onSpaceNewTab(workspaceId: string, host?: string) {
 
 function quickApprove(paneId: string, answer: string) {
   haptic(18);
-  ws.send({ type: 'respond', pane_id: paneId, text: answer });
+  const pane = agents.agents.find((a) => a.pane_id === paneId);
+  ws.send({ type: 'respond', pane_id: paneId, text: answer, submit: pane ? paneKind(pane) === 'shell' : undefined });
 }
 
 function qaTone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {

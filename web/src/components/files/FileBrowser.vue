@@ -5,6 +5,7 @@ import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
 import { safeStorage } from '../../utils/storage'
+import { relayFileUrl } from '../../utils/relay'
 import type { FileEntry } from '../../api/types'
 
 const files = useFilesStore()
@@ -203,23 +204,22 @@ async function copyEntryPath(e: FileEntry) {
   }
 }
 
-function getEntryDownloadUrl(e: FileEntry): string {
-  const full = fullEntryPath(e)
-  const base = conn.url.replace(/^ws/, 'http').replace(/\/ws$/, '').replace(/\/$/, '')
-  const token = conn.token ? `&token=${encodeURIComponent(conn.token)}` : ''
-  const host = files.host && files.host !== 'local' ? `&host=${encodeURIComponent(files.host)}` : ''
-  return `${base}/file?path=${encodeURIComponent(full)}${host}${token}&download=1`
-}
-
 function downloadEntry(e: FileEntry) {
   haptic()
-  const url = getEntryDownloadUrl(e)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = e.name
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  const form = document.createElement('form')
+  form.method = 'post'
+  form.action = relayFileUrl(conn.url, fullEntryPath(e), files.host, '', true)
+  form.hidden = true
+  if (conn.token) {
+    const input = document.createElement('input')
+    input.type = 'hidden'
+    input.name = 'token'
+    input.value = conn.token
+    form.appendChild(input)
+  }
+  document.body.appendChild(form)
+  form.submit()
+  form.remove()
   closeEntryMenu()
 }
 

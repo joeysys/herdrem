@@ -73,15 +73,16 @@ type PrefsSnapshot struct {
 
 // FileContent carries file preview content.
 type FileContent struct {
-	Type     string `json:"type"`
-	Path     string `json:"path"`
-	Content  string `json:"content"`
-	Encoding string `json:"encoding,omitempty"` // "utf-8" | "base64"
-	MimeType string `json:"mime_type,omitempty"`
-	IsText   bool   `json:"is_text,omitempty"`
-	IsImage  bool   `json:"is_image,omitempty"`
-	Size     int    `json:"size,omitempty"`
-	ReqID    string `json:"req_id,omitempty"` // echoed from the matching FileRead
+	Type      string `json:"type"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Encoding  string `json:"encoding,omitempty"` // "utf-8" | "base64"
+	MimeType  string `json:"mime_type,omitempty"`
+	IsText    bool   `json:"is_text,omitempty"`
+	IsImage   bool   `json:"is_image,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Size      int    `json:"size,omitempty"`
+	ReqID     string `json:"req_id,omitempty"` // echoed from the matching FileRead
 }
 
 // FileListing carries directory listing.
@@ -139,6 +140,7 @@ type Respond struct {
 	Text     string `json:"text"`
 	PaneID   string `json:"pane_id"`
 	OptIndex int    `json:"opt_index,omitempty"`
+	Submit   bool   `json:"submit,omitempty"` // append \n if missing
 }
 
 // SendText sends raw text to a pane.

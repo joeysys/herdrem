@@ -172,13 +172,14 @@ func looksText(data []byte) bool {
 
 // FileReadResult is the outcome of reading a file.
 type FileReadResult struct {
-	Path     string
-	Content  string // utf-8 text or base64 for images
-	Encoding string // "utf-8" | "base64"
-	MimeType string
-	IsText   bool
-	IsImage  bool
-	Size     int
+	Path      string
+	Content   string // utf-8 text or base64 for images
+	Encoding  string // "utf-8" | "base64"
+	MimeType  string
+	IsText    bool
+	IsImage   bool
+	Truncated bool
+	Size      int
 }
 
 // Read reads a file within the sandbox (local or remote).
@@ -197,16 +198,18 @@ func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadRe
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxFileRead {
+	truncated := len(data) > maxFileRead
+	if truncated {
 		data = data[:maxFileRead]
 	}
 	mime, isText, isImage := guessMime(path, data)
 	res := &FileReadResult{
-		Path:     path,
-		MimeType: mime,
-		IsText:   isText,
-		IsImage:  isImage,
-		Size:     len(data),
+		Path:      path,
+		MimeType:  mime,
+		IsText:    isText,
+		IsImage:   isImage,
+		Truncated: truncated,
+		Size:      len(data),
 	}
 	if isImage {
 		res.Encoding = "base64"
@@ -520,14 +523,15 @@ func shellQuote(s string) string {
 // toProtocol converts a FileReadResult to the wire FileContent message.
 func (r *FileReadResult) toProtocol(reqID string) protocol.FileContent {
 	return protocol.FileContent{
-		Type:     "file_content",
-		Path:     r.Path,
-		Content:  r.Content,
-		Encoding: r.Encoding,
-		MimeType: r.MimeType,
-		IsText:   r.IsText,
-		IsImage:  r.IsImage,
-		Size:     r.Size,
-		ReqID:    reqID,
+		Type:      "file_content",
+		Path:      r.Path,
+		Content:   r.Content,
+		Encoding:  r.Encoding,
+		MimeType:  r.MimeType,
+		IsText:    r.IsText,
+		IsImage:   r.IsImage,
+		Truncated: r.Truncated,
+		Size:      r.Size,
+		ReqID:     reqID,
 	}
 }

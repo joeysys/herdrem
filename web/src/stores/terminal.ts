@@ -305,10 +305,11 @@ export const useTerminalStore = defineStore('terminal', () => {
     step()
   }
 
-  function respond(text: string, optIndex?: number) {
+  function respond(text: string, optIndex?: number, submit = false) {
     if (!activePane.value) return false
     const msg: Respond = { type: 'respond', pane_id: activePane.value, text }
     if (optIndex !== undefined) msg.opt_index = optIndex
+    if (submit) msg.submit = true
     const ok = ws.send(msg)
     if (ok) scheduleRefresh()
     return ok

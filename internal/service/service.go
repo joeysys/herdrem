@@ -309,7 +309,11 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 		return
 	}
 	text := msg.Text
-	if isNumericChoice(text) {
+	if msg.Submit {
+		if text != "" && text[len(text)-1] != '\n' {
+			text += "\n"
+		}
+	} else if isNumericChoice(text) {
 		// TUI numbered select choices act on the digit keypress directly;
 		// normalizing surrounding whitespace prevents an unconsumed Enter from
 		// spilling into the next input prompt as a blank line.

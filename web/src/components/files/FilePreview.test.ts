@@ -133,6 +133,45 @@ describe('FilePreview copy button', () => {
     wrapper.unmount()
   })
 
+  it('disables copy button while content is loading', () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/loading.txt', '/workspace', 'local', null)
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+
+    const copyBtn = wrapper.find('.copy-btn')
+    expect(copyBtn.attributes('disabled')).toBeDefined()
+    expect(copyBtn.attributes('title')).toBe('Reading file content')
+    wrapper.unmount()
+  })
+
+  it('disables copy button for truncated content', () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/large.log', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/large.log',
+      content: 'partial',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      truncated: true,
+      size: 1024 * 1024,
+    })
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+
+    const copyBtn = wrapper.find('.copy-btn')
+    expect(copyBtn.attributes('disabled')).toBeDefined()
+    expect(copyBtn.attributes('title')).toBe('File content truncated')
+    wrapper.unmount()
+  })
+
   it('falls back to document.execCommand when clipboard API is unavailable', async () => {
     const files = useFilesStore()
     files.openPath('/workspace/doc.md', '/workspace', 'local', null)

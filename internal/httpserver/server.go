@@ -3,12 +3,13 @@ package httpserver
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -136,7 +137,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "files not available", http.StatusServiceUnavailable)
 		return
 	}
-	if !s.relayAuthOK(r) {
+	download := r.URL.Query().Get("download") == "1" || r.URL.Query().Get("download") == "true"
+	if !s.relayAuthOK(r) && !(download && s.fileFormAuthOK(w, r)) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -149,14 +151,63 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	// Workspace files are mutable: revalidate a reopened image instead of
 	// showing the browser's cached copy for up to five minutes.
 	w.Header().Set("Cache-Control", "private, no-cache")
-	if dl := r.URL.Query().Get("download"); dl == "1" || dl == "true" {
+	if download {
 		name := filepath.Base(filepath.ToSlash(path))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+		w.Header().Set("Content-Disposition", contentDisposition(name))
 	}
 	if err := s.files.ServeStream(w, r, host, path); err != nil {
+		w.Header().Del("Content-Disposition")
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+}
+
+func (s *Server) fileFormAuthOK(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	// Only native URL-encoded forms are needed. Reject multipart before parsing
+	// so an unauthenticated upload cannot be spooled during authentication.
+	if err != nil || mediaType != "application/x-www-form-urlencoded" {
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		return false
+	}
+	token := r.PostForm.Get("token")
+	return s.cfg.Token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) == 1
+}
+
+func contentDisposition(name string) string {
+	fallback := strings.Map(func(r rune) rune {
+		if r >= 0x20 && r <= 0x7e && r != '"' && r != '\\' {
+			return r
+		}
+		return '_'
+	}, name)
+	if fallback == "" {
+		fallback = "download"
+	}
+	return `attachment; filename="` + fallback + `"; filename*=UTF-8''` + encodeRFC5987(name)
+}
+
+func encodeRFC5987(s string) string {
+	const hex = "0123456789ABCDEF"
+	var out strings.Builder
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || strings.ContainsRune("!#$&+-.^_`|~", rune(b)) {
+			out.WriteByte(b)
+			continue
+		}
+		out.WriteByte('%')
+		out.WriteByte(hex[b>>4])
+		out.WriteByte(hex[b&0x0f])
+	}
+	return out.String()
 }
 
 // handleFilePreview serves files via a path-based URL (/preview/<cap>/<path>) so that

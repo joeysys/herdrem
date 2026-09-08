@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -89,6 +90,22 @@ func TestFileService_ReadText(t *testing.T) {
 	}
 	if res.IsImage {
 		t.Error("go source should not be image")
+	}
+}
+
+func TestFileService_ReadMarksTruncatedContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.txt")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxFileRead+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := NewFileService(rootsFor(dir), nil).Read(context.Background(), "local", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || res.Size != maxFileRead || len(res.Content) != maxFileRead {
+		t.Fatalf("large read = truncated:%v size:%d content:%d, want true/%d/%d", res.Truncated, res.Size, len(res.Content), maxFileRead, maxFileRead)
 	}
 }
 
@@ -191,9 +208,9 @@ func TestFileService_List(t *testing.T) {
 }
 
 func TestToProtocol(t *testing.T) {
-	r := &FileReadResult{Path: "/x/a.go", Content: "c", Encoding: "utf-8", MimeType: "text/plain", IsText: true, Size: 1}
+	r := &FileReadResult{Path: "/x/a.go", Content: "c", Encoding: "utf-8", MimeType: "text/plain", IsText: true, Truncated: true, Size: 1}
 	pc := r.toProtocol("req-1")
-	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || pc.Size != 1 || pc.ReqID != "req-1" {
+	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || !pc.Truncated || pc.Size != 1 || pc.ReqID != "req-1" {
 		t.Errorf("pc = %+v", pc)
 	}
 }

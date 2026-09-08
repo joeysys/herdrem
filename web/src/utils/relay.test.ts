@@ -6,6 +6,8 @@ import {
   isLocalRelayHost,
   markSessionCookieHint,
   normalizeRelayUrl,
+  relayFileUrl,
+  relayHttpBase,
   relayMatchesPageOrigin,
   relayNeedsToken,
 } from './relay'
@@ -34,6 +36,20 @@ describe('extractRelayCredentials', () => {
       url: 'ws://192.168.1.10:8766',
       token: '',
     })
+  })
+})
+
+describe('relay file URL helpers', () => {
+  it('normalizes the relay base and encodes one file URL consistently', () => {
+    expect(relayHttpBase('ws://relay.example/ws/')).toBe('http://relay.example')
+    expect(relayFileUrl('wss://relay.example/ws', '/a b.txt', 'remote', 'secret', true)).toBe(
+      'https://relay.example/file?path=%2Fa+b.txt&host=remote&token=secret&download=1',
+    )
+  })
+
+  it('omits local host and credentials when building a public file URL', () => {
+    const url = relayFileUrl('ws://localhost:8766/ws', '/a.txt', 'local')
+    expect(url).toBe('http://localhost:8766/file?path=%2Fa.txt')
   })
 })
 

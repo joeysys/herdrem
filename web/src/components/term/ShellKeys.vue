@@ -122,7 +122,7 @@ function toneFor(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
 
 function approve(opt: ApproveOption) {
   haptic(18)
-  term.respond(opt.payload, opt.index)
+  term.respond(opt.payload, opt.index, true)
 }
 
 // --- special keys ---

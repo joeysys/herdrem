@@ -492,4 +492,10 @@ func TestHandleMessage_Respond(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForSentText("y\n")
+
+	// 4. Shell approval explicitly requests Enter even for numeric labels.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"respond","pane_id":"demo:0.1","text":"3","submit":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	waitForSentText("3\n")
 }
