@@ -1,30 +1,13 @@
-# Build the web frontend
+# Build the web frontend only.
 FROM node:22-alpine AS web-builder
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
-RUN npm run build  # outputs to /webdist (vite outDir: ../webdist)
+RUN npm run build  # outputs to /webdist
 
-# Build the Go binary
-FROM golang:1.26-alpine AS go-builder
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-COPY --from=web-builder /webdist/ ./webdist/
-RUN CGO_ENABLED=0 go build -o /herdrem ./cmd/herdrem
-
-# Runtime image
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates cloudflared && \
-    adduser -D -h /var/lib/herdrem herdrem
-COPY --from=go-builder /herdrem /usr/local/bin/herdrem
-# Containers must listen on their network interface; the relay requires a token.
-ENV HERDREM_BIND=0.0.0.0
-USER herdrem
-WORKDIR /var/lib/herdrem
-VOLUME /var/lib/herdrem
-EXPOSE 8766
-ENTRYPOINT ["herdrem"]
-CMD ["serve", "--web"]
+# Static Web/PWA image. The relay is installed and run on the host.
+FROM nginx:1.27-alpine
+COPY --from=web-builder /webdist/ /usr/share/nginx/html/
+COPY deploy/web-nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

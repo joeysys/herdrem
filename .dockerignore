@@ -1,0 +1,12 @@
+.git
+docs/
+cmd/
+internal/
+scripts/
+go.mod
+go.sum
+Makefile
+web/node_modules/
+webdist/
+*.env
+.env*

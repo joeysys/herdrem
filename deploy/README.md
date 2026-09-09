@@ -70,7 +70,13 @@ installed outside the current PATH, add that directory to PATH before the
 mkdir -p ~/.config/herdrem
 cp deploy/herdrem.env.example ~/.config/herdrem/herdrem.env
 chmod 600 ~/.config/herdrem/herdrem.env
-# Set HERDREM_TOKEN for LAN or tunnel access.
+
+# Generate a secure token and save it to the env file:
+TOKEN="$(openssl rand -hex 16)"
+sed -i.bak "s/^#\? \?HERDREM_TOKEN=.*/HERDREM_TOKEN=$TOKEN/" ~/.config/herdrem/herdrem.env && rm -f ~/.config/herdrem/herdrem.env.bak
+echo "Configured HERDREM_TOKEN: $TOKEN"
+unset TOKEN
+
 # Persist the actual install directories for the user unit:
 herdrem_bin_dir="$(dirname "$(command -v herdrem)")"
 herdr_bin_dir="$(dirname "$(command -v herdr)")"
@@ -80,9 +86,14 @@ unset herdrem_bin_dir herdr_bin_dir
 
 The user unit requires this file. The PATH line above is stored in the
 file, so it remains available after logout, linger, or reboot. It defaults to
-`HERDREM_BIND=127.0.0.1` (loopback only). Only a same-origin page opened through
-`localhost`, `127.0.0.1`, or `::1` may omit the token; LAN addresses and other
-origins must provide `HERDREM_TOKEN` through the relay switcher.
+`HERDREM_BIND=127.0.0.1` (loopback only); change to `HERDREM_BIND=0.0.0.0` for LAN access.
+Only a same-origin page opened through `localhost`, `127.0.0.1`, or `::1` may omit the token;
+LAN addresses, tunnels, and other origins must provide `HERDREM_TOKEN` when prompted by the PWA.
+You can view the saved token at any time by running:
+
+```bash
+grep '^HERDREM_TOKEN=' ~/.config/herdrem/herdrem.env
+```
 
 ### 3. Install and start the user unit
 
@@ -126,10 +137,15 @@ systemctl --user edit --full herdrem
 #   ExecStart=herdrem serve --web --require-herdr --tunnel
 ```
 
-`HERDREM_TOKEN` is **required** when `--tunnel` is set. Set it in
-`~/.config/herdrem/herdrem.env` before reloading:
+`HERDREM_TOKEN` is **required** when `--tunnel` is set. If not already set,
+generate and save it in `~/.config/herdrem/herdrem.env` before reloading:
 
 ```bash
+TOKEN="$(openssl rand -hex 16)"
+sed -i.bak "s/^#\? \?HERDREM_TOKEN=.*/HERDREM_TOKEN=$TOKEN/" ~/.config/herdrem/herdrem.env && rm -f ~/.config/herdrem/herdrem.env.bak
+echo "Tunnel relay token: $TOKEN"
+unset TOKEN
+
 systemctl --user daemon-reload
 systemctl --user restart herdrem
 journalctl --user -u herdrem -f  # look for the wss://*.trycloudflare.com URL
@@ -139,46 +155,35 @@ See [README](../README.md#configuration) for all env vars.
 
 ---
 
-## Docker
+## Docker (Web/PWA only)
 
-### Build
+Docker serves the static Web/PWA only. It does not run the relay, does not
+contain `herdr`, does not use `FakeClient`, and does not need a relay token or
+host socket. Install and run the real relay on the host with the systemd user
+service above.
 
-```bash
-docker build -t herdrem .
-```
-
-### Run with a token (required for the container's non-loopback bind)
-
-```bash
-docker run -d \
-  --name herdrem \
-  -p 127.0.0.1:8766:8766 \
-  -e HERDREM_BIND=0.0.0.0 \
-  -e HERDREM_TOKEN="$(openssl rand -hex 16)" \
-  --restart unless-stopped \
-  herdrem
-```
-
-### Run with persistent data
+### Build and run
 
 ```bash
-docker run -d \
-  --name herdrem \
-  -p 127.0.0.1:8766:8766 \
-  -e HERDREM_BIND=0.0.0.0 \
-  -e HERDREM_TOKEN="$(openssl rand -hex 16)" \
-  -v herdrem-data:/var/lib/herdrem \
-  --restart unless-stopped \
-  herdrem
+docker compose up -d --build
 ```
 
-### docker-compose
+Open `http://<host>:8080`. In the PWA relay switcher, add the separately
+installed relay address, for example `ws://<host>:8766`, and enter its
+`HERDREM_TOKEN` when prompted. The static Web container has no `/ws`,
+`/api`, or file service of its own.
 
-```bash
-HERDREM_TOKEN="$(openssl rand -hex 16)" docker compose up -d
-```
+For a browser on another machine, configure the host relay with
+`HERDREM_BIND=0.0.0.0` and a token in its systemd environment file. The relay
+must be reachable from the browser; the Docker container does not proxy relay
+traffic.
 
-See [docker-compose.yml](../docker-compose.yml) for the full configuration.
+When the PWA and relay use different origins, source file previews and relay
+control continue to work, but rendered HTML previews require opening the PWA
+from the relay's own origin because preview capability minting is same-origin
+only.
+
+See [docker-compose.yml](../docker-compose.yml) for the Web-only container.
 
 ---
 
@@ -197,5 +202,11 @@ See [docker-compose.yml](../docker-compose.yml) for the full configuration.
   user's Herdr socket/session.
 - The token is required for LAN, tunnel, cross-origin WebSocket, and
   non-browser connections.
-- The PWA remembers relay tokens in browser local storage for automatic
-  reconnects; do not use this on a shared or untrusted browser profile.
+- **Token persistence**: Relay tokens are held in tab memory only and are never
+  stored in `localStorage`. On same-origin connections, a successful login sets
+  an HttpOnly session cookie that allows page reloads without re-entering the token.
+  Connecting to cross-origin relays or clearing cookies requires entering the token
+  again in that tab session.
+- **Docker vs host boundary**: Docker serves only the Web/PWA. The host systemd
+  service is the only supported relay deployment and is where the real `herdr`
+  CLI, user socket, agents, and relay token live.

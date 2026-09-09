@@ -21,20 +21,26 @@ make build
 make dev
 ```
 
-For same-LAN access from a phone or another machine, opt in to a non-loopback bind and set a token:
+For same-LAN access from a phone or another machine, opt in to a non-loopback bind and set a token.
+Generate the token, print it once so you can enter it in the browser, and start the relay:
 
 ```bash
-HERDREM_BIND=0.0.0.0 HERDREM_TOKEN="$(openssl rand -hex 16)" ./herdrem serve --web
+export HERDREM_TOKEN="$(openssl rand -hex 16)"
+echo "Relay token: $HERDREM_TOKEN"
+HERDREM_BIND=0.0.0.0 ./herdrem serve --web
 ```
 
-Open `http://<lan-ip>:8766` in a browser on the phone or another device and enter the token when the PWA
+Open `http://<lan-ip>:8766` in a browser on the phone or another device and enter the displayed token when the PWA
 prompts for it. The token is required even though the page is served by the
-relay, because the LAN address is not an exempt local host.
+relay, because the LAN address is not an exempt local host. Note that the relay
+does not print the token in its startup logs.
 
 Or expose via Cloudflare tunnel (also requires a token):
 
 ```bash
-HERDREM_TOKEN="$(openssl rand -hex 16)" ./herdrem serve --web --tunnel
+export HERDREM_TOKEN="$(openssl rand -hex 16)"
+echo "Relay token: $HERDREM_TOKEN"
+./herdrem serve --web --tunnel
 ```
 
 ## Architecture
@@ -125,5 +131,6 @@ See [LICENSE](LICENSE) file for details.
 
 ## Deployment
 
-For production deployments (systemd, Docker, docker-compose), see
+Install the relay on the host with the systemd user service. Docker is only
+supported for serving the static Web/PWA; it does not run the relay. See
 [deploy/README.md](deploy/README.md).
