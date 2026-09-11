@@ -40,11 +40,18 @@ type ContentSubscriber interface {
 	// for a pane, and whether a baseline exists. The service includes the same
 	// revision in the full response so clients can validate incremental deltas.
 	ContentSnapshot(paneID string) (content string, rev int, ok bool)
+	// PreviewSnapshot serves a short pane read for grid previews, reusing the
+	// poller's version-confirmed content cache or a short-lived preview cache,
+	// and single-flighting concurrent reads of the same pane.
+	PreviewSnapshot(ctx context.Context, paneID string, lines int) (string, error)
+	// InvalidateMenu drops the poller's cached blocked-menu for a pane; called
+	// after a send so the next poll re-reads the post-response screen.
+	InvalidateMenu(paneID string)
 }
 
-// tailLines returns the trailing `lines` lines of `s`. A trailing newline
+// TailLines returns the trailing `lines` lines of `s`. A trailing newline
 // terminates the last visual line rather than adding an empty one.
-func tailLines(s string, lines int) string {
+func TailLines(s string, lines int) string {
 	if lines <= 0 || s == "" {
 		return s
 	}
@@ -210,20 +217,36 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 	var err error
 	var rev int
 	var hasRev bool
+	served := false
 	// A refresh request always reads directly from herdr (bypassing the poller
 	// cache) so the client gets the authoritative current content, not a
 	// possibly-stale cached snapshot.
-	if !msg.Refresh && msg.Purpose == "term" && s.subscriber != nil {
-		content, rev, hasRev = s.subscriber.ContentSnapshot(msg.PaneID)
-		if hasRev {
-			// Trim the cached snapshot to the requested line count. Poll requests
-			// use this only to refresh the subscription baseline; the client
-			// keeps its delta-grown content and does not replace it with this
-			// truncated view (see terminal store setContent poll handling).
-			content = tailLines(content, lines)
+	if !msg.Refresh && s.subscriber != nil {
+		switch msg.Purpose {
+		case "term":
+			content, rev, hasRev = s.subscriber.ContentSnapshot(msg.PaneID)
+			if hasRev {
+				// Trim the cached snapshot to the requested line count. Poll requests
+				// use this only to refresh the subscription baseline; the client
+				// keeps its delta-grown content and does not replace it with this
+				// truncated view (see terminal store setContent poll handling).
+				content = TailLines(content, lines)
+			}
+		case "preview":
+			// Grid previews go through the poller's merged-read path: a fresh
+			// version-confirmed baseline is tailed in place, misses share one
+			// upstream read per pane (singleflight), and a short-lived cache
+			// dedupes the per-card refresh burst. Preview content carries no
+			// revision — it is never a delta baseline.
+			content, err = s.subscriber.PreviewSnapshot(ctx, msg.PaneID, lines)
+			if err != nil {
+				s.sendError(ctx, conn, "read_pane", err.Error())
+				return
+			}
+			served = true
 		}
 	}
-	if !hasRev {
+	if !served && !hasRev {
 		content, err = s.client.ReadPane(ctx, s.hostFor(msg.PaneID), msg.PaneID, lines)
 		if err != nil {
 			s.sendError(ctx, conn, "read_pane", err.Error())
@@ -263,6 +286,11 @@ func (s *Service) handleSendText(ctx context.Context, conn *websocket.Conn, data
 		s.sendError(ctx, conn, "send_text", err.Error())
 		return
 	}
+	// The screen is about to change — the next poll must re-read the menu
+	// rather than serve the pre-response options from cache.
+	if s.subscriber != nil {
+		s.subscriber.InvalidateMenu(msg.PaneID)
+	}
 }
 
 func (s *Service) handleSendKeys(ctx context.Context, conn *websocket.Conn, data []byte) {
@@ -278,6 +306,9 @@ func (s *Service) handleSendKeys(ctx context.Context, conn *websocket.Conn, data
 	if err := s.client.SendKeys(ctx, s.hostFor(msg.PaneID), msg.PaneID, msg.Keys); err != nil {
 		s.sendError(ctx, conn, "send_keys", err.Error())
 		return
+	}
+	if s.subscriber != nil {
+		s.subscriber.InvalidateMenu(msg.PaneID)
 	}
 }
 
@@ -325,6 +356,9 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {
 		s.sendError(ctx, conn, "respond", err.Error())
 		return
+	}
+	if s.subscriber != nil {
+		s.subscriber.InvalidateMenu(msg.PaneID)
 	}
 }
 

@@ -1,0 +1,69 @@
+{
+ "id": "cli:pane:list",
+ "result": {
+  "panes": [
+   {
+    "agent_status": "unknown",
+    "cwd": "/home/user/workspace/demo-a",
+    "focused": false,
+    "foreground_cwd": "/home/user/cache/demo/files",
+    "pane_id": "demo-ws-a:p1",
+    "revision": 2,
+    "scroll": {
+     "max_offset_from_bottom": 0,
+     "offset_from_bottom": 0,
+     "viewport_rows": 44
+    },
+    "tab_id": "demo-ws-a:t1",
+    "terminal_id": "term_demo01",
+    "terminal_title": "ranger ~/workspace/demo-a",
+    "terminal_title_stripped": "ranger ~/workspace/demo-a",
+    "workspace_id": "demo-ws-a"
+   },
+   {
+    "agent": "pi",
+    "agent_session": {
+     "agent": "pi",
+     "kind": "path",
+     "source": "herdr:pi",
+     "value": "/home/user/.pi/agent/sessions/--home-demo-proj-demo--/2026-01-01T00-00-00-000Z_demo-session.jsonl"
+    },
+    "agent_status": "idle",
+    "cwd": "/home/user/workspace/demo",
+    "focused": false,
+    "foreground_cwd": "/home/user/workspace/demo",
+    "pane_id": "demo-ws-a:p3",
+    "revision": 3,
+    "scroll": {
+     "max_offset_from_bottom": 2836,
+     "offset_from_bottom": 0,
+     "viewport_rows": 42
+    },
+    "tab_id": "demo-ws-a:t2",
+    "terminal_id": "term_demo02",
+    "terminal_title": "π - demo",
+    "terminal_title_stripped": "π - demo",
+    "workspace_id": "demo-ws-a"
+   },
+   {
+    "agent_status": "unknown",
+    "cwd": "/home/user/workspace/demo",
+    "focused": false,
+    "foreground_cwd": "/home/user/workspace/demo",
+    "pane_id": "demo-ws-a:p7",
+    "revision": 1,
+    "scroll": {
+     "max_offset_from_bottom": 0,
+     "offset_from_bottom": 0,
+     "viewport_rows": 42
+    },
+    "tab_id": "demo-ws-a:t2",
+    "terminal_id": "term_demo03",
+    "terminal_title": "~/workspace/demo",
+    "terminal_title_stripped": "~/workspace/demo",
+    "workspace_id": "demo-ws-a"
+   }
+  ],
+  "type": "pane_list"
+ }
+}

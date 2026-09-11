@@ -1,0 +1,196 @@
+{
+ "id": "cli:api:snapshot",
+ "result": {
+  "snapshot": {
+   "agents": [
+    {
+     "agent": "pi",
+     "agent_session": {
+      "agent": "pi",
+      "kind": "path",
+      "source": "herdr:pi",
+      "value": "/home/user/.pi/agent/sessions/--home-demo-proj-demo--/2026-01-01T00-00-00-000Z_demo-session.jsonl"
+     },
+     "agent_status": "idle",
+     "cwd": "/home/user/workspace/demo",
+     "focused": false,
+     "foreground_cwd": "/home/user/workspace/demo",
+     "pane_id": "demo-ws-a:p3",
+     "revision": 3,
+     "screen_detection_skipped": true,
+     "state_change_seq": 77,
+     "tab_id": "demo-ws-a:t2",
+     "terminal_id": "term_demo02",
+     "terminal_title": "π - demo",
+     "terminal_title_stripped": "π - demo",
+     "workspace_id": "demo-ws-a"
+    },
+    {
+     "agent": "devin",
+     "agent_session": {
+      "agent": "devin",
+      "kind": "id",
+      "source": "herdr:devin",
+      "value": "agent-demo"
+     },
+     "agent_status": "idle",
+     "cwd": "/home/user/workspace/demo-b",
+     "focused": false,
+     "foreground_cwd": "/home/user/workspace/demo-b",
+     "pane_id": "demo-ws-b:p1",
+     "revision": 2,
+     "state_change_seq": 94,
+     "tab_id": "demo-ws-b:t1",
+     "terminal_id": "term_demo04",
+     "terminal_title": "devin: resume agent-demo",
+     "terminal_title_stripped": "devin: resume agent-demo",
+     "workspace_id": "demo-ws-b"
+    }
+   ],
+   "panes": [
+    {
+     "agent": "pi",
+     "agent_session": {
+      "agent": "pi",
+      "kind": "path",
+      "source": "herdr:pi",
+      "value": "/home/user/.pi/agent/sessions/--home-demo-proj-demo--/2026-01-01T00-00-00-000Z_demo-session.jsonl"
+     },
+     "agent_status": "idle",
+     "cwd": "/home/user/workspace/demo",
+     "focused": false,
+     "foreground_cwd": "/home/user/workspace/demo",
+     "pane_id": "demo-ws-a:p3",
+     "revision": 3,
+     "scroll": {
+      "max_offset_from_bottom": 2836,
+      "offset_from_bottom": 0,
+      "viewport_rows": 42
+     },
+     "tab_id": "demo-ws-a:t2",
+     "terminal_id": "term_demo02",
+     "terminal_title": "π - demo",
+     "terminal_title_stripped": "π - demo",
+     "workspace_id": "demo-ws-a"
+    },
+    {
+     "agent": "devin",
+     "agent_session": {
+      "agent": "devin",
+      "kind": "id",
+      "source": "herdr:devin",
+      "value": "agent-demo"
+     },
+     "agent_status": "idle",
+     "cwd": "/home/user/workspace/demo-b",
+     "focused": false,
+     "foreground_cwd": "/home/user/workspace/demo-b",
+     "pane_id": "demo-ws-b:p1",
+     "revision": 2,
+     "scroll": {
+      "max_offset_from_bottom": 0,
+      "offset_from_bottom": 0,
+      "viewport_rows": 44
+     },
+     "tab_id": "demo-ws-b:t1",
+     "terminal_id": "term_demo04",
+     "terminal_title": "devin: resume agent-demo",
+     "terminal_title_stripped": "devin: resume agent-demo",
+     "workspace_id": "demo-ws-b"
+    },
+    {
+     "agent_status": "unknown",
+     "cwd": "/home/user/workspace/demo-a",
+     "focused": false,
+     "foreground_cwd": "/home/user/cache/demo/files",
+     "pane_id": "demo-ws-a:p1",
+     "revision": 2,
+     "scroll": {
+      "max_offset_from_bottom": 0,
+      "offset_from_bottom": 0,
+      "viewport_rows": 44
+     },
+     "tab_id": "demo-ws-a:t1",
+     "terminal_id": "term_demo01",
+     "terminal_title": "ranger ~/workspace/demo-a",
+     "terminal_title_stripped": "ranger ~/workspace/demo-a",
+     "workspace_id": "demo-ws-a"
+    }
+   ],
+   "workspaces": [
+    {
+     "active_tab_id": "demo-ws-a:t3",
+     "agent_status": "idle",
+     "focused": false,
+     "label": "demo-a",
+     "number": 1,
+     "pane_count": 8,
+     "tab_count": 6,
+     "workspace_id": "demo-ws-a"
+    },
+    {
+     "active_tab_id": "demo-ws-b:t2",
+     "agent_status": "idle",
+     "focused": false,
+     "label": "demo-b",
+     "number": 2,
+     "pane_count": 4,
+     "tab_count": 4,
+     "workspace_id": "demo-ws-b"
+    }
+   ],
+   "tabs": [
+    {
+     "agent_status": "unknown",
+     "focused": false,
+     "label": "1",
+     "number": 1,
+     "pane_count": 1,
+     "tab_id": "demo-ws-a:t1",
+     "workspace_id": "demo-ws-a"
+    },
+    {
+     "agent_status": "idle",
+     "focused": false,
+     "label": "2",
+     "number": 2,
+     "pane_count": 2,
+     "tab_id": "demo-ws-a:t2",
+     "workspace_id": "demo-ws-a"
+    }
+   ],
+   "focused_pane_id": "demo-ws-focus:p18",
+   "focused_tab_id": "demo-ws-focus:tY",
+   "focused_workspace_id": "demo-ws-focus",
+   "layouts": [
+    {
+     "area": {
+      "height": 44,
+      "width": 160,
+      "x": 0,
+      "y": 0
+     },
+     "focused_pane_id": "demo-ws-a:p1",
+     "panes": [
+      {
+       "focused": true,
+       "pane_id": "demo-ws-a:p1",
+       "rect": {
+        "height": 44,
+        "width": 160,
+        "x": 0,
+        "y": 0
+       }
+      }
+     ],
+     "splits": [],
+     "tab_id": "demo-ws-a:t1",
+     "workspace_id": "demo-ws-a",
+     "zoomed": false
+    }
+   ],
+   "protocol": 22,
+   "version": "0.9.0"
+  }
+ }
+}

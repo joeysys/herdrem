@@ -242,10 +242,33 @@ function onTodoFill(text: string) {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
+function startPoll() {
+  if (!pollTimer) pollTimer = setInterval(() => term.requestRead(50, false, true), 6000)
+}
+
+function stopPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+// While the page is hidden the 6s subscription poll stops (the relay lets the
+// pane subscription expire); on return, re-read immediately before resuming.
+function onVisibility() {
+  if (document.hidden) {
+    stopPoll()
+  } else {
+    term.requestRead(50, false, true)
+    startPoll()
+  }
+}
+
 onMounted(() => {
   term.openPane(props.paneId)
   if (scrollEl.value) zoom.bind(scrollEl.value)
-  pollTimer = setInterval(() => term.requestRead(50, false, true), 6000)
+  if (!document.hidden) startPoll()
+  document.addEventListener('visibilitychange', onVisibility)
   // Focus shell inline input on mount if this is a shell pane
   if (isShell.value) nextTick(() => shellInputEl.value?.focus())
   // Close mobile menu on outside click
@@ -268,9 +291,10 @@ watch(
 )
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  stopPoll()
   if (scrollEl.value) zoom.unbind(scrollEl.value)
   document.removeEventListener('click', closeMenu)
+  document.removeEventListener('visibilitychange', onVisibility)
   term.closePane()
 })
 </script>

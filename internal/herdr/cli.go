@@ -89,38 +89,31 @@ func hostLabel(host string) string {
 
 // Alive checks if herdr server is running on the host.
 func (c *CLIClient) Alive(ctx context.Context, host string) (bool, error) {
-	out, err := c.exec(ctx, host, "status", "server", "--json")
+	st, err := c.ServerStatus(ctx, host)
 	if err != nil {
 		return false, err
 	}
-	var result struct {
-		Running bool `json:"running"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return false, fmt.Errorf("parse status: %w", err)
-	}
-	return result.Running, nil
+	return st.Running, nil
 }
 
-// ListPanes returns all panes for a host, tagging each with its host.
-// herdr 0.7+ `pane list` has no --json flag — it always emits a JSON envelope
-// shaped like {"id":"cli:pane:list","result":{"panes":[...],"type":"pane_list"}}.
-// Each pane uses `agent_status` (not `status`); we map it onto Pane.Status.
-// Panes without an agent are classified as Kind="shell".
-func (c *CLIClient) ListPanes(ctx context.Context, host string) ([]Pane, error) {
-	out, err := c.exec(ctx, host, "pane", "list")
+// ServerStatus returns the full `status server --json` payload: running plus
+// the 0.9+ version/protocol/compatible/socket fields used by the version gate.
+func (c *CLIClient) ServerStatus(ctx context.Context, host string) (StatusServerResult, error) {
+	out, err := c.exec(ctx, host, "status", "server", "--json")
 	if err != nil {
-		return nil, err
+		return StatusServerResult{}, err
 	}
-	var envelope struct {
-		Result struct {
-			Panes []Pane `json:"panes"`
-		} `json:"result"`
+	var result StatusServerResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return StatusServerResult{}, fmt.Errorf("parse status: %w", err)
 	}
-	if err := json.Unmarshal(out, &envelope); err != nil {
-		return nil, fmt.Errorf("parse pane list: %w", err)
-	}
-	panes := envelope.Result.Panes
+	return result, nil
+}
+
+// normalizePanes applies the relay-side field fixups shared by ListPanes and
+// Snapshot: agent_status→status mapping, host tagging, kind inference, and
+// project derivation from cwd.
+func normalizePanes(panes []Pane, host string) {
 	for i := range panes {
 		if panes[i].Status == "" {
 			panes[i].Status = panes[i].AgentStatus
@@ -141,7 +134,108 @@ func (c *CLIClient) ListPanes(ctx context.Context, host string) ([]Pane, error) 
 			panes[i].Project = baseName(panes[i].Cwd)
 		}
 	}
+}
+
+// mergeSnapshotAgents folds the agents[] array of a snapshot back onto its
+// panes[] by pane_id: state_change_seq (the whole point of the snapshot call —
+// PaneInfo no longer carries it in 0.9) plus the agent name/status as a
+// fallback for panes that omit them.
+func mergeSnapshotAgents(snap *Snapshot) {
+	if len(snap.Agents) == 0 {
+		return
+	}
+	byPane := make(map[string]*Agent, len(snap.Agents))
+	for i := range snap.Agents {
+		byPane[snap.Agents[i].PaneID] = &snap.Agents[i]
+	}
+	for i := range snap.Panes {
+		a, ok := byPane[snap.Panes[i].PaneID]
+		if !ok {
+			continue
+		}
+		snap.Panes[i].StateChangeSeq = a.StateChangeSeq
+		if snap.Panes[i].Agent == "" {
+			snap.Panes[i].Agent = a.Agent
+		}
+		if snap.Panes[i].AgentStatus == "" {
+			snap.Panes[i].AgentStatus = a.AgentStatus
+		}
+	}
+}
+
+// parseSnapshot decodes the `herdr api snapshot` envelope and enforces the
+// protocol gate: a response without protocol >= MinProtocol is not a usable
+// 0.9 snapshot (old herdr, command missing, or unexpected shape).
+func parseSnapshot(out []byte) (*Snapshot, error) {
+	var envelope struct {
+		Result struct {
+			Snapshot *Snapshot `json:"snapshot"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		return nil, fmt.Errorf("parse api snapshot: %w", err)
+	}
+	snap := envelope.Result.Snapshot
+	if snap == nil || snap.Protocol < MinProtocol {
+		return nil, fmt.Errorf("api snapshot: herdr >= 0.9 (protocol >= %d) required, got protocol %d", MinProtocol, snapProtocol(snap))
+	}
+	return snap, nil
+}
+
+func snapProtocol(snap *Snapshot) int {
+	if snap == nil {
+		return 0
+	}
+	return snap.Protocol
+}
+
+// Snapshot fetches the single-call full snapshot (`herdr api snapshot`) for a
+// host and merges agents[].state_change_seq back onto the panes.
+func (c *CLIClient) Snapshot(ctx context.Context, host string) (*Snapshot, error) {
+	out, err := c.exec(ctx, host, "api", "snapshot")
+	if err != nil {
+		return nil, err
+	}
+	snap, err := parseSnapshot(out)
+	if err != nil {
+		return nil, err
+	}
+	mergeSnapshotAgents(snap)
+	normalizePanes(snap.Panes, host)
+	return snap, nil
+}
+
+// ListPanes returns all panes for a host, tagging each with its host.
+// herdr 0.9 `pane list` emits a JSON envelope shaped like
+// {"id":"cli:pane:list","result":{"panes":[...],"type":"pane_list"}}.
+// Each pane uses `agent_status` (not `status`); we map it onto Pane.Status.
+// Panes without an agent are classified as Kind="shell".
+// Note: pane list no longer carries state_change_seq (moved to AgentInfo in
+// 0.9) — callers that need it must use Snapshot instead.
+func (c *CLIClient) ListPanes(ctx context.Context, host string) ([]Pane, error) {
+	out, err := c.exec(ctx, host, "pane", "list")
+	if err != nil {
+		return nil, err
+	}
+	panes, err := parsePaneList(out)
+	if err != nil {
+		return nil, err
+	}
+	normalizePanes(panes, host)
 	return panes, nil
+}
+
+// parsePaneList decodes the `herdr pane list` envelope.
+func parsePaneList(out []byte) ([]Pane, error) {
+	var envelope struct {
+		Result struct {
+			Panes []Pane `json:"panes"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		return nil, fmt.Errorf("parse pane list: %w", err)
+	}
+	return envelope.Result.Panes, nil
 }
 
 // ListWorkspaces returns all workspaces for a host.
@@ -191,6 +285,8 @@ func (c *CLIClient) SendKeys(ctx context.Context, host, paneID, keys string) err
 func (c *CLIClient) StatusServer(ctx context.Context, host string) (bool, error) {
 	return c.Alive(ctx, host)
 }
+
+
 
 // PaneSplit splits an existing pane and returns the new pane's ID.
 // If fromPaneID is empty, the current pane is split.

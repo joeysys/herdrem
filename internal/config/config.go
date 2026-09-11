@@ -20,6 +20,10 @@ type Config struct {
 	StaticDir   string // optional override for embed (debug)
 	Web         bool   // serve embedded SPA
 	Tunnel      bool   // launch cloudflared quick tunnel
+	// PPROFAddr enables Go pprof endpoints on a dedicated loopback-only
+	// listener (e.g. "127.0.0.1:6060"). Empty = disabled; never merged into
+	// the public-facing mux.
+	PPROFAddr string
 	// RequireHerdr makes the relay exit instead of falling back to the fake
 	// client when the herdr CLI is unavailable. Set for production deployments
 	// so a missing herdr binary is loud, not silent.
@@ -37,6 +41,7 @@ func FromEnv() Config {
 		KindsFilter: os.Getenv("HERDREM_KINDS"),
 		DataDir:     envOr("HERDREM_DATA_DIR", defaultDataDir()),
 		StaticDir:   os.Getenv("HERDREM_STATIC"),
+		PPROFAddr:   os.Getenv("HERDREM_PPROF_ADDR"),
 	}
 }
 

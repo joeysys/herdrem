@@ -29,9 +29,11 @@ type Poller struct {
 	logger *slog.Logger
 	intvl  time.Duration
 
-	mu         sync.RWMutex
-	paneRemote map[string]string // pane_id → host
-	latest     []herdr.Pane      // last merged snapshot (for cwd roots)
+	mu          sync.RWMutex
+	paneRemote  map[string]string       // pane_id → host
+	latest      []herdr.Pane            // last merged snapshot (for cwd roots)
+	hostPanes   map[string][]herdr.Pane // host → panes from its last successful snapshot (for stale retention)
+	hostNextTry map[string]time.Time    // host → next allowed snapshot attempt (failure backoff)
 
 	// branch cache: cwd → branch name, refreshed every 15s
 	branchMu     sync.Mutex
@@ -39,30 +41,37 @@ type Poller struct {
 	branchExpiry map[string]time.Time // cwd → expiry time
 	branchLast   time.Time
 
-	// workspace label cache: workspace_id → label, per host
-	wsMu    sync.Mutex
-	wsCache map[string]map[string]string // host → {workspace_id → label}
-	wsLast  time.Time
-
 	// last active tracking: pane_id → epoch seconds of last observed activity
 	activeMu            sync.Mutex
-	prevRevisions       map[string]int       // pane_id → last seen revision
-	prevSeq             map[string]int       // pane_id → last seen state_change_seq
-	lastActive          map[string]int64     // pane_id → epoch seconds
-	acknowledgedDone    map[string]bool      // pane_id → done seen by a relay client
-	prevValidPathsRevs  map[string]int       // pane_id → last checked revision for valid paths
-	prevValidPathsSeq   map[string]int       // pane_id → last checked state change sequence for valid paths
-	cachedValidPaths    map[string][]string  // pane_id → cached valid paths
-	hasMissingPaths     map[string]bool      // pane_id → whether extracted matches contained missing paths
-	validPathsLastCheck map[string]time.Time // pane_id → last valid paths check time
+	prevRevisions       map[string]int            // pane_id → last seen revision
+	prevSeq             map[string]int            // pane_id → last seen state_change_seq
+	lastActive          map[string]int64          // pane_id → epoch seconds
+	acknowledgedDone    map[string]bool           // pane_id → done seen by a relay client
+	prevValidPathsRevs  map[string]int            // pane_id → last checked revision for valid paths
+	prevValidPathsSeq   map[string]int            // pane_id → last checked state change sequence for valid paths
+	cachedValidPaths    map[string][]string       // pane_id → cached valid paths
+	missingPathItems    map[string][]panePathItem // pane_id → candidates that failed the last existence check
+	validPathsLastCheck map[string]time.Time      // pane_id → last valid paths check time
+	menuCache           map[string]menuEntry      // pane_id → last parsed blocked-menu (keyed by rev+seq+agent)
+	menuGen             map[string]int64          // pane_id → generation, bumped by InvalidateMenu to invalidate in-flight reads
 
 	// incremental terminal content: pane_id → last seen content snapshot
-	contentMu    sync.Mutex
-	contentCache map[string]string    // pane_id → last full content
-	contentRevs  map[string]int       // pane_id → revision of the cached content
-	contentSeqs  map[string]int       // pane_id → state_change_seq of the cached content
-	contentAt    map[string]time.Time // pane_id → when the cached content was last read
-	subscribers  map[string]int64     // pane_id → unix ts of last read_pane request (TTL-based subscription)
+	contentMu       sync.Mutex
+	contentCache    map[string]string       // pane_id → last full content
+	contentRevs     map[string]int          // pane_id → revision of the cached content
+	contentSeqs     map[string]int          // pane_id → state_change_seq of the cached content
+	contentAt       map[string]time.Time    // pane_id → when the cached content was last read
+	contentVerAt    map[string]time.Time    // pane_id → when the cached rev/seq was last confirmed by a snapshot
+	subscribers     map[string]int64        // pane_id → unix ts of last read_pane request (TTL-based subscription)
+	previewCache    map[string]previewEntry // pane_id → short-lived unversioned preview read
+	previewInflight map[string]*previewCall // pane_id → in-flight preview read (singleflight)
+
+	// client-connection driven enrichment gating: path validation, blocked-menu
+	// reads, and terminal delta reads are display work — they pause when no
+	// client has been connected for enrichmentGrace. pollOnce-only fields.
+	lastClientAt   time.Time // last poll cycle that saw hub.Count() > 0
+	pathsSkipped   bool      // path validation was skipped last cycle (reconnect → force recheck)
+	pathRecheckAll bool      // one-shot: bypass the version-unchanged skip for all panes
 
 	// single-flight guard so a slow pushContentDeltas goroutine is never
 	// overlapped by the next poll cycle: the previous run must finish
@@ -71,7 +80,7 @@ type Poller struct {
 	deltaRunning bool
 
 	// file existence checker (set after construction to avoid circular dep)
-	fileSvc   *service.FileService
+	fileSvc   existsChecker
 	fileSvcMu sync.RWMutex
 
 	// trigger channel for immediate poll (e.g. after AckDone)
@@ -80,6 +89,58 @@ type Poller struct {
 	// persistence: state file path and in-process writer serialization
 	statePath   string
 	stateFileMu sync.Mutex
+
+	metrics pollMetrics
+}
+
+// pollMetrics counts upstream calls and cache hits so CPU reductions are
+// verifiable from logs rather than assumed (plan §2.3 baseline). Written from
+// pollOnce / the delta goroutine; read+reset never — cumulative for the
+// process lifetime, sampled by the periodic log line.
+type pollMetrics struct {
+	mu           sync.Mutex
+	cycles       int64 // poll cycles completed
+	snapshots    int64 // api snapshot calls attempted
+	snapshotErrs int64 // api snapshot calls failed
+	paneReads    int64 // ReadPane calls (path scans + menu reads + delta reads)
+	pathSkips    int64 // valid-paths cycles skipped via unchanged version
+	deltaSkips   int64 // delta cycles skipped via unchanged rev/seq
+	seqZeroAgent int   // agent panes whose state_change_seq is still 0 (signal health gauge)
+}
+
+// existsChecker is the subset of service.FileService the poller needs —
+// narrowed to an interface so tests can count Exists calls.
+type existsChecker interface {
+	Exists(ctx context.Context, host, path string) bool
+}
+
+// menuEntry is a cached blocked-menu parse keyed to the pane's version.
+// It is only served while rev+seq+agent still match the current pane, so a
+// state change always forces a fresh read — stale approval options are never
+// shown just to save CPU.
+type menuEntry struct {
+	opts   []string
+	labels []string
+	prompt string
+	rev    int
+	seq    int
+	agent  string
+	at     time.Time
+}
+
+// previewEntry is a short-lived unversioned preview read. Deliberately
+// separate from contentCache: an 8-line tail must never overwrite the
+// 10000-line delta baseline.
+type previewEntry struct {
+	text string
+	at   time.Time
+}
+
+// previewCall is an in-flight preview read shared by concurrent callers.
+type previewCall struct {
+	done chan struct{}
+	text string
+	err  error
 }
 
 // New creates a Poller. hosts must include "local"; remotes are SSH targets.
@@ -102,9 +163,10 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 		logger:              logger,
 		intvl:               interval,
 		paneRemote:          make(map[string]string),
+		hostPanes:           make(map[string][]herdr.Pane),
+		hostNextTry:         make(map[string]time.Time),
 		branchCache:         make(map[string]string),
 		branchExpiry:        make(map[string]time.Time),
-		wsCache:             make(map[string]map[string]string),
 		prevRevisions:       make(map[string]int),
 		prevSeq:             make(map[string]int),
 		lastActive:          make(map[string]int64),
@@ -112,19 +174,24 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 		prevValidPathsRevs:  make(map[string]int),
 		prevValidPathsSeq:   make(map[string]int),
 		cachedValidPaths:    make(map[string][]string),
-		hasMissingPaths:     make(map[string]bool),
+		missingPathItems:    make(map[string][]panePathItem),
 		validPathsLastCheck: make(map[string]time.Time),
+		menuCache:           make(map[string]menuEntry),
+		menuGen:             make(map[string]int64),
 		contentCache:        make(map[string]string),
 		contentRevs:         make(map[string]int),
 		contentSeqs:         make(map[string]int),
 		contentAt:           make(map[string]time.Time),
+		contentVerAt:        make(map[string]time.Time),
 		subscribers:         make(map[string]int64),
+		previewCache:        make(map[string]previewEntry),
+		previewInflight:     make(map[string]*previewCall),
 		trigger:             make(chan struct{}, 1),
 	}
 }
 
 // SetFileService connects the file service for async file-existence checks.
-func (p *Poller) SetFileService(fs *service.FileService) {
+func (p *Poller) SetFileService(fs existsChecker) {
 	p.fileSvcMu.Lock()
 	p.fileSvc = fs
 	p.fileSvcMu.Unlock()
@@ -317,18 +384,60 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 }
 
+// enrichmentGrace is how long display-oriented enrichment (path validation,
+// blocked-menu reads, terminal delta reads) keeps running after the last WS
+// client disconnects. Base snapshot polling is NOT slowed — pane state keeps
+// updating every cycle so reconnecting clients and HTTP routes stay current.
+const enrichmentGrace = 30 * time.Second
+
+// hostRetryBackoff bounds how often a failed host's `api snapshot` is
+// retried. During backoff the host's last successful panes are retained with
+// stale=true so pane routing, cwd roots, and cached state are not treated as
+// deleted.
+const hostRetryBackoff = 30 * time.Second
+
 func (p *Poller) pollOnce(ctx context.Context) {
 	var merged []herdr.Pane
 	seen := make(map[string]bool)
+	wsLabels := make(map[string]map[string]string) // host → workspace_id → label
+
+	now := time.Now()
+	if p.hub != nil && p.hub.Count() > 0 {
+		if p.pathsSkipped {
+			// First cycle with clients after a paused stretch: force a full
+			// path recheck so the reconnecting client does not inherit a stale
+			// cached path list.
+			p.pathRecheckAll = true
+		}
+		p.pathsSkipped = false
+		p.lastClientAt = now
+	}
+	enrichOn := p.lastClientAt != (time.Time{}) && now.Sub(p.lastClientAt) <= enrichmentGrace
 
 	for _, host := range p.hosts {
-		panes, err := p.client.ListPanes(ctx, host)
-		if err != nil {
-			p.logger.Warn("poll failed", "host", hostLabel(host), "err", err)
+		if t, ok := p.hostNextTry[host]; ok && now.Before(t) {
+			merged = append(merged, p.stalePanes(host, seen)...)
 			continue
 		}
-		for i := range panes {
-			pane := &panes[i]
+		p.metrics.mu.Lock()
+		p.metrics.snapshots++
+		p.metrics.mu.Unlock()
+		snap, err := p.client.Snapshot(ctx, host)
+		if err != nil {
+			p.metrics.mu.Lock()
+			p.metrics.snapshotErrs++
+			p.metrics.mu.Unlock()
+			p.logger.Warn("snapshot failed", "host", hostLabel(host), "err", err)
+			p.hostNextTry[host] = now.Add(hostRetryBackoff)
+			merged = append(merged, p.stalePanes(host, seen)...)
+			continue
+		}
+		delete(p.hostNextTry, host)
+		wsLabels[hostLabel(host)] = workspaceLabels(snap.Workspaces)
+
+		var hostPanes []herdr.Pane
+		for i := range snap.Panes {
+			pane := &snap.Panes[i]
 			if !p.kindAllowed(pane.Kind) {
 				continue
 			}
@@ -336,15 +445,26 @@ func (p *Poller) pollOnce(ctx context.Context) {
 				pane.Host = hostLabel(host)
 			}
 			if isBlocked(pane.Status) {
-				p.attachMenu(ctx, host, pane)
+				if enrichOn {
+					p.attachMenu(ctx, host, pane)
+				} else {
+					p.applyMenuCache(pane)
+				}
 			} else {
 				pane.Options = nil
 				pane.OptionLabels = nil
+				p.activeMu.Lock()
+				delete(p.menuCache, pane.PaneID)
+				p.activeMu.Unlock()
 			}
 			p.setRemote(pane.PaneID, host)
 			seen[pane.PaneID] = true
 			merged = append(merged, *pane)
+			hostPanes = append(hostPanes, *pane)
 		}
+		p.mu.Lock()
+		p.hostPanes[host] = hostPanes
+		p.mu.Unlock()
 	}
 
 	stateChanged := p.pruneRemotes(seen)
@@ -353,13 +473,39 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	// Enrich panes with git branch info (cached, refreshed every 15s)
 	p.enrichBranches(ctx, merged)
 
-	// Enrich panes with workspace labels
-	p.enrichWorkspaceLabels(ctx, merged)
+	// Apply workspace labels collected from the same snapshots (no extra call)
+	p.applyWorkspaceLabels(merged, wsLabels)
 
 	// Track last active time from pane revisions and agent state
 	activeChanged := p.enrichLastActive(merged)
 	if activeChanged || stateChanged {
 		p.saveState()
+	}
+
+	// Confirm or invalidate cached terminal content against the versions just
+	// seen upstream — the freshness signal for ContentSnapshot is confirmed
+	// versions, not elapsed read time.
+	p.confirmContentVersions(merged)
+
+	// Health gauge: agent panes still missing state_change_seq mean the merge
+	// is not delivering the signal the skip logic relies on.
+	seqZero := 0
+	for i := range merged {
+		if merged[i].Kind == "agent" && merged[i].StateChangeSeq == 0 {
+			seqZero++
+		}
+	}
+	p.metrics.mu.Lock()
+	p.metrics.seqZeroAgent = seqZero
+	p.metrics.cycles++
+	cycles, snapshots, snapshotErrs := p.metrics.cycles, p.metrics.snapshots, p.metrics.snapshotErrs
+	paneReads, pathSkips, deltaSkips := p.metrics.paneReads, p.metrics.pathSkips, p.metrics.deltaSkips
+	p.metrics.mu.Unlock()
+	if cycles%20 == 0 {
+		p.logger.Info("poll metrics",
+			"cycles", cycles, "snapshots", snapshots, "snapshot_errs", snapshotErrs,
+			"pane_reads", paneReads, "path_skips", pathSkips, "delta_skips", deltaSkips,
+			"seq_zero_agents", seqZero)
 	}
 
 	// Update p.latest with current snapshot before enrichValidPaths so CwdRoots works for safe-path checks
@@ -368,23 +514,30 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	p.latest = merged
 	p.mu.Unlock()
 
-	// Async file-existence check: scan pane content for file paths and verify
-	// they exist on disk.
-	p.enrichValidPaths(ctx, merged)
+	if enrichOn {
+		// Async file-existence check: scan pane content for file paths and verify
+		// they exist on disk.
+		p.enrichValidPaths(ctx, merged)
 
-	// Push incremental terminal content deltas for changed panes. Runs
-	// asynchronously so a slow remote read (ssh) can never stall the whole
-	// poll loop, but is single-flight: if the previous run is still reading,
-	// this cycle skips rather than overlapping it.
-	if p.tryStartDelta() {
-		go func() {
-			defer p.deltaDone()
-			p.pushContentDeltas(ctx, merged)
-		}()
+		// Push incremental terminal content deltas for changed panes. Runs
+		// asynchronously so a slow remote read (ssh) can never stall the whole
+		// poll loop, but is single-flight: if the previous run is still reading,
+		// this cycle skips rather than overlapping it.
+		if p.tryStartDelta() {
+			go func() {
+				defer p.deltaDone()
+				p.pushContentDeltas(ctx, merged)
+			}()
+		}
+	} else {
+		// No connected clients for a while: skip the expensive display work but
+		// keep the cached path list on the panes so broadcasts stay consistent.
+		p.applyCachedValidPaths(merged)
+		p.pathsSkipped = true
 	}
 
 	// Only broadcast if the snapshot actually changed — avoids waking up
-	// all WS clients every 3s when nothing happened.
+	// all WS clients when nothing happened.
 	p.mu.Lock()
 	changed := panesChanged(prevSnapshot, merged)
 	p.mu.Unlock()
@@ -395,6 +548,32 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			Agents: toAny(merged),
 		})
 	}
+}
+
+// stalePanes returns the retained panes of a host whose snapshot just failed,
+// marked stale so clients can tell they are not fresh. The panes stay in
+// `seen` so pruneRemotes does not delete their routing and caches.
+func (p *Poller) stalePanes(host string, seen map[string]bool) []herdr.Pane {
+	p.mu.RLock()
+	prev := append([]herdr.Pane(nil), p.hostPanes[host]...)
+	p.mu.RUnlock()
+	p.mu.Lock()
+	for i := range prev {
+		p.paneRemote[prev[i].PaneID] = host
+		seen[prev[i].PaneID] = true
+		prev[i].Stale = true
+	}
+	p.mu.Unlock()
+	return prev
+}
+
+// workspaceLabels flattens a snapshot's workspaces into workspace_id → label.
+func workspaceLabels(wss []herdr.Workspace) map[string]string {
+	m := make(map[string]string, len(wss))
+	for _, ws := range wss {
+		m[ws.WorkspaceID] = ws.Label
+	}
+	return m
 }
 
 // pathCandidateRe matches potential file paths in terminal text.
@@ -430,10 +609,20 @@ var defaultCommonDirs = []string{
 	"cmd",
 }
 
+// lineColRe strips trailing :line[:col] suffixes from path candidates.
+var lineColRe = regexp.MustCompile(`:\d+`)
+
+// pathCheckWorkers bounds the global fan-out of file-existence checks.
+// Previously each pane spawned a goroutine per candidate path — dozens of
+// concurrent stat/ssh calls per cycle. A fixed worker pool keeps throughput
+// while capping process count.
+const pathCheckWorkers = 8
+
 // enrichValidPaths reads pane content, extracts file paths, and checks which
-// exist on disk. Re-checks missing paths periodically even if revision is unchanged
-// (e.g. for files created by agents right after printing their path).
-// Batch + concurrent with a 2s timeout.
+// exist on disk. Version-unchanged panes reuse the cached result; panes with
+// previously-missing candidates re-check only those missing items after a
+// short expiry instead of re-reading and re-parsing 500 lines. Existence
+// checks run through a fixed worker pool.
 func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 	p.fileSvcMu.RLock()
 	fs := p.fileSvc
@@ -442,42 +631,50 @@ func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 		return
 	}
 
-	type result struct {
-		idx        int
-		valid      []string
-		totalPaths int
-	}
-
+	// paneCheck is one pane's existence-check batch. missingOnly means items
+	// are the previously-failed candidates being re-probed (no fresh parse).
 	type paneCheck struct {
-		idx   int
-		host  string
-		cwd   string
-		items []panePathItem
+		idx         int
+		host        string
+		items       []panePathItem
+		missingOnly bool
 	}
 	var checks []paneCheck
 
 	p.activeMu.Lock()
 	now := time.Now()
-	reLineCol := regexp.MustCompile(`:\d+`)
+	force := p.pathRecheckAll
+	p.pathRecheckAll = false
 	for i := range panes {
 		pane := &panes[i]
 		prevRev, seen := p.prevValidPathsRevs[pane.PaneID]
 		prevStateSeq := p.prevValidPathsSeq[pane.PaneID]
 		cachedValid := p.cachedValidPaths[pane.PaneID]
 		lastCheck := p.validPathsLastCheck[pane.PaneID]
-		missing := p.hasMissingPaths[pane.PaneID]
+		missingItems := p.missingPathItems[pane.PaneID]
 
-		// Skip if neither content version changed; re-check missing paths every 5s.
-		if seen && pane.Revision == prevRev && pane.StateChangeSeq == prevStateSeq {
-			if !missing || now.Sub(lastCheck) < 5*time.Second {
+		// Version unchanged: reuse the cached list. When some candidates were
+		// missing last time, re-probe just those after a 5s expiry (files an
+		// agent creates right after printing their path) — no re-read, no
+		// regex, no re-check of already-valid paths.
+		if !force && seen && pane.Revision == prevRev && pane.StateChangeSeq == prevStateSeq {
+			if len(missingItems) == 0 || now.Sub(lastCheck) < 5*time.Second {
 				pane.ValidPaths = cachedValid
+				p.metrics.mu.Lock()
+				p.metrics.pathSkips++
+				p.metrics.mu.Unlock()
 				continue
 			}
+			checks = append(checks, paneCheck{idx: i, host: pane.Host, items: missingItems, missingOnly: true})
+			continue
 		}
 
 		// Read pane content — match the frontend's read size (500 lines) so
 		// all visible file paths are checked, not just the last 50 lines.
 		content, err := p.client.ReadPane(ctx, pane.Host, pane.PaneID, 500)
+		p.metrics.mu.Lock()
+		p.metrics.paneReads++
+		p.metrics.mu.Unlock()
 		if err != nil {
 			pane.ValidPaths = cachedValid
 			continue
@@ -491,10 +688,10 @@ func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 			valid := []string{}
 			pane.ValidPaths = valid
 			p.cachedValidPaths[pane.PaneID] = valid
+			p.missingPathItems[pane.PaneID] = nil
 			p.prevValidPathsRevs[pane.PaneID] = pane.Revision
 			p.prevValidPathsSeq[pane.PaneID] = pane.StateChangeSeq
 			p.validPathsLastCheck[pane.PaneID] = now
-			p.hasMissingPaths[pane.PaneID] = false
 			continue
 		}
 
@@ -534,7 +731,7 @@ func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 			}
 			raw := strings.TrimPrefix(m, "file://")
 			raw = strings.TrimPrefix(raw, "./")
-			clean := reLineCol.ReplaceAllString(raw, "")
+			clean := lineColRe.ReplaceAllString(raw, "")
 			clean = strings.Trim(clean, " \t\r\n'\"`()[]{}<>:;,：「」『』《》【】、，。")
 			if clean == "" || versionOrIPRe.MatchString(clean) {
 				continue
@@ -586,13 +783,13 @@ func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 			valid := []string{}
 			pane.ValidPaths = valid
 			p.cachedValidPaths[pane.PaneID] = valid
+			p.missingPathItems[pane.PaneID] = nil
 			p.prevValidPathsRevs[pane.PaneID] = pane.Revision
 			p.prevValidPathsSeq[pane.PaneID] = pane.StateChangeSeq
 			p.validPathsLastCheck[pane.PaneID] = now
-			p.hasMissingPaths[pane.PaneID] = false
 			continue
 		}
-		checks = append(checks, paneCheck{idx: i, host: pane.Host, cwd: pane.Cwd, items: items})
+		checks = append(checks, paneCheck{idx: i, host: pane.Host, items: items})
 	}
 	p.activeMu.Unlock()
 
@@ -600,67 +797,113 @@ func (p *Poller) enrichValidPaths(ctx context.Context, panes []herdr.Pane) {
 		return
 	}
 
-	// Concurrent existence check with timeout
+	// Bounded existence check: a fixed worker pool drains a flattened job
+	// list across all panes, so N panes × M candidates can never exceed
+	// pathCheckWorkers concurrent stat/ssh calls.
+	type existsJob struct {
+		check int
+		item  panePathItem
+	}
+	type existsRes struct {
+		check int
+		item  panePathItem
+		ok    bool
+	}
+	total := 0
+	for _, c := range checks {
+		total += len(c.items)
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	results := make(chan result, len(checks))
-	var wg sync.WaitGroup
-	for _, c := range checks {
-		wg.Add(1)
-		go func(c paneCheck) {
-			defer wg.Done()
-			// Check paths concurrently within a pane for speed
-			type pathResult struct {
-				item   panePathItem
-				exists bool
-			}
-			prCh := make(chan pathResult, len(c.items))
-			var pwg sync.WaitGroup
-			for _, item := range c.items {
-				pwg.Add(1)
-				go func(item panePathItem) {
-					defer pwg.Done()
-					prCh <- pathResult{item: item, exists: fs.Exists(checkCtx, c.host, item.abs)}
-				}(item)
-			}
-			pwg.Wait()
-			close(prCh)
-			valid := []string{}
-			seenValid := make(map[string]bool)
-			for pr := range prCh {
-				if pr.exists {
-					if !seenValid[pr.item.abs] {
-						seenValid[pr.item.abs] = true
-						valid = append(valid, pr.item.abs)
-					}
-					if pr.item.rel != "" && !seenValid[pr.item.rel] {
-						seenValid[pr.item.rel] = true
-						valid = append(valid, pr.item.rel)
-					}
-					if pr.item.dir != "" && !seenValid[pr.item.dir] {
-						seenValid[pr.item.dir] = true
-						valid = append(valid, pr.item.dir)
-					}
-				}
-			}
-			results <- result{idx: c.idx, valid: valid, totalPaths: len(c.items)}
-		}(c)
+	jobs := make(chan existsJob)
+	results := make(chan existsRes, total)
+	workers := pathCheckWorkers
+	if total < workers {
+		workers = total
 	}
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				results <- existsRes{check: j.check, item: j.item, ok: fs.Exists(checkCtx, checks[j.check].host, j.item.abs)}
+			}
+		}()
+	}
+	for ci, c := range checks {
+		for _, item := range c.items {
+			jobs <- existsJob{check: ci, item: item}
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	close(results)
 
+	// Group results per check, keyed by abs (items are unique per check).
+	perCheck := make([]map[string]bool, len(checks))
+	for r := range results {
+		if perCheck[r.check] == nil {
+			perCheck[r.check] = make(map[string]bool)
+		}
+		perCheck[r.check][r.item.abs] = r.ok
+	}
+
 	p.activeMu.Lock()
 	checkNow := time.Now()
-	for r := range results {
-		panes[r.idx].ValidPaths = r.valid
-		p.cachedValidPaths[panes[r.idx].PaneID] = r.valid
-		p.prevValidPathsRevs[panes[r.idx].PaneID] = panes[r.idx].Revision
-		p.prevValidPathsSeq[panes[r.idx].PaneID] = panes[r.idx].StateChangeSeq
-		p.validPathsLastCheck[panes[r.idx].PaneID] = checkNow
-		p.hasMissingPaths[panes[r.idx].PaneID] = len(r.valid) < r.totalPaths
+	for ci, c := range checks {
+		pane := &panes[c.idx]
+		var stillMissing []panePathItem
+		valid := []string{}
+		seenValid := make(map[string]bool)
+		for _, item := range c.items {
+			if !perCheck[ci][item.abs] {
+				stillMissing = append(stillMissing, item)
+				continue
+			}
+			for _, s := range []string{item.abs, item.rel, item.dir} {
+				if s != "" && !seenValid[s] {
+					seenValid[s] = true
+					valid = append(valid, s)
+				}
+			}
+		}
+		if c.missingOnly {
+			// Re-probe of previously-missing candidates only: merge the newly
+			// found paths into the cached list; do not re-derive it.
+			if len(valid) > 0 {
+				merged := append(append([]string{}, p.cachedValidPaths[pane.PaneID]...), valid...)
+				p.cachedValidPaths[pane.PaneID] = merged
+				pane.ValidPaths = merged
+			} else {
+				pane.ValidPaths = p.cachedValidPaths[pane.PaneID]
+			}
+			p.missingPathItems[pane.PaneID] = stillMissing
+			p.validPathsLastCheck[pane.PaneID] = checkNow
+			continue
+		}
+		pane.ValidPaths = valid
+		p.cachedValidPaths[pane.PaneID] = valid
+		p.missingPathItems[pane.PaneID] = stillMissing
+		p.prevValidPathsRevs[pane.PaneID] = pane.Revision
+		p.prevValidPathsSeq[pane.PaneID] = pane.StateChangeSeq
+		p.validPathsLastCheck[pane.PaneID] = checkNow
 	}
 	p.activeMu.Unlock()
+}
+
+// applyCachedValidPaths copies the last computed valid-path lists onto panes
+// when validation is paused (no connected clients), so a broadcast snapshot
+// does not silently lose the field.
+func (p *Poller) applyCachedValidPaths(panes []herdr.Pane) {
+	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+	for i := range panes {
+		if v, ok := p.cachedValidPaths[panes[i].PaneID]; ok {
+			panes[i].ValidPaths = v
+		}
+	}
 }
 
 // panesChanged compares two pane slices by a lightweight fingerprint
@@ -670,7 +913,7 @@ func panesChanged(prev, cur []herdr.Pane) bool {
 		return true
 	}
 	fp := func(p herdr.Pane) string {
-		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + strconv.Itoa(len(p.Options)) + ":" + strconv.Itoa(len(p.ValidPaths))
+		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + p.WorkspaceLabel + ":" + p.Prompt + ":" + strings.Join(p.Options, ",") + ":" + strings.Join(p.OptionLabels, "|") + ":" + strconv.Itoa(len(p.ValidPaths)) + ":" + strconv.FormatBool(p.Stale)
 	}
 	seen := make(map[string]struct{}, len(cur))
 	for _, p := range cur {
@@ -684,10 +927,39 @@ func panesChanged(prev, cur []herdr.Pane) bool {
 	return false
 }
 
+// menuCacheTTL is the bounded backstop for menu reuse: while a pane's
+// rev/seq/agent match the cache key the parsed menu is served without a
+// re-read, and this TTL forces a periodic refresh anyway in case herdr ever
+// changes the screen without bumping a version counter.
+const menuCacheTTL = 30 * time.Second
+
 // attachMenu reads a blocked pane and parses its on-screen menu so clients get
-// real approve buttons (options + labels).
+// real approve buttons (options + labels). Results are cached keyed by
+// pane_id + revision + state_change_seq + agent: an unchanged version means
+// the screen is identical, so re-reading it every poll is pure cost.
 func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) {
+	p.activeMu.Lock()
+	if e, ok := p.menuCache[pane.PaneID]; ok &&
+		e.rev == pane.Revision && e.seq == pane.StateChangeSeq && e.agent == pane.Agent &&
+		time.Since(e.at) < menuCacheTTL {
+		pane.Options = e.opts
+		pane.OptionLabels = e.labels
+		if pane.Prompt == "" {
+			pane.Prompt = e.prompt
+		}
+		p.activeMu.Unlock()
+		return
+	}
+	// Snapshot the pane's generation before the read: InvalidateMenu bumps it,
+	// so a read that raced a send must not be written back — its content
+	// predates the response even though the rev/seq key still matches.
+	gen := p.menuGen[pane.PaneID]
+	p.activeMu.Unlock()
+
 	content, err := p.client.ReadPane(ctx, host, pane.PaneID, 30)
+	p.metrics.mu.Lock()
+	p.metrics.paneReads++
+	p.metrics.mu.Unlock()
 	if err != nil {
 		p.logger.Debug("menu read failed", "pane", pane.PaneID, "err", err)
 		return
@@ -699,6 +971,45 @@ func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) 
 	if pane.Prompt == "" {
 		pane.Prompt = promptExcerpt(text)
 	}
+
+	p.activeMu.Lock()
+	if p.menuGen[pane.PaneID] == gen {
+		p.menuCache[pane.PaneID] = menuEntry{
+			opts: opts, labels: labels, prompt: pane.Prompt,
+			rev: pane.Revision, seq: pane.StateChangeSeq, agent: pane.Agent, at: time.Now(),
+		}
+	}
+	p.activeMu.Unlock()
+}
+
+// applyMenuCache serves the cached menu when enrichment is paused (no
+// connected clients): correct options remain on the pane for the next
+// broadcast, but nothing is read from herdr. A version-mismatched or absent
+// entry leaves the pane untouched rather than risking stale options.
+func (p *Poller) applyMenuCache(pane *herdr.Pane) {
+	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+	e, ok := p.menuCache[pane.PaneID]
+	if !ok || e.rev != pane.Revision || e.seq != pane.StateChangeSeq || e.agent != pane.Agent {
+		return
+	}
+	pane.Options = e.opts
+	pane.OptionLabels = e.labels
+	if pane.Prompt == "" {
+		pane.Prompt = e.prompt
+	}
+}
+
+// InvalidateMenu drops the cached menu for a pane and bumps its generation,
+// so any menu read already in flight is discarded instead of repopulating the
+// cache with pre-send content. Called after send_text / send_keys / respond —
+// the screen is about to change, so the next poll must re-read rather than
+// serve the pre-response menu.
+func (p *Poller) InvalidateMenu(paneID string) {
+	p.activeMu.Lock()
+	delete(p.menuCache, paneID)
+	p.menuGen[paneID]++
+	p.activeMu.Unlock()
 }
 
 func (p *Poller) kindAllowed(kind string) bool {
@@ -735,8 +1046,10 @@ func (p *Poller) pruneRemotes(seen map[string]bool) bool {
 			delete(p.prevValidPathsRevs, id)
 			delete(p.prevValidPathsSeq, id)
 			delete(p.cachedValidPaths, id)
-			delete(p.hasMissingPaths, id)
+			delete(p.missingPathItems, id)
 			delete(p.validPathsLastCheck, id)
+			delete(p.menuCache, id)
+			delete(p.menuGen, id)
 		}
 	}
 	p.activeMu.Unlock()
@@ -748,7 +1061,9 @@ func (p *Poller) pruneRemotes(seen map[string]bool) bool {
 			delete(p.contentRevs, id)
 			delete(p.contentSeqs, id)
 			delete(p.contentAt, id)
+			delete(p.contentVerAt, id)
 			delete(p.subscribers, id)
+			delete(p.previewCache, id)
 		}
 	}
 	p.contentMu.Unlock()
@@ -868,54 +1183,22 @@ func gitBranch(ctx context.Context, cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// enrichWorkspaceLabels fills in WorkspaceLabel for each pane by fetching
-// `herdr workspace list` per host. Cached with a 30s TTL.
-func (p *Poller) enrichWorkspaceLabels(ctx context.Context, panes []herdr.Pane) {
-	p.wsMu.Lock()
-	defer p.wsMu.Unlock()
-
-	now := time.Now()
-	if now.Sub(p.wsLast) > 30*time.Second {
-		p.wsCache = make(map[string]map[string]string)
-		p.wsLast = now
-	}
-
-	// Collect hosts that need workspace label refresh
-	hostsNeeded := make(map[string]bool)
+// applyWorkspaceLabels fills in WorkspaceLabel for each pane from the label
+// maps collected in the same poll cycle's api snapshot — no extra herdr call.
+// Panes on hosts whose snapshot failed keep the label from their retained
+// (stale) copy.
+func (p *Poller) applyWorkspaceLabels(panes []herdr.Pane, wsLabels map[string]map[string]string) {
 	for i := range panes {
 		h := panes[i].Host
 		if h == "" {
 			h = "local"
 		}
-		if _, ok := p.wsCache[h]; !ok {
-			hostsNeeded[h] = true
-		}
-	}
-
-	for h := range hostsNeeded {
-		wss, err := p.client.ListWorkspaces(ctx, h)
-		if err != nil {
-			p.logger.Debug("workspace list failed", "host", h, "err", err)
-			p.wsCache[h] = make(map[string]string) // cache empty to avoid retry
+		labels, ok := wsLabels[h]
+		if !ok {
 			continue
 		}
-		m := make(map[string]string)
-		for _, ws := range wss {
-			m[ws.WorkspaceID] = ws.Label
-		}
-		p.wsCache[h] = m
-	}
-
-	// Apply labels to panes
-	for i := range panes {
-		h := panes[i].Host
-		if h == "" {
-			h = "local"
-		}
-		if labels, ok := p.wsCache[h]; ok {
-			if label, ok := labels[panes[i].WorkspaceID]; ok && label != "" {
-				panes[i].WorkspaceLabel = label
-			}
+		if label, ok := labels[panes[i].WorkspaceID]; ok && label != "" {
+			panes[i].WorkspaceLabel = label
 		}
 	}
 }
@@ -965,17 +1248,44 @@ func (p *Poller) Subscribe(paneID string) {
 	p.contentMu.Unlock()
 }
 
-// snapshotStaleAfter is how old the poller's cached full snapshot may be and
-// still be served to a read_pane. Polls run every ~3s while a client is
-// subscribed; if the cache is older than this (client was away, subscription
-// expired), the snapshot may be stale and callers should read directly from
-// herdr instead of serving yesterday's content.
-const snapshotStaleAfter = 10 * time.Second
+// contentVerFreshFor is the periodic forced-probe backstop: a cached content
+// snapshot stays servable as long as successful polls keep confirming its
+// rev/seq against upstream. If confirmations stop for this long (polling
+// stalled, subscriptions expired), the caller falls back to a direct read.
+const contentVerFreshFor = 30 * time.Second
+
+// confirmContentVersions reconciles the content cache against the versions a
+// successful snapshot just reported. A match refreshes contentVerAt (fresh);
+// a mismatch zeroes it (the cached baseline is provably behind and is
+// invalidated immediately, not after a timeout). Panes on stale-marked hosts
+// confirm nothing.
+func (p *Poller) confirmContentVersions(panes []herdr.Pane) {
+	p.contentMu.Lock()
+	defer p.contentMu.Unlock()
+	now := time.Now()
+	for i := range panes {
+		pane := &panes[i]
+		if pane.Stale {
+			continue
+		}
+		pid := pane.PaneID
+		if _, ok := p.contentCache[pid]; !ok {
+			continue
+		}
+		if pane.Revision == p.contentRevs[pid] && pane.StateChangeSeq == p.contentSeqs[pid] {
+			p.contentVerAt[pid] = now
+		} else {
+			p.contentVerAt[pid] = time.Time{}
+		}
+	}
+}
 
 // ContentSnapshot returns an atomically paired cached full snapshot and
-// revision for a pane, and whether it is fresh enough to serve. When the cache
-// is stale (older than snapshotStaleAfter) or absent, ok=false and the caller
-// should read directly from herdr rather than serve old content.
+// revision for a pane, and whether it is fresh enough to serve. Freshness is
+// version-based: the cache is served while recent polls keep confirming the
+// pane's upstream rev/seq still match the cached read. When the upstream
+// version has drifted or confirmations have stopped for contentVerFreshFor,
+// ok=false and the caller should read directly from herdr.
 func (p *Poller) ContentSnapshot(paneID string) (string, int, bool) {
 	p.contentMu.Lock()
 	defer p.contentMu.Unlock()
@@ -984,10 +1294,72 @@ func (p *Poller) ContentSnapshot(paneID string) (string, int, bool) {
 	if !contentOK || !revOK {
 		return "", 0, false
 	}
-	if at, ok := p.contentAt[paneID]; ok && time.Since(at) > snapshotStaleAfter {
+	if time.Since(p.contentVerAt[paneID]) > contentVerFreshFor {
 		return "", 0, false
 	}
 	return content, rev, true
+}
+
+// previewCacheTTL is the short lifetime of an unversioned preview read — long
+// enough to dedupe a burst of grid-card refreshes, short enough that a
+// changed screen is never served stale.
+const previewCacheTTL = 5 * time.Second
+
+// PreviewSnapshot serves a short pane read for grid-card previews while
+// minimizing upstream reads:
+//  1. A version-confirmed contentCache baseline is tailed in place (free).
+//  2. A previewCache entry younger than previewCacheTTL is reused.
+//  3. Concurrent misses for the same pane share one ReadPane (singleflight).
+//
+// Preview reads are deliberately kept OUT of contentCache — a small tail
+// window must never overwrite the large delta baseline.
+func (p *Poller) PreviewSnapshot(ctx context.Context, paneID string, lines int) (string, error) {
+	if content, _, ok := p.ContentSnapshot(paneID); ok {
+		return service.TailLines(content, lines), nil
+	}
+
+	p.contentMu.Lock()
+	if e, ok := p.previewCache[paneID]; ok && time.Since(e.at) < previewCacheTTL {
+		text := e.text
+		p.contentMu.Unlock()
+		return service.TailLines(text, lines), nil
+	}
+	if call, ok := p.previewInflight[paneID]; ok {
+		p.contentMu.Unlock()
+		select {
+		case <-call.done:
+			return service.TailLines(call.text, lines), call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &previewCall{done: make(chan struct{})}
+	p.previewInflight[paneID] = call
+	p.contentMu.Unlock()
+
+	content, err := p.client.ReadPane(ctx, p.RemoteForPane(paneID), paneID, lines)
+	p.metrics.mu.Lock()
+	p.metrics.paneReads++
+	p.metrics.mu.Unlock()
+
+	p.contentMu.Lock()
+	call.text, call.err = content, err
+	close(call.done)
+	delete(p.previewInflight, paneID)
+	if err == nil {
+		p.previewCache[paneID] = previewEntry{text: content, at: time.Now()}
+	}
+	p.contentMu.Unlock()
+	return service.TailLines(content, lines), err
+}
+
+// TriggerPoll requests an immediate poll cycle (e.g. on first client connect
+// or after an acknowledgement), without waiting for the ticker.
+func (p *Poller) TriggerPoll() {
+	select {
+	case p.trigger <- struct{}{}:
+	default:
+	}
 }
 
 // subscriberTTL is how long a pane stays subscribed after the last read_pane.
@@ -1225,6 +1597,9 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		prevSeq := p.contentSeqs[pid]
 		if havePrev && rev == prevRev && seq == prevSeq {
 			p.contentMu.Unlock()
+			p.metrics.mu.Lock()
+			p.metrics.deltaSkips++
+			p.metrics.mu.Unlock()
 			continue
 		}
 		p.contentMu.Unlock()
@@ -1235,6 +1610,9 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		// past the window (very long sessions) does it fall back to full
 		// snapshots, which is no worse than the previous behavior.
 		content, err := p.client.ReadPane(ctx, pane.Host, pid, 10000)
+		p.metrics.mu.Lock()
+		p.metrics.paneReads++
+		p.metrics.mu.Unlock()
 		if err != nil {
 			p.logger.Debug("delta read failed", "pane", pid, "err", err)
 			continue

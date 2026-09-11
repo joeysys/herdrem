@@ -328,6 +328,10 @@ func (f *fakeSubscriber) Subscribe(paneID string) {}
 func (f *fakeSubscriber) ContentSnapshot(paneID string) (string, int, bool) {
 	return f.content, f.rev, f.ok
 }
+func (f *fakeSubscriber) PreviewSnapshot(ctx context.Context, paneID string, lines int) (string, error) {
+	return TailLines(f.content, lines), nil
+}
+func (f *fakeSubscriber) InvalidateMenu(paneID string) {}
 
 // Regression for the "Refresh shows yesterday's content" bug: a refresh
 // read_pane must bypass the poller's cached snapshot even when a fresh cache

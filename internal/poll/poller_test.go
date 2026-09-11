@@ -3,6 +3,7 @@ package poll
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,7 +82,10 @@ func TestPollerBroadcastsAgentsWithOptions(t *testing.T) {
 			}
 			opts, ok := pane["options"].([]interface{})
 			if !ok || len(opts) != 2 || opts[0] != "1" || opts[1] != "2" {
-				t.Fatalf("blocked pane missing parsed options: %v", pane)
+				// A poll that raced client registration broadcasts the pane
+				// before menu enrichment runs; the parsed options arrive on a
+				// later broadcast within the deadline.
+				continue
 			}
 			labels, ok := pane["option_labels"].([]interface{})
 			if !ok || len(labels) != 2 || labels[0] != "Yes" || labels[1] != "No" {
@@ -88,9 +93,8 @@ func TestPollerBroadcastsAgentsWithOptions(t *testing.T) {
 			}
 			return // pass
 		}
-		t.Fatal("no blocked pane in agents snapshot")
 	}
-	t.Fatal("no agents snapshot received within deadline")
+	t.Fatal("no agents snapshot with parsed blocked options received within deadline")
 }
 
 func TestPollerEnrichLastActiveKeepsWorkingAgentsFresh(t *testing.T) {
@@ -593,4 +597,440 @@ func TestShiftedAppendNoTrailingNewline(t *testing.T) {
 	if delta != "partial-no-newline" {
 		t.Errorf("delta = %q, want %q (no trailing newline)", delta, "partial-no-newline")
 	}
+}
+
+// snapshotFailer wraps FakeClient with an injectable Snapshot error and a
+// call counter, to exercise the host-failure stale-retention/backoff path.
+type snapshotFailer struct {
+	*herdr.FakeClient
+	err   error
+	calls int
+}
+
+func (c *snapshotFailer) Snapshot(ctx context.Context, host string) (*herdr.Snapshot, error) {
+	c.calls++
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.FakeClient.Snapshot(ctx, host)
+}
+
+// A failed host keeps its last panes (marked stale), and the retry is backed
+// off instead of hammering a dead host every cycle.
+func TestPollerRetainsStaleSnapshotOnHostFailure(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fc := &snapshotFailer{FakeClient: &herdr.FakeClient{Panes: []herdr.Pane{{
+		PaneID: "%a", Agent: "claude", Kind: "agent", Status: "working", Revision: 1, StateChangeSeq: 1,
+	}}}}
+	p := New(fc, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+
+	p.pollOnce(context.Background())
+	got := p.Snapshot()
+	if len(got) != 1 || got[0].Stale {
+		t.Fatalf("healthy poll should return 1 non-stale pane, got %+v", got)
+	}
+
+	fc.err = errors.New("host down")
+	p.pollOnce(context.Background())
+	got = p.Snapshot()
+	if len(got) != 1 || !got[0].Stale {
+		t.Fatalf("failed host should retain stale pane, got %+v", got)
+	}
+	if got[0].PaneID != "%a" || p.RemoteForPane("%a") != "local" {
+		t.Fatal("stale pane lost its id or host routing")
+	}
+
+	// Backoff: another poll within the window must not call Snapshot again.
+	p.pollOnce(context.Background())
+	if fc.calls != 2 {
+		t.Fatalf("expected backoff to skip Snapshot (calls=%d, want 2)", fc.calls)
+	}
+
+	// Recovery after the backoff window: clear the error and force the retry.
+	fc.err = nil
+	p.hostNextTry["local"] = time.Now().Add(-time.Second)
+	p.pollOnce(context.Background())
+	got = p.Snapshot()
+	if len(got) != 1 || got[0].Stale {
+		t.Fatalf("recovered host should return fresh pane, got %+v", got)
+	}
+}
+
+// countingReader counts ReadPane calls on top of FakeClient.
+type countingReader struct {
+	*herdr.FakeClient
+	mu    sync.Mutex
+	reads map[string]int
+	delay time.Duration
+}
+
+func (c *countingReader) ReadPane(ctx context.Context, host, paneID string, lines int) (string, error) {
+	c.mu.Lock()
+	if c.reads == nil {
+		c.reads = map[string]int{}
+	}
+	c.reads[paneID]++
+	c.mu.Unlock()
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	return c.FakeClient.ReadPane(ctx, host, paneID, lines)
+}
+
+func (c *countingReader) readCount(paneID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads[paneID]
+}
+
+// A blocked pane's menu is parsed once and then served from cache while its
+// version (rev + state_change_seq + agent) is unchanged.
+func TestPollerMenuCacheSkipsUnchangedReads(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &countingReader{FakeClient: &herdr.FakeClient{
+		ReadContent: "Allow write?\n\n❯ 1. Yes\n  2. No",
+		Panes: []herdr.Pane{{
+			PaneID: "%b", Agent: "claude", Kind: "agent", Status: "blocked", Revision: 7, StateChangeSeq: 3,
+		}},
+	}}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+	p.lastClientAt = time.Now() // simulate connected clients so enrichment runs
+
+	p.pollOnce(context.Background())
+	first := client.readCount("%b")
+	if first != 1 {
+		t.Fatalf("expected exactly 1 menu read, got %d", first)
+	}
+	if len(p.Snapshot()[0].Options) == 0 {
+		t.Fatal("blocked pane missing parsed options")
+	}
+
+	p.pollOnce(context.Background())
+	if got := client.readCount("%b"); got != first {
+		t.Fatalf("unchanged version should not re-read menu (reads=%d, want %d)", got, first)
+	}
+
+	// Version bump → the menu is re-read and re-cached.
+	client.Panes[0].StateChangeSeq = 4
+	p.pollOnce(context.Background())
+	if got := client.readCount("%b"); got != first+1 {
+		t.Fatalf("state_change_seq bump should force a menu re-read (reads=%d, want %d)", got, first+1)
+	}
+
+	// send/respond invalidation → next poll re-reads even without a version bump.
+	p.InvalidateMenu("%b")
+	p.pollOnce(context.Background())
+	if got := client.readCount("%b"); got != first+2 {
+		t.Fatalf("invalidated menu should re-read (reads=%d, want %d)", got, first+2)
+	}
+}
+
+// When enrichment is paused (no clients beyond the grace window), blocked
+// panes keep their cached menu options without any upstream read.
+func TestPollerPausedEnrichmentServesCachedMenu(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &countingReader{FakeClient: &herdr.FakeClient{
+		ReadContent: "Allow?\n\n❯ 1. Yes\n  2. No",
+		Panes: []herdr.Pane{{
+			PaneID: "%b", Agent: "claude", Kind: "agent", Status: "blocked", Revision: 7, StateChangeSeq: 3,
+		}},
+	}}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+	p.lastClientAt = time.Now()
+
+	p.pollOnce(context.Background())
+	if len(p.Snapshot()[0].Options) == 0 {
+		t.Fatal("expected menu options on first poll")
+	}
+
+	// Grace window expires → paused: cached options stay, no reads happen.
+	p.lastClientAt = time.Now().Add(-enrichmentGrace - time.Second)
+	p.pollOnce(context.Background())
+	if got := p.Snapshot()[0].Options; len(got) == 0 {
+		t.Fatal("paused enrichment dropped cached menu options")
+	}
+	if got := client.readCount("%b"); got != 1 {
+		t.Fatalf("paused enrichment should not read (reads=%d, want 1)", got)
+	}
+}
+
+// countChecker counts Exists calls and records peak concurrency.
+type countChecker struct {
+	mu       sync.Mutex
+	calls    int
+	cur      int
+	max      int
+	existing map[string]bool
+	delay    time.Duration
+}
+
+func (c *countChecker) Exists(ctx context.Context, host, path string) bool {
+	c.mu.Lock()
+	c.calls++
+	c.cur++
+	if c.cur > c.max {
+		c.max = c.cur
+	}
+	c.mu.Unlock()
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	ok := c.existing[path]
+	c.mu.Lock()
+	c.cur--
+	c.mu.Unlock()
+	return ok
+}
+
+func (c *countChecker) total() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *countChecker) maxConcurrent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.max
+}
+
+// Missing candidates are re-probed alone after the expiry — no pane re-read
+// and no re-check of already-valid paths.
+func TestPollerValidPathsMissingOnlyRecheck(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "exists.go"), []byte("x"), 0644)
+
+	client := &countingReader{FakeClient: &herdr.FakeClient{
+		ReadContent: "exists.go and missing.go",
+	}}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+	checker := &countChecker{existing: map[string]bool{filepath.Join(tmpDir, "exists.go"): true}}
+	p.SetFileService(checker)
+
+	panes := []herdr.Pane{{PaneID: "%1", Host: "local", Cwd: tmpDir, Revision: 1, StateChangeSeq: 1}}
+	p.enrichValidPaths(context.Background(), panes)
+	if len(panes[0].ValidPaths) == 0 {
+		t.Fatal("expected exists.go to resolve")
+	}
+	firstCalls := checker.total()
+	firstReads := client.readCount("%1")
+	if len(p.missingPathItems["%1"]) == 0 {
+		t.Fatal("expected missing.go to be recorded as missing")
+	}
+	missingCount := len(p.missingPathItems["%1"])
+
+	// Same version, expired missing window → only the missing items re-probed.
+	p.activeMu.Lock()
+	p.validPathsLastCheck["%1"] = time.Now().Add(-10 * time.Second)
+	p.activeMu.Unlock()
+	panes[0].ValidPaths = nil
+	p.enrichValidPaths(context.Background(), panes)
+
+	if delta := checker.total() - firstCalls; delta != missingCount {
+		t.Fatalf("missing-only recheck should run %d Exists calls, got %d", missingCount, delta)
+	}
+	if got := client.readCount("%1"); got != firstReads {
+		t.Fatalf("missing-only recheck must not re-read the pane (reads=%d, want %d)", got, firstReads)
+	}
+
+	// The file appears → the next recheck resolves it into valid_paths.
+	checker.mu.Lock()
+	checker.existing[filepath.Join(tmpDir, "missing.go")] = true
+	checker.mu.Unlock()
+	p.activeMu.Lock()
+	p.validPathsLastCheck["%1"] = time.Now().Add(-10 * time.Second)
+	p.activeMu.Unlock()
+	panes[0].ValidPaths = nil
+	p.enrichValidPaths(context.Background(), panes)
+
+	found := false
+	for _, v := range panes[0].ValidPaths {
+		if strings.HasSuffix(v, "missing.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected missing.go to resolve after appearing, got %v", panes[0].ValidPaths)
+	}
+	// The primary candidate must leave the missing set; speculative
+	// dir-context probes for the same filename (docs/missing.go, …) stay
+	// missing — they never existed.
+	for _, item := range p.missingPathItems["%1"] {
+		if item.abs == filepath.Join(tmpDir, "missing.go") {
+			t.Fatal("resolved primary candidate still in the missing set")
+		}
+	}
+}
+
+// Existence checks run through a bounded worker pool: dozens of candidates
+// across panes must never exceed pathCheckWorkers concurrent Exists calls.
+func TestPollerValidPathsWorkerBound(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tmpDir := t.TempDir()
+
+	var b strings.Builder
+	existing := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("file-%02d.go", i)
+		fmt.Fprintf(&b, "%s ", name)
+		os.WriteFile(filepath.Join(tmpDir, name), []byte("x"), 0644)
+		existing[filepath.Join(tmpDir, name)] = true
+	}
+	client := &countingReader{FakeClient: &herdr.FakeClient{ReadContent: b.String()}}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+	checker := &countChecker{existing: existing, delay: 2 * time.Millisecond}
+	p.SetFileService(checker)
+
+	panes := []herdr.Pane{
+		{PaneID: "%1", Host: "local", Cwd: tmpDir, Revision: 1},
+		{PaneID: "%2", Host: "local", Cwd: tmpDir, Revision: 1},
+	}
+	p.enrichValidPaths(context.Background(), panes)
+
+	if max := checker.maxConcurrent(); max > pathCheckWorkers {
+		t.Fatalf("Exists concurrency %d exceeded worker bound %d", max, pathCheckWorkers)
+	}
+	if checker.total() == 0 {
+		t.Fatal("no Exists calls ran")
+	}
+	if len(panes[0].ValidPaths) == 0 || len(panes[1].ValidPaths) == 0 {
+		t.Fatal("both panes should resolve the same files")
+	}
+}
+
+// ContentSnapshot freshness is version-based: a cached baseline is served
+// while polls confirm the same rev/seq, and invalidated the moment upstream
+// moves on.
+func TestContentSnapshotVersionConfirm(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{Panes: []herdr.Pane{{
+		PaneID: "%1", Agent: "claude", Kind: "agent", Status: "idle", Revision: 5, StateChangeSeq: 9,
+	}}}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+
+	p.contentCache["%1"] = "cached content"
+	p.contentRevs["%1"] = 5
+	p.contentSeqs["%1"] = 9
+
+	// Never confirmed → not servable.
+	if _, _, ok := p.ContentSnapshot("%1"); ok {
+		t.Fatal("unconfirmed cache must not be served")
+	}
+
+	// A poll confirming the same rev/seq makes it servable.
+	p.pollOnce(context.Background())
+	if c, rev, ok := p.ContentSnapshot("%1"); !ok || c != "cached content" || rev != 5 {
+		t.Fatalf("confirmed cache should be served (ok=%v rev=%d)", ok, rev)
+	}
+
+	// Upstream moved on → invalidated immediately.
+	client.Panes[0].StateChangeSeq = 10
+	p.pollOnce(context.Background())
+	if _, _, ok := p.ContentSnapshot("%1"); ok {
+		t.Fatal("drifted version must invalidate the cache")
+	}
+}
+
+// Concurrent preview misses for one pane share a single upstream read.
+func TestPreviewSnapshotSingleflight(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &countingReader{FakeClient: &herdr.FakeClient{ReadContent: "l1\nl2\nl3\n"}, delay: 20 * time.Millisecond}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			text, err := p.PreviewSnapshot(context.Background(), "%p", 8)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if text == "" {
+				errs <- fmt.Errorf("empty preview")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if got := client.readCount("%p"); got != 1 {
+		t.Fatalf("singleflight should collapse %d reads into 1, got %d", n, got)
+	}
+
+	// A second call inside the TTL is served from the preview cache.
+	if _, err := p.PreviewSnapshot(context.Background(), "%p", 8); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.readCount("%p"); got != 1 {
+		t.Fatalf("preview cache hit should not re-read (reads=%d)", got)
+	}
+}
+
+// gatingReader blocks inside ReadPane until released, to simulate a menu read
+// that is in flight while a send/invalidation lands.
+type gatingReader struct {
+	*herdr.FakeClient
+	started chan struct{}
+	gate    chan struct{}
+}
+
+func (g *gatingReader) ReadPane(ctx context.Context, host, paneID string, lines int) (string, error) {
+	select {
+	case <-g.started:
+	default:
+		close(g.started)
+	}
+	<-g.gate
+	return "Allow?\n\n❯ 1. Yes\n  2. No", nil
+}
+
+// Regression for the menu-cache race: InvalidateMenu landing while a menu
+// read is in flight must keep the pre-send result out of the cache —
+// otherwise the next poll serves already-consumed options under an unchanged
+// rev/seq key.
+func TestAttachMenuDiscardsReadRacingInvalidation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &gatingReader{
+		FakeClient: &herdr.FakeClient{},
+		started:    make(chan struct{}),
+		gate:       make(chan struct{}),
+	}
+	p := New(client, []string{"local"}, nil, hub.New(logger), logger, time.Second)
+	pane := &herdr.Pane{PaneID: "%b", Agent: "claude", Kind: "agent", Status: "blocked", Revision: 1}
+
+	done := make(chan struct{})
+	go func() {
+		p.attachMenu(context.Background(), "local", pane)
+		close(done)
+	}()
+
+	select {
+	case <-client.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("menu read never started")
+	}
+	p.InvalidateMenu("%b") // send landed mid-read
+	close(client.gate)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("attachMenu never returned")
+	}
+
+	p.activeMu.Lock()
+	_, cached := p.menuCache["%b"]
+	p.activeMu.Unlock()
+	if cached {
+		t.Fatal("pre-send menu read was written to cache after invalidation")
+	}
+	// The pane copy itself may carry the just-read options (they are what the
+	// screen still shows), but the cache must stay clean so the next poll
+	// re-reads the post-response screen.
 }

@@ -37,6 +37,16 @@ type Hub struct {
 	broadcastIncremental chan []byte
 	broadcastExcept      chan broadcastExceptMsg
 	logger               *slog.Logger
+	onConnect            func() // invoked after each client registers (e.g. poll.TriggerPoll)
+}
+
+// SetOnConnect registers a callback invoked by the hub loop immediately after
+// a client is added — so anything it triggers (an immediate poll) already
+// observes the new client in Count(). Must be non-blocking; set before Run.
+func (h *Hub) SetOnConnect(fn func()) {
+	h.mu.Lock()
+	h.onConnect = fn
+	h.mu.Unlock()
 }
 
 // New creates a Hub.
@@ -62,8 +72,12 @@ func (h *Hub) Run(ctx context.Context) {
 		case c := <-h.register:
 			h.mu.Lock()
 			h.clients[c] = struct{}{}
+			onConnect := h.onConnect
 			h.mu.Unlock()
 			h.logger.Info("client connected", "count", h.Count())
+			if onConnect != nil {
+				onConnect()
+			}
 
 		case c := <-h.unregister:
 			h.mu.Lock()

@@ -40,6 +40,38 @@ func (f *FakeClient) ListWorkspaces(ctx context.Context, host string) ([]Workspa
 	}, nil
 }
 
+// Snapshot returns a synthesized api-snapshot-shaped result: the fake's panes
+// (with whatever fields the test set directly, including StateChangeSeq) plus
+// an agents[] array derived from them, mirroring the real merge contract.
+func (f *FakeClient) Snapshot(ctx context.Context, host string) (*Snapshot, error) {
+	panes, err := f.ListPanes(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ws, _ := f.ListWorkspaces(ctx, host)
+	var agents []Agent
+	for _, p := range panes {
+		if p.Kind == "agent" || p.Agent != "" {
+			agents = append(agents, Agent{
+				PaneID:         p.PaneID,
+				Agent:          p.Agent,
+				AgentStatus:    p.AgentStatus,
+				StateChangeSeq: p.StateChangeSeq,
+				Revision:       p.Revision,
+				WorkspaceID:    p.WorkspaceID,
+				Cwd:            p.Cwd,
+			})
+		}
+	}
+	return &Snapshot{Panes: panes, Agents: agents, Workspaces: ws, Version: "fake", Protocol: MinProtocol}, nil
+}
+
+// ServerStatus reports a running 0.9-compatible fake server.
+func (f *FakeClient) ServerStatus(ctx context.Context, host string) (StatusServerResult, error) {
+	ok := true
+	return StatusServerResult{Running: true, Version: "fake", Protocol: MinProtocol, Compatible: &ok}, nil
+}
+
 func (f *FakeClient) ReadPane(ctx context.Context, host, paneID string, lines int) (string, error) {
 	if f.ReadContent != "" {
 		return f.ReadContent, nil

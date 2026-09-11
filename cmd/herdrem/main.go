@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"herdrem/internal/config"
 	"herdrem/internal/herdr"
@@ -101,9 +104,52 @@ func main() {
 		client = cli
 	}
 
+	// herdr version gate: every configured host must run herdr >= 0.9
+	// (protocol >= 22) — the relay depends on `api snapshot` and
+	// AgentInfo.state_change_seq. A host that answers with an insufficient
+	// version is a hard failure; an unreachable host is a WARN (transient —
+	// the poll loop keeps retrying it, and the snapshot path enforces the
+	// protocol floor on every successful response anyway).
+	for _, host := range cfg.Hosts() {
+		st, err := client.ServerStatus(context.Background(), host)
+		if err != nil {
+			logger.Warn("herdr status probe failed; will retry in poll loop", "host", host, "err", err)
+			continue
+		}
+		if !st.Running {
+			logger.Warn("herdr server not running on host; will retry in poll loop", "host", host)
+			continue
+		}
+		logger.Info("herdr server", "host", host, "version", st.Version, "protocol", st.Protocol, "socket", st.Socket)
+		if st.Protocol < herdr.MinProtocol || (st.Compatible != nil && !*st.Compatible) {
+			logger.Error("herdr >= 0.9 (protocol >= 22) is required",
+				"host", host, "version", st.Version, "protocol", st.Protocol)
+			os.Exit(1)
+		}
+	}
+
+	// Optional pprof endpoint on a dedicated loopback listener. Off by default;
+	// must never share the public-facing mux (the relay can be exposed via
+	// tunnel, and pprof leaks memory contents and enables profiling DoS).
+	// startPprof binds synchronously: a bad address or occupied port fails
+	// startup rather than silently leaving a configured endpoint dead.
+	var pprofSrv *http.Server
+	if cfg.PPROFAddr != "" {
+		var err error
+		pprofSrv, err = startPprof(cfg.PPROFAddr, logger)
+		if err != nil {
+			logger.Error("pprof setup failed", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	// Poller (per-host + kinds filter; also serves as the pane router)
 	poller := poll.New(client, cfg.Hosts(), cfg.Kinds(), h, logger, 0)
 	poller.SetStatePath(cfg.DataDir + "/poller_state.json")
+	// Trigger an immediate poll only after the hub has registered the client —
+	// triggering earlier races registration and observes zero connected
+	// clients, so catch-up enrichment would still be skipped for a cycle.
+	h.SetOnConnect(poller.TriggerPoll)
 
 	// File service (sandboxed reads/listings; roots from the poller's panes)
 	fileSvc := service.NewFileService(poller.CwdRoots, logger)
@@ -191,10 +237,48 @@ func main() {
 	}
 	cancel()
 	_ = httpSrv.Shutdown(context.Background())
+	if pprofSrv != nil {
+		_ = pprofSrv.Shutdown(context.Background())
+	}
 	tunnelSvc.Shutdown() // terminate all cloudflared processes on exit
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// startPprof serves net/http/pprof handlers on a dedicated loopback listener.
+// addr must be loopback-only; anything else is rejected at startup because
+// exposing pprof would leak memory contents and allow profiling DoS. The
+// listener is bound synchronously so a bad port/address is a startup error,
+// not a silent async failure. The returned server is retained by the caller
+// for graceful shutdown.
+func startPprof(addr string, logger *slog.Logger) (*http.Server, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HERDREM_PPROF_ADDR %q: %w", addr, err)
+	}
+	h := strings.Trim(host, "[]")
+	if h != "localhost" && !net.ParseIP(h).IsLoopback() {
+		return nil, fmt.Errorf("HERDREM_PPROF_ADDR must be a loopback address (got %q)", addr)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("pprof listen on %q: %w", addr, err)
+	}
+	go func() {
+		logger.Info("pprof listening (loopback only)", "addr", addr)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			logger.Error("pprof server failed", "err", err)
+		}
+	}()
+	return srv, nil
 }
 
 // startTunnel launches cloudflared quick tunnel and prints the wss:// URL.

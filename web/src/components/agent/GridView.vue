@@ -24,16 +24,79 @@ const sorted = computed<Pane[]>(() => {
   })
 })
 
-function refresh() {
-  for (const p of props.agents) previews.requestPreview(p.pane_id)
+// Visibility-aware preview refresh: only cards currently in the viewport get
+// preview reads, and the interval stops entirely while the page is hidden.
+// Cards scrolling into view fetch once via the observer; the interval then
+// keeps them fresh.
+const visible = new Set<string>()
+const cardEls = new Map<string, Element>()
+let observer: IntersectionObserver | null = null
+let timer: ReturnType<typeof setInterval> | null = null
+
+function trackCard(el: Element | null, paneId: string) {
+  if (!el) {
+    const old = cardEls.get(paneId)
+    if (old) observer?.unobserve(old)
+    cardEls.delete(paneId)
+    visible.delete(paneId)
+    return
+  }
+  cardEls.set(paneId, el)
+  observer?.observe(el)
 }
 
-let timer: ReturnType<typeof setInterval> | null = null
+function refresh() {
+  for (const p of props.agents) {
+    if (visible.has(p.pane_id)) previews.requestPreview(p.pane_id)
+  }
+}
+
+function startTimer() {
+  if (!timer) timer = setInterval(refresh, 8000)
+}
+
+function stopTimer() {
+  if (timer) {
+    clearInterval(timer)
+    timer = null
+  }
+}
+
+function onVisibility() {
+  if (document.hidden) {
+    stopTimer()
+  } else {
+    refresh()
+    startTimer()
+  }
+}
+
 onMounted(() => {
-  refresh()
-  timer = setInterval(refresh, 8000)
+  observer = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const id = (e.target as HTMLElement).dataset.paneId
+      if (!id) continue
+      if (e.isIntersecting) {
+        // Newly visible (also the initial observation): fetch immediately so
+        // the card does not wait for the next interval tick.
+        if (!visible.has(id)) previews.requestPreview(id)
+        visible.add(id)
+      } else {
+        visible.delete(id)
+      }
+    }
+  })
+  for (const el of cardEls.values()) observer.observe(el)
+  if (!document.hidden) startTimer()
+  document.addEventListener('visibilitychange', onVisibility)
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+
+onUnmounted(() => {
+  stopTimer()
+  observer?.disconnect()
+  observer = null
+  document.removeEventListener('visibilitychange', onVisibility)
+})
 watch(() => props.agents.length, refresh)
 
 function previewText(p: Pane): string {
@@ -61,6 +124,8 @@ function tone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
     <article
       v-for="p in sorted"
       :key="p.pane_id"
+      :ref="(el) => trackCard(el as Element | null, p.pane_id)"
+      :data-pane-id="p.pane_id"
       class="g-card"
       :class="[bucket(p.status), { shell: paneKind(p) === 'shell', 'just-done': justDone?.has(p.pane_id) }]"
       role="button"

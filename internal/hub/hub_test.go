@@ -112,3 +112,49 @@ func TestBroadcastIncrementalTargetsDeclaredClients(t *testing.T) {
 		t.Errorf("regular broadcast should reach B, got %v", gotB)
 	}
 }
+
+// The on-connect hook must fire after the client is registered in the hub,
+// so a TriggerPoll invoked from it observes Count() > 0.
+func TestOnConnectFiresAfterRegistration(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := New(logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.Run(ctx)
+
+	var mu sync.Mutex
+	countAtFire := -1
+	fired := make(chan struct{})
+	h.SetOnConnect(func() {
+		mu.Lock()
+		countAtFire = h.Count()
+		mu.Unlock()
+		close(fired)
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		h.HandleConn(ctx, conn, "", nil)
+	}))
+	defer srv.Close()
+
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("onConnect never fired")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if countAtFire != 1 {
+		t.Fatalf("onConnect observed Count()=%d, want 1 (client must be registered first)", countAtFire)
+	}
+}

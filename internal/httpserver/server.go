@@ -56,6 +56,8 @@ type Server struct {
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
+// Client connects trigger a poll via the hub's on-connect hook instead of
+// here — TriggerPoll fired before hub registration would observe Count()==0.
 type paneSnapshotter interface {
 	Snapshot() []herdr.Pane
 }
