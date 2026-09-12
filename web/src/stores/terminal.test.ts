@@ -177,8 +177,10 @@ describe('setContent poll mode', () => {
     term.setContent('p1', '\x1b[31mredrawn screen\x1b[0m\n', false, undefined, undefined, true)
 
     expect(term.content).toBe(history)
+    // resync must be an authoritative direct read (refresh), not a poller
+    // cache hit — the cached baseline can be older than the tail just seen.
     expect(send).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'read_pane', pane_id: 'p1', lines: 650, purpose: 'term',
+      type: 'read_pane', pane_id: 'p1', lines: 650, purpose: 'term', refresh: true,
     }))
     send.mockRestore()
   })
@@ -195,7 +197,7 @@ describe('setContent poll mode', () => {
     term.setContent('p1', 'next-delta\n', true, 6, 5)
 
     expect(term.content).toBe([...lines, 'merged'].join('\n') + '\n')
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 651 }))
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 651, refresh: true }))
     send.mockRestore()
   })
 
@@ -209,7 +211,7 @@ describe('setContent poll mode', () => {
     term.setContent('p1', [...screen.slice(1), 'redrawn-row'].join('\n') + '\n', false, undefined, undefined, true)
 
     expect(term.content).toBe(screen.join('\n') + '\n')
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 500 }))
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ lines: 500, refresh: true }))
     send.mockRestore()
   })
 

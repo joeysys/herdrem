@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"herdrem/internal/herdr"
 	"herdrem/internal/hub"
 	"herdrem/internal/service"
+	"herdrem/internal/store"
 )
 
 // TestPollerBroadcastsAgentsWithOptions verifies the poll → hub → WS client
@@ -95,6 +97,64 @@ func TestPollerBroadcastsAgentsWithOptions(t *testing.T) {
 		}
 	}
 	t.Fatal("no agents snapshot with parsed blocked options received within deadline")
+}
+
+func TestPollerSetTiming(t *testing.T) {
+	p := New(nil, nil, nil, nil, nil, time.Second)
+
+	// defaults
+	if p.pollInterval() != time.Second {
+		t.Fatalf("constructor interval lost: %v", p.pollInterval())
+	}
+	if p.subscriberTTL() != defaultSubscriberTTL {
+		t.Fatalf("default subscriber TTL = %v, want %v", p.subscriberTTL(), defaultSubscriberTTL)
+	}
+
+	// term poll above TTL/3 widens the subscription window — otherwise a slow
+	// refresh loop would silently expire its own delta subscription.
+	p.SetTiming(store.Prefs{Terminal: store.TerminalPrefs{PollMs: 60000}})
+	if p.subscriberTTL() != 180*time.Second {
+		t.Fatalf("subscriber TTL = %v, want 180s for 60s term poll", p.subscriberTTL())
+	}
+
+	// zeros reset to defaults; explicit values apply
+	p.SetTiming(store.Prefs{
+		Timing:   store.TimingPrefs{SnapshotPollMs: 7000, EnrichGraceMs: 60000, HostRetryMs: 45000},
+		Terminal: store.TerminalPrefs{PollMs: 2000},
+	})
+	if p.pollInterval() != 7*time.Second {
+		t.Fatalf("poll interval = %v, want 7s", p.pollInterval())
+	}
+	if p.enrichGraceDur() != time.Minute || p.hostRetryDur() != 45*time.Second {
+		t.Fatalf("grace/retry = %v/%v", p.enrichGraceDur(), p.hostRetryDur())
+	}
+	if p.subscriberTTL() != defaultSubscriberTTL {
+		t.Fatalf("subscriber TTL = %v, want %v (2s poll < TTL)", p.subscriberTTL(), defaultSubscriberTTL)
+	}
+	p.SetTiming(store.Prefs{})
+	if p.pollInterval() != defaultPollInterval {
+		t.Fatalf("reset poll interval = %v, want %v", p.pollInterval(), defaultPollInterval)
+	}
+}
+
+// Out-of-range persisted/hand-edited prefs must be clamped to defaults at the
+// consumption boundary — a huge snapshot_poll_ms would overflow time.Duration
+// and panic time.NewTicker.
+func TestPollerSetTimingClampsCorruptValues(t *testing.T) {
+	p := New(nil, nil, nil, nil, nil, time.Second)
+	p.SetTiming(store.Prefs{
+		Timing:   store.TimingPrefs{SnapshotPollMs: math.MaxInt64, EnrichGraceMs: -5, HostRetryMs: 1},
+		Terminal: store.TerminalPrefs{PollMs: -1},
+	})
+	if p.pollInterval() != defaultPollInterval {
+		t.Fatalf("corrupt snapshot poll not clamped: %v", p.pollInterval())
+	}
+	if p.enrichGraceDur() != defaultEnrichGrace || p.hostRetryDur() != defaultHostRetry {
+		t.Fatalf("corrupt grace/retry not clamped: %v/%v", p.enrichGraceDur(), p.hostRetryDur())
+	}
+	if p.subscriberTTL() != defaultSubscriberTTL {
+		t.Fatalf("corrupt term poll leaked into TTL: %v", p.subscriberTTL())
+	}
 }
 
 func TestPollerEnrichLastActiveKeepsWorkingAgentsFresh(t *testing.T) {
@@ -744,7 +804,7 @@ func TestPollerPausedEnrichmentServesCachedMenu(t *testing.T) {
 	}
 
 	// Grace window expires → paused: cached options stay, no reads happen.
-	p.lastClientAt = time.Now().Add(-enrichmentGrace - time.Second)
+	p.lastClientAt = time.Now().Add(-defaultEnrichGrace - time.Second)
 	p.pollOnce(context.Background())
 	if got := p.Snapshot()[0].Options; len(got) == 0 {
 		t.Fatal("paused enrichment dropped cached menu options")
@@ -912,6 +972,7 @@ func TestContentSnapshotVersionConfirm(t *testing.T) {
 	p.contentCache["%1"] = "cached content"
 	p.contentRevs["%1"] = 5
 	p.contentSeqs["%1"] = 9
+	p.contentAt["%1"] = time.Now()
 
 	// Never confirmed → not servable.
 	if _, _, ok := p.ContentSnapshot("%1"); ok {
@@ -923,6 +984,15 @@ func TestContentSnapshotVersionConfirm(t *testing.T) {
 	if c, rev, ok := p.ContentSnapshot("%1"); !ok || c != "cached content" || rev != 5 {
 		t.Fatalf("confirmed cache should be served (ok=%v rev=%d)", ok, rev)
 	}
+
+	// A version-confirmed but aged-out baseline is not servable either: rev/seq
+	// do not move on streamed output, so version freshness alone cannot prove
+	// the cached content is still current.
+	p.contentAt["%1"] = time.Now().Add(-contentVerFreshFor - time.Second)
+	if _, _, ok := p.ContentSnapshot("%1"); ok {
+		t.Fatal("aged-out baseline must not be served")
+	}
+	p.contentAt["%1"] = time.Now()
 
 	// Upstream moved on → invalidated immediately.
 	client.Panes[0].StateChangeSeq = 10
@@ -1033,4 +1103,46 @@ func TestAttachMenuDiscardsReadRacingInvalidation(t *testing.T) {
 	// The pane copy itself may carry the just-read options (they are what the
 	// screen still shows), but the cache must stay clean so the next poll
 	// re-reads the post-response screen.
+}
+
+// Stale panes come from a host whose snapshot just failed — reading them hits
+// a dead/unreachable host and can wedge the single-flight delta goroutine.
+func TestPushContentDeltasSkipsStalePanes(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := hub.New(logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	go h.Run(ctx)
+
+	client := &countingReader{FakeClient: &herdr.FakeClient{ReadContent: "x\n"}}
+	p := New(client, []string{"local"}, nil, h, logger, time.Second)
+	p.subscribers["%s"] = time.Now().Unix()
+
+	// Register a real client so pushContentDeltas passes the Count()>0 gate.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		h.HandleConn(ctx, conn, "", nil)
+	}))
+	defer srv.Close()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(3 * time.Second)
+	for h.Count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	panes := []herdr.Pane{{
+		PaneID: "%s", Kind: "agent", Host: "dead-remote", Stale: true,
+		Revision: 9, StateChangeSeq: 9, // changed vs empty cache → would read if not skipped
+	}}
+	p.pushContentDeltas(ctx, panes)
+	if got := client.readCount("%s"); got != 0 {
+		t.Fatalf("stale pane must not be read, got %d reads", got)
+	}
 }

@@ -503,3 +503,60 @@ func TestHandleMessage_Respond(t *testing.T) {
 	}
 	waitForSentText("3\n")
 }
+
+// Regression for "terminal freezes while an agent streams": a term poll read
+// must bypass the versioned baseline. herdr's pane revision and
+// state_change_seq only move on metadata/state changes — not on streamed
+// output — so serving the confirmed baseline with a rev makes the client
+// skip its merge+repaint path and the view freezes until the next state
+// transition. Poll reads return fresh unversioned tails instead.
+func TestHandleReadPanePollBypassesCache(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := hub.New(logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	go h.Run(ctx)
+
+	client := &herdr.FakeClient{ReadContent: "fresh-from-herdr\n"}
+	sub := &fakeSubscriber{content: "STALE-CACHED\n", rev: 1, ok: true}
+
+	svc := New(client, nil, nil, nil, nil, h, logger)
+	svc.SetContentSubscriber(sub)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		svc.HandleMessage(ctx, conn, data)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"read_pane","pane_id":"demo:0.1","purpose":"term","poll":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, data, _ := conn.Read(ctx)
+	var reply map[string]interface{}
+	_ = json.Unmarshal(data, &reply)
+	if reply["type"] != "pane_content" {
+		t.Fatalf("expected pane_content, got %v", reply)
+	}
+	if !strings.Contains(reply["content"].(string), "fresh-from-herdr") {
+		t.Fatalf("poll read should bypass cache and read directly, got %v", reply["content"])
+	}
+	if _, hasRev := reply["rev"]; hasRev {
+		t.Fatalf("poll response must be unversioned so the client merges the tail, got rev=%v", reply["rev"])
+	}
+}

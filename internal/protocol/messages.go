@@ -191,7 +191,7 @@ type PrefsGet struct {
 // PrefsSet replaces a whole prefs section.
 type PrefsSet struct {
 	Type    string          `json:"type"`
-	Section string          `json:"section"` // "skills" | "shell_cmds" | "kind_overrides"
+	Section string          `json:"section"` // "skills" | "shell_cmds" | "kind_overrides" | "prefix_by_agent" | "agent_cmds" | "terminal"
 	Data    json.RawMessage `json:"data"`
 }
 

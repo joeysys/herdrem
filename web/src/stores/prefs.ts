@@ -1,11 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { ws } from '../api/ws'
-import type { Prefs, PrefsSet, Skill } from '../api/types'
+import type { Prefs, PrefsSet, Skill, TimingPrefs } from '../api/types'
 
 const DEFAULT_SHELL_CMDS = ['ls -la', 'git status', 'git diff', 'cat package.json', 'npm test', 'make build']
 const DEFAULT_AGENT_CMDS = ['/review', '/commit', '/help', '/clear', '/compact']
 const DEFAULT_PREFIX_BY_AGENT: Record<string, string> = { codex: '$', default: '/' }
+export const DEFAULT_TERM_POLL_MS = 6000
+// timing section defaults — must match the poller/ws built-ins; a 0 (absent)
+// value in prefs means the same default.
+export const DEFAULT_SNAPSHOT_POLL_MS = 3000
+export const DEFAULT_ENRICH_GRACE_MS = 30000
+export const DEFAULT_HOST_RETRY_MS = 30000
+export const DEFAULT_RECONNECT_DELAY_MS = 2000
+export const DEFAULT_GRID_PREVIEW_MS = 8000
 
 // prefs store mirrors the relay's prefs (skills / agent_cmds / shell_cmds / kind_overrides / prefix_by_agent).
 export const usePrefsStore = defineStore('prefs', () => {
@@ -14,6 +22,12 @@ export const usePrefsStore = defineStore('prefs', () => {
   const shellCmds = ref<string[]>([...DEFAULT_SHELL_CMDS])
   const kindOverrides = ref<Record<string, { kind: string; display_agent: string; updated_at: string }>>({})
   const prefixByAgent = ref<Record<string, string>>({ ...DEFAULT_PREFIX_BY_AGENT })
+  const termPollMs = ref(DEFAULT_TERM_POLL_MS)
+  const snapshotPollMs = ref(DEFAULT_SNAPSHOT_POLL_MS)
+  const enrichGraceMs = ref(DEFAULT_ENRICH_GRACE_MS)
+  const hostRetryMs = ref(DEFAULT_HOST_RETRY_MS)
+  const reconnectDelayMs = ref(DEFAULT_RECONNECT_DELAY_MS)
+  const gridPreviewMs = ref(DEFAULT_GRID_PREVIEW_MS)
 
   function setPrefs(p: Prefs) {
     if (p.skills) skills.value = p.skills
@@ -21,9 +35,16 @@ export const usePrefsStore = defineStore('prefs', () => {
     if (p.shell_cmds) shellCmds.value = p.shell_cmds
     if (p.kind_overrides) kindOverrides.value = p.kind_overrides
     if (p.prefix_by_agent) prefixByAgent.value = p.prefix_by_agent
+    termPollMs.value = p.terminal?.poll_ms || DEFAULT_TERM_POLL_MS
+    snapshotPollMs.value = p.timing?.snapshot_poll_ms || DEFAULT_SNAPSHOT_POLL_MS
+    enrichGraceMs.value = p.timing?.enrich_grace_ms || DEFAULT_ENRICH_GRACE_MS
+    hostRetryMs.value = p.timing?.host_retry_ms || DEFAULT_HOST_RETRY_MS
+    reconnectDelayMs.value = p.timing?.reconnect_delay_ms || DEFAULT_RECONNECT_DELAY_MS
+    gridPreviewMs.value = p.timing?.grid_preview_ms || DEFAULT_GRID_PREVIEW_MS
+    ws.setReconnectDelay(reconnectDelayMs.value)
   }
 
-  function setSection(section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent', data: unknown) {
+  function setSection(section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing', data: unknown) {
     const msg: PrefsSet = { type: 'prefs_set', section, data }
     ws.send(msg)
   }
@@ -46,6 +67,29 @@ export const usePrefsStore = defineStore('prefs', () => {
   function setPrefixByAgent(map: Record<string, string>) {
     prefixByAgent.value = map
     setSection('prefix_by_agent', map)
+  }
+
+  function setTermPollMs(ms: number) {
+    termPollMs.value = ms || DEFAULT_TERM_POLL_MS
+    setSection('terminal', { poll_ms: ms })
+  }
+
+  /** Save the whole timing section; patch keys are TimingPrefs field names. */
+  function setTiming(patch: Partial<TimingPrefs>) {
+    const merged: TimingPrefs = {
+      snapshot_poll_ms: snapshotPollMs.value,
+      enrich_grace_ms: enrichGraceMs.value,
+      host_retry_ms: hostRetryMs.value,
+      reconnect_delay_ms: reconnectDelayMs.value,
+      grid_preview_ms: gridPreviewMs.value,
+      ...patch,
+    }
+    snapshotPollMs.value = merged.snapshot_poll_ms || DEFAULT_SNAPSHOT_POLL_MS
+    enrichGraceMs.value = merged.enrich_grace_ms || DEFAULT_ENRICH_GRACE_MS
+    hostRetryMs.value = merged.host_retry_ms || DEFAULT_HOST_RETRY_MS
+    reconnectDelayMs.value = merged.reconnect_delay_ms || DEFAULT_RECONNECT_DELAY_MS
+    gridPreviewMs.value = merged.grid_preview_ms || DEFAULT_GRID_PREVIEW_MS
+    setSection('timing', merged)
   }
 
   /** resolve the prefix for a given agent name from prefix_by_agent config */
@@ -72,8 +116,9 @@ export const usePrefsStore = defineStore('prefs', () => {
   }
 
   return {
-    skills, agentCmds, shellCmds, kindOverrides, prefixByAgent,
-    setPrefs, setSection, setShellCmds, setAgentCmds, setSkills, setPrefixByAgent,
+    skills, agentCmds, shellCmds, kindOverrides, prefixByAgent, termPollMs,
+    snapshotPollMs, enrichGraceMs, hostRetryMs, reconnectDelayMs, gridPreviewMs,
+    setPrefs, setSection, setShellCmds, setAgentCmds, setSkills, setPrefixByAgent, setTermPollMs, setTiming,
     prefixForAgent, resolveSkill, kindOverrideFor,
   }
 })

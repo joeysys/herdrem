@@ -270,8 +270,13 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   // A corrective full snapshot must not be shorter than the history it will
   // replace. Add one poll window for output produced during the round trip.
+  // refresh=true forces a direct herdr read: a resync by definition means the
+  // local view cannot be reconciled, and the poller's ContentSnapshot can hold
+  // a version-confirmed but older baseline (in-place TUI redraws don't move
+  // rev/seq), so serving it here could hand back content older than the tail
+  // the failed merge just saw.
   function requestResync() {
-    requestRead(Math.max(500, lineCount(content.value) + 50))
+    requestRead(Math.max(500, lineCount(content.value) + 50), true)
   }
 
   function sendText(text: string, submit = true) {

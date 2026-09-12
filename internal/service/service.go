@@ -224,19 +224,24 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 	if !msg.Refresh && s.subscriber != nil {
 		switch msg.Purpose {
 		case "term":
+			if msg.Poll {
+				// Poll reads always read directly. herdr's pane revision and
+				// state_change_seq only move on metadata/state changes — not on
+				// streamed output — so a version-confirmed baseline can hide
+				// live content indefinitely. The unversioned tail response is
+				// what lets the client merge + repaint while an agent works.
+				break
+			}
 			content, rev, hasRev = s.subscriber.ContentSnapshot(msg.PaneID)
 			if hasRev {
-				// Trim the cached snapshot to the requested line count. Poll requests
-				// use this only to refresh the subscription baseline; the client
-				// keeps its delta-grown content and does not replace it with this
-				// truncated view (see terminal store setContent poll handling).
+				// Trim the cached snapshot to the requested line count for the
+				// initial-open / resync fast path.
 				content = TailLines(content, lines)
 			}
 		case "preview":
-			// Grid previews go through the poller's merged-read path: a fresh
-			// version-confirmed baseline is tailed in place, misses share one
-			// upstream read per pane (singleflight), and a short-lived cache
-			// dedupes the per-card refresh burst. Preview content carries no
+			// Grid previews go through the poller's merged-read path: misses
+			// share one upstream read per pane (singleflight) and a short-lived
+			// cache dedupes the per-card refresh burst. Preview content carries no
 			// revision — it is never a delta baseline.
 			content, err = s.subscriber.PreviewSnapshot(ctx, msg.PaneID, lines)
 			if err != nil {

@@ -146,6 +146,15 @@ func main() {
 	// Poller (per-host + kinds filter; also serves as the pane router)
 	poller := poll.New(client, cfg.Hosts(), cfg.Kinds(), h, logger, 0)
 	poller.SetStatePath(cfg.DataDir + "/poller_state.json")
+	// Push the persisted timing prefs into the poller now and on every later
+	// prefs_set — the loop retunes itself without a restart.
+	applyTiming := func(p store.Prefs) {
+		poller.SetTiming(p)
+	}
+	if prefsStore != nil {
+		applyTiming(prefsStore.Get())
+		prefsStore.SetOnChange(applyTiming)
+	}
 	// Trigger an immediate poll only after the hub has registered the client —
 	// triggering earlier races registration and observes zero connected
 	// clients, so catch-up enrichment would still be skipped for a cycle.

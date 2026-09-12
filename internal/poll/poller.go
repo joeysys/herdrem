@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"herdrem/internal/herdr"
 	"herdrem/internal/hub"
 	"herdrem/internal/protocol"
 	"herdrem/internal/service"
+	"herdrem/internal/store"
 )
 
 // Poller periodically polls herdr (per host) and broadcasts agents snapshots.
@@ -27,7 +29,15 @@ type Poller struct {
 	kinds  map[string]bool // RELAY_KINDS filter; empty = all
 	hub    *hub.Hub
 	logger *slog.Logger
-	intvl  time.Duration
+
+	// Runtime-adjustable timing knobs (prefs "timing" / "terminal" sections),
+	// in milliseconds. Atomics so SetTiming can retune the running loop without
+	// stopping it.
+	pollMs       atomic.Int64  // snapshot tick
+	enrichMs     atomic.Int64  // no-client enrichment grace
+	hostRetryMs  atomic.Int64  // failed-host snapshot backoff
+	termPollMs   atomic.Int64  // client term refresh — derives subscriber TTL
+	timingNotify chan struct{} // buffered(1): tells Run to reset the ticker
 
 	mu          sync.RWMutex
 	paneRemote  map[string]string       // pane_id → host
@@ -155,13 +165,12 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 	if len(hosts) == 0 {
 		hosts = []string{"local"}
 	}
-	return &Poller{
+	p := &Poller{
 		client:              client,
 		hosts:               hosts,
 		kinds:               kinds,
 		hub:                 h,
 		logger:              logger,
-		intvl:               interval,
 		paneRemote:          make(map[string]string),
 		hostPanes:           make(map[string][]herdr.Pane),
 		hostNextTry:         make(map[string]time.Time),
@@ -187,7 +196,69 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 		previewCache:        make(map[string]previewEntry),
 		previewInflight:     make(map[string]*previewCall),
 		trigger:             make(chan struct{}, 1),
+		timingNotify:        make(chan struct{}, 1),
 	}
+	p.pollMs.Store(interval.Milliseconds())
+	p.enrichMs.Store(int64(defaultEnrichGrace / time.Millisecond))
+	p.hostRetryMs.Store(int64(defaultHostRetry / time.Millisecond))
+	p.termPollMs.Store(defaultTermPollMs)
+	return p
+}
+
+// Timing defaults. All four knobs are overridable at runtime via the prefs
+// "timing" / "terminal" sections; 0 in prefs means these values.
+const (
+	defaultPollInterval  = 3 * time.Second
+	defaultEnrichGrace   = 30 * time.Second
+	defaultHostRetry     = 30 * time.Second
+	defaultSubscriberTTL = 30 * time.Second
+	defaultTermPollMs    = 6000
+)
+
+// SetTiming applies the prefs timing knobs. Any 0 falls back to the default.
+// Values are normalized against the store bounds first so a hand-edited or
+// corrupt prefs.json cannot inject extreme timers into time.Duration
+// (an overflowing snapshot_poll_ms would panic time.NewTicker). It is safe to
+// call while Run is active; the ticker is reset on the next loop.
+func (p *Poller) SetTiming(prefs store.Prefs) {
+	t := prefs.Timing
+	t.Normalize()
+	snapshotPollMs := t.SnapshotPollMs
+	if snapshotPollMs <= 0 {
+		snapshotPollMs = int(defaultPollInterval / time.Millisecond)
+	}
+	enrichGraceMs := t.EnrichGraceMs
+	if enrichGraceMs <= 0 {
+		enrichGraceMs = int(defaultEnrichGrace / time.Millisecond)
+	}
+	hostRetryMs := t.HostRetryMs
+	if hostRetryMs <= 0 {
+		hostRetryMs = int(defaultHostRetry / time.Millisecond)
+	}
+	termPollMs := prefs.Terminal.PollMs
+	if termPollMs < store.TermPollMinMs || termPollMs > store.TermPollMaxMs {
+		termPollMs = defaultTermPollMs
+	}
+	p.pollMs.Store(int64(snapshotPollMs))
+	p.enrichMs.Store(int64(enrichGraceMs))
+	p.hostRetryMs.Store(int64(hostRetryMs))
+	p.termPollMs.Store(int64(termPollMs))
+	select {
+	case p.timingNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Poller) pollInterval() time.Duration {
+	return time.Duration(p.pollMs.Load()) * time.Millisecond
+}
+
+func (p *Poller) enrichGraceDur() time.Duration {
+	return time.Duration(p.enrichMs.Load()) * time.Millisecond
+}
+
+func (p *Poller) hostRetryDur() time.Duration {
+	return time.Duration(p.hostRetryMs.Load()) * time.Millisecond
 }
 
 // SetFileService connects the file service for async file-existence checks.
@@ -368,7 +439,7 @@ func (p *Poller) CwdRoots(host string) []string {
 
 // Run starts the poll loop. Blocks until ctx is cancelled.
 func (p *Poller) Run(ctx context.Context) {
-	ticker := time.NewTicker(p.intvl)
+	ticker := time.NewTicker(p.pollInterval())
 	defer ticker.Stop()
 
 	p.pollOnce(ctx)
@@ -376,6 +447,8 @@ func (p *Poller) Run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			p.pollOnce(ctx)
+		case <-p.timingNotify:
+			ticker.Reset(p.pollInterval())
 		case <-p.trigger:
 			p.pollOnce(ctx)
 		case <-ctx.Done():
@@ -388,13 +461,12 @@ func (p *Poller) Run(ctx context.Context) {
 // blocked-menu reads, terminal delta reads) keeps running after the last WS
 // client disconnects. Base snapshot polling is NOT slowed — pane state keeps
 // updating every cycle so reconnecting clients and HTTP routes stay current.
-const enrichmentGrace = 30 * time.Second
-
+// Runtime-tunable via prefs timing.enrich_grace_ms (defaultEnrichGrace).
+//
 // hostRetryBackoff bounds how often a failed host's `api snapshot` is
 // retried. During backoff the host's last successful panes are retained with
 // stale=true so pane routing, cwd roots, and cached state are not treated as
-// deleted.
-const hostRetryBackoff = 30 * time.Second
+// deleted. Runtime-tunable via prefs timing.host_retry_ms (defaultHostRetry).
 
 func (p *Poller) pollOnce(ctx context.Context) {
 	var merged []herdr.Pane
@@ -412,7 +484,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.pathsSkipped = false
 		p.lastClientAt = now
 	}
-	enrichOn := p.lastClientAt != (time.Time{}) && now.Sub(p.lastClientAt) <= enrichmentGrace
+	enrichOn := p.lastClientAt != (time.Time{}) && now.Sub(p.lastClientAt) <= p.enrichGraceDur()
 
 	for _, host := range p.hosts {
 		if t, ok := p.hostNextTry[host]; ok && now.Before(t) {
@@ -428,7 +500,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			p.metrics.snapshotErrs++
 			p.metrics.mu.Unlock()
 			p.logger.Warn("snapshot failed", "host", hostLabel(host), "err", err)
-			p.hostNextTry[host] = now.Add(hostRetryBackoff)
+			p.hostNextTry[host] = now.Add(p.hostRetryDur())
 			merged = append(merged, p.stalePanes(host, seen)...)
 			continue
 		}
@@ -1282,10 +1354,13 @@ func (p *Poller) confirmContentVersions(panes []herdr.Pane) {
 
 // ContentSnapshot returns an atomically paired cached full snapshot and
 // revision for a pane, and whether it is fresh enough to serve. Freshness is
-// version-based: the cache is served while recent polls keep confirming the
-// pane's upstream rev/seq still match the cached read. When the upstream
-// version has drifted or confirmations have stopped for contentVerFreshFor,
-// ok=false and the caller should read directly from herdr.
+// version- AND age-based: the cache is served only while recent polls keep
+// confirming the pane's upstream rev/seq still match the cached read AND the
+// content itself was read within contentVerFreshFor. The age bound matters
+// because neither counter moves on streamed output — a version-confirmed but
+// old baseline is not proof of fresh content. When the upstream version has
+// drifted, confirmations have stopped, or the baseline has aged out, ok=false
+// and the caller should read directly from herdr.
 func (p *Poller) ContentSnapshot(paneID string) (string, int, bool) {
 	p.contentMu.Lock()
 	defer p.contentMu.Unlock()
@@ -1294,7 +1369,8 @@ func (p *Poller) ContentSnapshot(paneID string) (string, int, bool) {
 	if !contentOK || !revOK {
 		return "", 0, false
 	}
-	if time.Since(p.contentVerAt[paneID]) > contentVerFreshFor {
+	if time.Since(p.contentVerAt[paneID]) > contentVerFreshFor ||
+		time.Since(p.contentAt[paneID]) > contentVerFreshFor {
 		return "", 0, false
 	}
 	return content, rev, true
@@ -1307,17 +1383,14 @@ const previewCacheTTL = 5 * time.Second
 
 // PreviewSnapshot serves a short pane read for grid-card previews while
 // minimizing upstream reads:
-//  1. A version-confirmed contentCache baseline is tailed in place (free).
-//  2. A previewCache entry younger than previewCacheTTL is reused.
-//  3. Concurrent misses for the same pane share one ReadPane (singleflight).
+//  1. A previewCache entry younger than previewCacheTTL is reused.
+//  2. Concurrent misses for the same pane share one ReadPane (singleflight).
 //
 // Preview reads are deliberately kept OUT of contentCache — a small tail
-// window must never overwrite the large delta baseline.
+// window must never overwrite the large delta baseline. The contentCache
+// baseline is also NOT tailed here: its rev/seq freshness says nothing about
+// streamed output, so it could serve arbitrarily stale previews.
 func (p *Poller) PreviewSnapshot(ctx context.Context, paneID string, lines int) (string, error) {
-	if content, _, ok := p.ContentSnapshot(paneID); ok {
-		return service.TailLines(content, lines), nil
-	}
-
 	p.contentMu.Lock()
 	if e, ok := p.previewCache[paneID]; ok && time.Since(e.at) < previewCacheTTL {
 		text := e.text
@@ -1363,8 +1436,17 @@ func (p *Poller) TriggerPoll() {
 }
 
 // subscriberTTL is how long a pane stays subscribed after the last read_pane.
-// Longer than the frontend's 6s poll so a healthy client never drops out.
-const subscriberTTL = 30 * time.Second
+// It must outlive the client's refresh loop with margin — the term view polls
+// at terminal.poll_ms — so it is derived as max(30s, 3×term poll). A term poll
+// interval above the fixed TTL would silently expire subscriptions between
+// polls and stop delta pushes.
+func (p *Poller) subscriberTTL() time.Duration {
+	ttl := defaultSubscriberTTL
+	if m := 3 * time.Duration(p.termPollMs.Load()) * time.Millisecond; m > ttl {
+		ttl = m
+	}
+	return ttl
+}
 
 // activeSubscription reports whether a pane currently has a live subscriber
 // and prunes expired entries opportunistically.
@@ -1375,7 +1457,7 @@ func (p *Poller) activeSubscription(paneID string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(time.Unix(ts, 0)) > subscriberTTL {
+	if time.Since(time.Unix(ts, 0)) > p.subscriberTTL() {
 		delete(p.subscribers, paneID)
 		return false
 	}
@@ -1578,6 +1660,13 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		pid := pane.PaneID
 		rev := pane.Revision
 		seq := pane.StateChangeSeq
+
+		// Stale panes come from a host whose snapshot just failed — reading
+		// them hits a dead/unreachable host and can wedge this single-flight
+		// goroutine for every other pane.
+		if pane.Stale {
+			continue
+		}
 
 		// Only push panes a client is actively watching.
 		if !p.activeSubscription(pid) {

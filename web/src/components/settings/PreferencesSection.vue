@@ -113,6 +113,56 @@ watch(
   { immediate: true },
 )
 
+// --- timing knobs (relay-side prefs, seconds in the UI) ---
+// Six tunables live here; grid preview refresh is stored in prefs but hidden
+// until the wall/monitor feature lands.
+const timingOpen = ref(false)
+
+function sec(v: number) { return String(v / 1000) }
+function clampSec(text: string, min: number, max: number): number | null {
+  const v = parseFloat(text)
+  if (!isFinite(v) || v <= 0) return null
+  return Math.round(Math.min(max, Math.max(min, v)) * 1000)
+}
+
+const termPollSec = ref(sec(prefs.termPollMs))
+const snapshotPollSec = ref(sec(prefs.snapshotPollMs))
+const enrichGraceSec = ref(sec(prefs.enrichGraceMs))
+const hostRetrySec = ref(sec(prefs.hostRetryMs))
+const reconnectDelaySec = ref(sec(prefs.reconnectDelayMs))
+
+watch(
+  () => [prefs.termPollMs, prefs.snapshotPollMs, prefs.enrichGraceMs, prefs.hostRetryMs, prefs.reconnectDelayMs],
+  ([term, snap, grace, retry, recon]) => {
+    termPollSec.value = sec(term)
+    snapshotPollSec.value = sec(snap)
+    enrichGraceSec.value = sec(grace)
+    hostRetrySec.value = sec(retry)
+    reconnectDelaySec.value = sec(recon)
+  },
+)
+
+function saveTiming() {
+  const term = clampSec(termPollSec.value, 1, 60)
+  const snap = clampSec(snapshotPollSec.value, 0.5, 60)
+  const grace = clampSec(enrichGraceSec.value, 5, 600)
+  const retry = clampSec(hostRetrySec.value, 5, 600)
+  const recon = clampSec(reconnectDelaySec.value, 0.2, 30)
+  // Revert invalid inputs to the current effective values.
+  if (term === null) termPollSec.value = sec(prefs.termPollMs)
+  if (snap === null) snapshotPollSec.value = sec(prefs.snapshotPollMs)
+  if (grace === null) enrichGraceSec.value = sec(prefs.enrichGraceMs)
+  if (retry === null) hostRetrySec.value = sec(prefs.hostRetryMs)
+  if (recon === null) reconnectDelaySec.value = sec(prefs.reconnectDelayMs)
+  if (term !== null) prefs.setTermPollMs(term)
+  prefs.setTiming({
+    snapshot_poll_ms: snap ?? prefs.snapshotPollMs,
+    enrich_grace_ms: grace ?? prefs.enrichGraceMs,
+    host_retry_ms: retry ?? prefs.hostRetryMs,
+    reconnect_delay_ms: recon ?? prefs.reconnectDelayMs,
+  })
+}
+
 // --- shell commands ---
 const shellText = ref(prefs.shellCmds.join('\n'))
 function saveShellCmds() {
@@ -222,6 +272,47 @@ function clearStale() {
     </section>
 
     <section class="ps-block">
+      <button
+        class="ps-fold"
+        :aria-expanded="timingOpen"
+        aria-controls="timing-body"
+        @click="timingOpen = !timingOpen"
+      >
+        <h3>timing</h3>
+        <span class="ps-fold-arrow" aria-hidden="true">{{ timingOpen ? '▴' : '▾' }}</span>
+      </button>
+      <div v-show="timingOpen" id="timing-body">
+        <p class="ps-hint">all values in seconds, stored on the relay</p>
+        <div class="t-row">
+          <label class="t-label" for="t-term">terminal refresh</label>
+          <input id="t-term" v-model="termPollSec" class="ps-edit ps-num" type="number" min="1" max="60" step="0.5" />
+          <span class="t-hint">open terminal re-reads the pane (1–60)</span>
+        </div>
+        <div class="t-row">
+          <label class="t-label" for="t-snap">snapshot poll</label>
+          <input id="t-snap" v-model="snapshotPollSec" class="ps-edit ps-num" type="number" min="0.5" max="60" step="0.5" />
+          <span class="t-hint">agents snapshot tick — drives status/blocked detection (0.5–60)</span>
+        </div>
+        <div class="t-row">
+          <label class="t-label" for="t-grace">enrichment grace</label>
+          <input id="t-grace" v-model="enrichGraceSec" class="ps-edit ps-num" type="number" min="5" max="600" step="1" />
+          <span class="t-hint">keep path/menu/delta work running this long after last client leaves (5–600)</span>
+        </div>
+        <div class="t-row">
+          <label class="t-label" for="t-retry">host retry backoff</label>
+          <input id="t-retry" v-model="hostRetrySec" class="ps-edit ps-num" type="number" min="5" max="600" step="1" />
+          <span class="t-hint">wait this long before retrying a host whose snapshot failed (5–600)</span>
+        </div>
+        <div class="t-row">
+          <label class="t-label" for="t-recon">ws reconnect delay</label>
+          <input id="t-recon" v-model="reconnectDelaySec" class="ps-edit ps-num" type="number" min="0.2" max="30" step="0.1" />
+          <span class="t-hint">browser reconnect cadence after the socket drops (0.2–30)</span>
+        </div>
+        <button class="ps-save" @click="saveTiming">save</button>
+      </div>
+    </section>
+
+    <section class="ps-block">
       <h3>shell commands</h3>
       <p class="ps-hint">quick commands for shell panes, one per line</p>
       <textarea ref="shellEditEl" v-model="shellText" class="ps-edit" rows="5" placeholder="one per line"></textarea>
@@ -308,6 +399,16 @@ function clearStale() {
   color: var(--term-fg); padding: 9px 11px; outline: none; resize: vertical;
 }
 .ps-edit:focus { border-color: rgba(96,165,250,.5); }
+.ps-num { width: 110px; resize: none; }
+.ps-fold {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  background: none; border: none; padding: 0; cursor: pointer; text-align: left;
+}
+.ps-fold h3 { margin-bottom: 0; }
+.ps-fold-arrow { font-size: var(--text-xs); color: var(--muted); }
+.t-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; flex-wrap: wrap; }
+.t-label { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-dim); width: 132px; flex-shrink: 0; }
+.t-hint { font-size: var(--text-2xs); color: var(--faint); flex: 1; min-width: 200px; }
 .ps-save {
   margin-top: 7px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700;
   color: #06281a; background: var(--green); border: 1px solid var(--green); border-radius: var(--radius);

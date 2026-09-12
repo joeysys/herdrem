@@ -11,6 +11,8 @@ export class WSClient {
   private shouldReconnect = true
   private connId = 0 // increments on each connect; callbacks check identity
   public status: 'disconnected' | 'connecting' | 'connected' = 'disconnected'
+  /** reconnect delay in ms; set from prefs timing.reconnect_delay_ms */
+  public reconnectDelayMs = 2000
 
   connect(url: string, token?: string) {
     // Close existing connection and clear pending reconnect
@@ -66,7 +68,7 @@ export class WSClient {
       this.status = 'disconnected'
       this.notifyStatus()
       if (this.shouldReconnect) {
-        this.reconnectTimer = setTimeout(() => this.doConnect(), 2000)
+        this.reconnectTimer = setTimeout(() => this.doConnect(), this.reconnectDelayMs)
       }
     }
 
@@ -83,6 +85,10 @@ export class WSClient {
     this.ws = null
     this.status = 'disconnected'
     this.notifyStatus()
+  }
+
+  setReconnectDelay(ms: number) {
+    if (ms > 0) this.reconnectDelayMs = ms
   }
 
   send(msg: ClientMessage) {

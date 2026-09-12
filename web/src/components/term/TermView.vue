@@ -6,6 +6,7 @@ import { useConnectionStore } from '../../stores/connection'
 import { useFilesStore } from '../../stores/files'
 import { useDiffStore } from '../../stores/diff'
 import { useTodoStore } from '../../stores/todo'
+import { usePrefsStore } from '../../stores/prefs'
 import { useTermZoom } from '../../composables/useTermZoom'
 import { ws } from '../../api/ws'
 import TermInput from './TermInput.vue'
@@ -29,6 +30,7 @@ const conn = useConnectionStore()
 const files = useFilesStore()
 const diff = useDiffStore()
 const todo = useTodoStore()
+const prefs = usePrefsStore()
 
 const showTodo = ref(false)
 const showMenu = ref(false)
@@ -242,8 +244,12 @@ function onTodoFill(text: string) {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
+// Interval comes from relay-side prefs (terminal.poll_ms); 6s is the default
+// when unset. Changing the pref restarts the timer live.
+const pollMs = computed(() => prefs.termPollMs || 6000)
+
 function startPoll() {
-  if (!pollTimer) pollTimer = setInterval(() => term.requestRead(50, false, true), 6000)
+  if (!pollTimer) pollTimer = setInterval(() => term.requestRead(50, false, true), pollMs.value)
 }
 
 function stopPoll() {
@@ -253,7 +259,14 @@ function stopPoll() {
   }
 }
 
-// While the page is hidden the 6s subscription poll stops (the relay lets the
+watch(pollMs, () => {
+  if (pollTimer) {
+    stopPoll()
+    startPoll()
+  }
+})
+
+// While the page is hidden the subscription poll stops (the relay lets the
 // pane subscription expire); on return, re-read immediately before resuming.
 function onVisibility() {
   if (document.hidden) {

@@ -152,12 +152,32 @@ export interface KindOverride {
   updated_at: string
 }
 
+export interface TerminalPrefs {
+  /** term view subscription-refresh interval in ms (0/absent = client default 6000) */
+  poll_ms?: number
+}
+
+export interface TimingPrefs {
+  /** base agents-snapshot poll tick in ms (0/absent = 3000) */
+  snapshot_poll_ms?: number
+  /** ms after last client disconnect before enrichment pauses (0/absent = 30000) */
+  enrich_grace_ms?: number
+  /** host snapshot failure retry backoff in ms (0/absent = 30000) */
+  host_retry_ms?: number
+  /** browser WS reconnect delay in ms (0/absent = 2000) */
+  reconnect_delay_ms?: number
+  /** grid card preview refresh in ms (0/absent = 8000); reserved — grid preview is disabled */
+  grid_preview_ms?: number
+}
+
 export interface Prefs {
   skills?: Skill[]
   agent_cmds?: string[]
   shell_cmds?: string[]
   kind_overrides?: Record<string, KindOverride>
   prefix_by_agent?: Record<string, string>
+  terminal?: TerminalPrefs
+  timing?: TimingPrefs
 }
 
 export interface PrefsSnapshot {
@@ -261,7 +281,7 @@ export interface PrefsGet {
 
 export interface PrefsSet {
   type: 'prefs_set'
-  section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent'
+  section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing'
   data: unknown
 }
 
