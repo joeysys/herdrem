@@ -168,6 +168,8 @@ export interface TimingPrefs {
   reconnect_delay_ms?: number
   /** grid card preview refresh in ms (0/absent = 8000); reserved — grid preview is disabled */
   grid_preview_ms?: number
+  /** viewing a done pane this many ms auto-marks it read → idle (0/absent = 10000) */
+  auto_mark_read_ms?: number
 }
 
 export interface Prefs {
@@ -183,6 +185,7 @@ export interface Prefs {
 export interface PrefsSnapshot {
   type: 'prefs' | 'prefs_updated'
   prefs: Prefs
+  req_id?: string // echoed from the triggering prefs_set
 }
 
 // C→S
@@ -283,6 +286,7 @@ export interface PrefsSet {
   type: 'prefs_set'
   section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing'
   data: unknown
+  req_id?: string // client-generated; echoed in prefs_updated / error
 }
 
 export interface KindOverrideClear {

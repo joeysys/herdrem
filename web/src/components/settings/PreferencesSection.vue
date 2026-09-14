@@ -4,6 +4,7 @@ import { useTheme } from '../../composables/useTheme'
 import { useLayoutMode } from '../../composables/useLayoutMode'
 import { usePrefsStore } from '../../stores/prefs'
 import { useAgentsStore } from '../../stores/connection'
+import { useSaveFeedback } from '../../composables/useSaveFeedback'
 
 const { theme, themes, setTheme } = useTheme()
 const { preference, setPreference } = useLayoutMode()
@@ -113,68 +114,28 @@ watch(
   { immediate: true },
 )
 
-// --- timing knobs (relay-side prefs, seconds in the UI) ---
-// Six tunables live here; grid preview refresh is stored in prefs but hidden
-// until the wall/monitor feature lands.
-const timingOpen = ref(false)
-
-function sec(v: number) { return String(v / 1000) }
-function clampSec(text: string, min: number, max: number): number | null {
-  const v = parseFloat(text)
-  if (!isFinite(v) || v <= 0) return null
-  return Math.round(Math.min(max, Math.max(min, v)) * 1000)
-}
-
-const termPollSec = ref(sec(prefs.termPollMs))
-const snapshotPollSec = ref(sec(prefs.snapshotPollMs))
-const enrichGraceSec = ref(sec(prefs.enrichGraceMs))
-const hostRetrySec = ref(sec(prefs.hostRetryMs))
-const reconnectDelaySec = ref(sec(prefs.reconnectDelayMs))
-
-watch(
-  () => [prefs.termPollMs, prefs.snapshotPollMs, prefs.enrichGraceMs, prefs.hostRetryMs, prefs.reconnectDelayMs],
-  ([term, snap, grace, retry, recon]) => {
-    termPollSec.value = sec(term)
-    snapshotPollSec.value = sec(snap)
-    enrichGraceSec.value = sec(grace)
-    hostRetrySec.value = sec(retry)
-    reconnectDelaySec.value = sec(recon)
-  },
-)
-
-function saveTiming() {
-  const term = clampSec(termPollSec.value, 1, 60)
-  const snap = clampSec(snapshotPollSec.value, 0.5, 60)
-  const grace = clampSec(enrichGraceSec.value, 5, 600)
-  const retry = clampSec(hostRetrySec.value, 5, 600)
-  const recon = clampSec(reconnectDelaySec.value, 0.2, 30)
-  // Revert invalid inputs to the current effective values.
-  if (term === null) termPollSec.value = sec(prefs.termPollMs)
-  if (snap === null) snapshotPollSec.value = sec(prefs.snapshotPollMs)
-  if (grace === null) enrichGraceSec.value = sec(prefs.enrichGraceMs)
-  if (retry === null) hostRetrySec.value = sec(prefs.hostRetryMs)
-  if (recon === null) reconnectDelaySec.value = sec(prefs.reconnectDelayMs)
-  if (term !== null) prefs.setTermPollMs(term)
-  prefs.setTiming({
-    snapshot_poll_ms: snap ?? prefs.snapshotPollMs,
-    enrich_grace_ms: grace ?? prefs.enrichGraceMs,
-    host_retry_ms: retry ?? prefs.hostRetryMs,
-    reconnect_delay_ms: recon ?? prefs.reconnectDelayMs,
-  })
-}
+// --- save-button feedback (prefs_set → prefs_updated ack) ---
+const { state: shellSaveState, label: shellSaveLabel, save: shellSave }
+  = useSaveFeedback('shell_cmds')
+const { state: agentCmdSaveState, label: agentCmdSaveLabel, save: agentCmdSave }
+  = useSaveFeedback('agent_cmds')
+const { state: skillsSaveState, label: skillsSaveLabel, save: skillsSave }
+  = useSaveFeedback('skills')
+const { state: prefixSaveState, label: prefixSaveLabel, save: prefixSave }
+  = useSaveFeedback('prefix_by_agent')
 
 // --- shell commands ---
 const shellText = ref(prefs.shellCmds.join('\n'))
 function saveShellCmds() {
   const list = shellText.value.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40)
-  prefs.setShellCmds(list)
+  return prefs.setShellCmds(list)
 }
 
 // --- agent commands ---
 const agentCmdText = ref(prefs.agentCmds.join('\n'))
 function saveAgentCmds() {
   const list = agentCmdText.value.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40)
-  prefs.setAgentCmds(list)
+  return prefs.setAgentCmds(list)
 }
 
 // --- skills ---
@@ -189,7 +150,7 @@ function saveSkills() {
       const [label, ...rest] = l.split('|')
       return { label: label.trim(), template: (rest.join('|') || label).trim() }
     })
-  prefs.setSkills(list)
+  return prefs.setSkills(list)
 }
 
 // --- prefix by agent ---
@@ -207,7 +168,7 @@ function savePrefixes() {
     if (a && p) map[a] = p
   }
   if (!map.default) map.default = '/'
-  prefs.setPrefixByAgent(map)
+  return prefs.setPrefixByAgent(map)
 }
 
 // --- kind overrides ---
@@ -272,72 +233,51 @@ function clearStale() {
     </section>
 
     <section class="ps-block">
-      <button
-        class="ps-fold"
-        :aria-expanded="timingOpen"
-        aria-controls="timing-body"
-        @click="timingOpen = !timingOpen"
-      >
-        <h3>timing</h3>
-        <span class="ps-fold-arrow" aria-hidden="true">{{ timingOpen ? '▴' : '▾' }}</span>
-      </button>
-      <div v-show="timingOpen" id="timing-body">
-        <p class="ps-hint">all values in seconds, stored on the relay</p>
-        <div class="t-row">
-          <label class="t-label" for="t-term">terminal refresh</label>
-          <input id="t-term" v-model="termPollSec" class="ps-edit ps-num" type="number" min="1" max="60" step="0.5" />
-          <span class="t-hint">open terminal re-reads the pane (1–60)</span>
-        </div>
-        <div class="t-row">
-          <label class="t-label" for="t-snap">snapshot poll</label>
-          <input id="t-snap" v-model="snapshotPollSec" class="ps-edit ps-num" type="number" min="0.5" max="60" step="0.5" />
-          <span class="t-hint">agents snapshot tick — drives status/blocked detection (0.5–60)</span>
-        </div>
-        <div class="t-row">
-          <label class="t-label" for="t-grace">enrichment grace</label>
-          <input id="t-grace" v-model="enrichGraceSec" class="ps-edit ps-num" type="number" min="5" max="600" step="1" />
-          <span class="t-hint">keep path/menu/delta work running this long after last client leaves (5–600)</span>
-        </div>
-        <div class="t-row">
-          <label class="t-label" for="t-retry">host retry backoff</label>
-          <input id="t-retry" v-model="hostRetrySec" class="ps-edit ps-num" type="number" min="5" max="600" step="1" />
-          <span class="t-hint">wait this long before retrying a host whose snapshot failed (5–600)</span>
-        </div>
-        <div class="t-row">
-          <label class="t-label" for="t-recon">ws reconnect delay</label>
-          <input id="t-recon" v-model="reconnectDelaySec" class="ps-edit ps-num" type="number" min="0.2" max="30" step="0.1" />
-          <span class="t-hint">browser reconnect cadence after the socket drops (0.2–30)</span>
-        </div>
-        <button class="ps-save" @click="saveTiming">save</button>
-      </div>
-    </section>
-
-    <section class="ps-block">
       <h3>shell commands</h3>
       <p class="ps-hint">quick commands for shell panes, one per line</p>
       <textarea ref="shellEditEl" v-model="shellText" class="ps-edit" rows="5" placeholder="one per line"></textarea>
-      <button class="ps-save" @click="saveShellCmds">save</button>
+      <button
+        class="ps-save"
+        :class="{ err: shellSaveState === 'error' }"
+        :disabled="shellSaveState === 'saving'"
+        @click="shellSave(saveShellCmds)"
+      >{{ shellSaveLabel }}</button>
     </section>
 
     <section class="ps-block">
       <h3>agent commands</h3>
       <p class="ps-hint">slash commands for agent panes, one per line (prefix auto-added)</p>
       <textarea ref="agentCmdEditEl" v-model="agentCmdText" class="ps-edit" rows="5" placeholder="/review&#10;/commit&#10;/help"></textarea>
-      <button class="ps-save" @click="saveAgentCmds">save</button>
+      <button
+        class="ps-save"
+        :class="{ err: agentCmdSaveState === 'error' }"
+        :disabled="agentCmdSaveState === 'saving'"
+        @click="agentCmdSave(saveAgentCmds)"
+      >{{ agentCmdSaveLabel }}</button>
     </section>
 
     <section class="ps-block">
       <h3>skills</h3>
       <p class="ps-hint">format: <code>label|template</code>, use <code>{prefix}</code> for agent prefix</p>
       <textarea ref="skillsEditEl" v-model="skillsText" class="ps-edit" rows="5" placeholder="Review|{prefix} review this code"></textarea>
-      <button class="ps-save" @click="saveSkills">save</button>
+      <button
+        class="ps-save"
+        :class="{ err: skillsSaveState === 'error' }"
+        :disabled="skillsSaveState === 'saving'"
+        @click="skillsSave(saveSkills)"
+      >{{ skillsSaveLabel }}</button>
     </section>
 
     <section class="ps-block">
       <h3>prefix by agent</h3>
       <p class="ps-hint">format: <code>agent|prefix</code>, <code>default</code> is the fallback</p>
       <textarea v-model="prefixText" class="ps-edit" rows="4" placeholder="codex|$&#10;claude|/&#10;default|/"></textarea>
-      <button class="ps-save" @click="savePrefixes">save</button>
+      <button
+        class="ps-save"
+        :class="{ err: prefixSaveState === 'error' }"
+        :disabled="prefixSaveState === 'saving'"
+        @click="prefixSave(savePrefixes)"
+      >{{ prefixSaveLabel }}</button>
     </section>
 
     <section class="ps-block">
@@ -399,21 +339,13 @@ function clearStale() {
   color: var(--term-fg); padding: 9px 11px; outline: none; resize: vertical;
 }
 .ps-edit:focus { border-color: rgba(96,165,250,.5); }
-.ps-num { width: 110px; resize: none; }
-.ps-fold {
-  display: flex; align-items: center; justify-content: space-between; width: 100%;
-  background: none; border: none; padding: 0; cursor: pointer; text-align: left;
-}
-.ps-fold h3 { margin-bottom: 0; }
-.ps-fold-arrow { font-size: var(--text-xs); color: var(--muted); }
-.t-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; flex-wrap: wrap; }
-.t-label { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-dim); width: 132px; flex-shrink: 0; }
-.t-hint { font-size: var(--text-2xs); color: var(--faint); flex: 1; min-width: 200px; }
 .ps-save {
   margin-top: 7px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700;
   color: #06281a; background: var(--green); border: 1px solid var(--green); border-radius: var(--radius);
-  padding: 6px 16px;
+  padding: 6px 16px; transition: background 0.15s, opacity 0.15s;
 }
+.ps-save:disabled { opacity: 0.55; }
+.ps-save.err { background: var(--red); border-color: var(--red); color: #fff; }
 .ps-clear { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--amber); background: var(--amber-soft); border: 1px solid rgba(251,191,36,.4); border-radius: var(--radius); padding: 3px 10px; }
 .ps-empty { color: var(--faint); font-size: var(--text-sm); padding: 8px 0; }
 

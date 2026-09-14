@@ -59,6 +59,11 @@ type TimingPrefs struct {
 	// future wall/monitor feature; the grid preview UI is currently disabled
 	// so nothing consumes it yet. Default 8000. Range [1000, 60000].
 	GridPreviewMs int `json:"grid_preview_ms,omitempty"`
+	// AutoMarkReadMs is how long a finished (done) pane's terminal may stay
+	// open before the client auto-marks it read, moving it to idle. Purely a
+	// client-side timer — the relay only validates and stores it.
+	// Default 10000. Range [1000, 600000].
+	AutoMarkReadMs int `json:"auto_mark_read_ms,omitempty"`
 }
 
 // Bounds for TimingPrefs fields when explicitly set. Exported for the same
@@ -74,6 +79,8 @@ const (
 	ReconnectDelayMaxMs = 30000
 	GridPreviewMinMs    = 1000
 	GridPreviewMaxMs    = 60000
+	AutoMarkReadMinMs   = 1000
+	AutoMarkReadMaxMs   = 600000
 )
 
 // normMs keeps 0 ("use default") and in-range values; anything else resets to
@@ -93,6 +100,7 @@ func (v *TimingPrefs) Normalize() {
 	v.HostRetryMs = normMs(v.HostRetryMs, HostRetryMinMs, HostRetryMaxMs)
 	v.ReconnectDelayMs = normMs(v.ReconnectDelayMs, ReconnectDelayMinMs, ReconnectDelayMaxMs)
 	v.GridPreviewMs = normMs(v.GridPreviewMs, GridPreviewMinMs, GridPreviewMaxMs)
+	v.AutoMarkReadMs = normMs(v.AutoMarkReadMs, AutoMarkReadMinMs, AutoMarkReadMaxMs)
 }
 
 // Normalize repairs out-of-range persisted values (load path).
@@ -302,6 +310,7 @@ func (v TimingPrefs) validate() error {
 		{"timing.host_retry_ms", v.HostRetryMs, HostRetryMinMs, HostRetryMaxMs},
 		{"timing.reconnect_delay_ms", v.ReconnectDelayMs, ReconnectDelayMinMs, ReconnectDelayMaxMs},
 		{"timing.grid_preview_ms", v.GridPreviewMs, GridPreviewMinMs, GridPreviewMaxMs},
+		{"timing.auto_mark_read_ms", v.AutoMarkReadMs, AutoMarkReadMinMs, AutoMarkReadMaxMs},
 	}
 	for _, c := range checks {
 		if c.ms != 0 && (c.ms < c.min || c.ms > c.max) {

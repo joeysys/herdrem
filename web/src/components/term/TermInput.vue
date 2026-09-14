@@ -8,6 +8,7 @@ import { useQuickPopover } from '../../composables/useQuickPopover'
 import {
   detectMenu, isCursorAgent, cursorKeySequence, isStickyChoice, menuLabel,
 } from '../../utils/menu'
+import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import type { Pane } from '../../api/types'
 import ArrowPad from './ArrowPad.vue'
 
@@ -22,6 +23,7 @@ const text = ref('')
 const cmdInputEl = ref<HTMLInputElement | null>(null)
 const showArrows = ref(false)
 const arrowBtnEl = ref<HTMLElement | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
 const arrowPos = ref({ left: -1, right: -1, bottom: 0 })
 const isDesktop = ref(typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches)
 
@@ -29,7 +31,10 @@ function toggleArrows() {
   showArrows.value = !showArrows.value
   if (showArrows.value && arrowBtnEl.value) {
     const r = arrowBtnEl.value.getBoundingClientRect()
-    const bottom = window.innerHeight - r.top + 8
+    // Anchor above the whole input block (not the button's top edge) so the
+    // pad clears the command row being typed into, with a small visual gap.
+    const top = rootEl.value?.getBoundingClientRect().top ?? r.top
+    const bottom = window.innerHeight - top + 12
     if (isDesktop.value) {
       arrowPos.value = { left: r.left, right: -1, bottom }
     } else {
@@ -86,14 +91,6 @@ function qpFill(text: string) {
   haptic()
   onFill(text)
   qp.close()
-  // Auto-focus input at end of text so Enter fills, Ctrl+Enter quick-sends
-  nextTick(() => {
-    const el = cmdInputEl.value
-    if (!el) return
-    el.focus()
-    const len = el.value.length
-    el.setSelectionRange(len, len)
-  })
 }
 function qpEdit() {
   emit('edit')
@@ -260,21 +257,40 @@ function quickSend() {
 }
 
 function onFill(t: string) {
-  text.value = t
+  // Skill/command chips prepend: "cmd <existing>" keeps the typed context.
+  insertIntoInput(t, 'prepend')
   filledText.value = '' // chip fill doesn't send to term, so disarm
 }
 
-// react to fill requests from the todo panel (or elsewhere)
+// Merge fill text into the input: 'append' inserts at the cursor (end when
+// the input isn't focused) with space padding; 'prepend' puts it at the front
+// with a trailing space. Focus lands after the inserted text.
+function insertIntoInput(snippet: string, kind: 'append' | 'prepend') {
+  const el = cmdInputEl.value
+  const r =
+    kind === 'prepend'
+      ? prependSnippet(text.value, snippet)
+      : insertSnippet(text.value, el ? el.selectionStart : null, snippet)
+  text.value = r.text
+  nextTick(() => {
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(r.cursor, r.cursor)
+  })
+}
+
+// react to fill requests from the todo panel / file browser (append into the
+// current input instead of replacing it)
 watch(
   () => term.fillSignal,
   (sig) => {
-    if (sig) text.value = sig.text
+    if (sig) insertIntoInput(sig.text, sig.kind)
   },
 )
 </script>
 
 <template>
-  <div class="term-input">
+  <div ref="rootEl" class="term-input">
     <div v-if="isBlocked" class="approve-bar" role="group" aria-label="Approve agent">
       <span class="approve-label">waiting</span>
       <button

@@ -587,6 +587,11 @@ onMounted(() => {
       }
     }
     if (msg.type === 'prefs' || msg.type === 'prefs_updated') prefs.setPrefs(msg.prefs);
+    if (msg.type === 'prefs_updated') prefs.confirmSaves(msg.req_id);
+    if (msg.type === 'error' && msg.op === 'prefs_set') {
+      prefs.failSaves(msg.message, msg.req_id);
+      notify.push({ message: `save failed: ${msg.message}`, type: 'info' });
+    }
     if (msg.type === 'file_listing') files.setListing(msg.path, msg.entries || [], msg.req_id);
     if (msg.type === 'file_content') files.setContent(msg);
     if (msg.type === 'git_diff_content') diff.setDiffContent(msg);

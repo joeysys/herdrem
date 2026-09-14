@@ -96,16 +96,17 @@ func (s *Service) handlePrefsSet(ctx context.Context, conn *websocket.Conn, data
 		return
 	}
 	if msg.Section == "" {
-		s.sendErrorKey(ctx, conn, "prefs_set", "missing section", "invalid")
+		s.sendErrorKeyReq(ctx, conn, "prefs_set", "missing section", "invalid", msg.ReqID)
 		return
 	}
 	if err := s.prefsStore.SetSection(msg.Section, msg.Data); err != nil {
-		s.sendErrorKey(ctx, conn, "prefs_set", err.Error(), "invalid")
+		s.sendErrorKeyReq(ctx, conn, "prefs_set", err.Error(), "invalid", msg.ReqID)
 		return
 	}
 	s.hub.BroadcastJSON(protocol.PrefsSnapshot{
 		Type:  "prefs_updated",
 		Prefs: s.prefsStore.Get(),
+		ReqID: msg.ReqID,
 	})
 }
 

@@ -94,7 +94,7 @@ func TestPrefsStore_TimingSection(t *testing.T) {
 	}
 
 	// valid set + persisted across reload
-	if err := s.SetSection("timing", json.RawMessage(`{"snapshot_poll_ms":5000,"enrich_grace_ms":60000,"host_retry_ms":45000,"reconnect_delay_ms":5000,"grid_preview_ms":10000}`)); err != nil {
+	if err := s.SetSection("timing", json.RawMessage(`{"snapshot_poll_ms":5000,"enrich_grace_ms":60000,"host_retry_ms":45000,"reconnect_delay_ms":5000,"grid_preview_ms":10000,"auto_mark_read_ms":15000}`)); err != nil {
 		t.Fatal(err)
 	}
 	s2, err := NewPrefsStore(s.filePath)
@@ -103,7 +103,7 @@ func TestPrefsStore_TimingSection(t *testing.T) {
 	}
 	got := s2.Get().Timing
 	if got.SnapshotPollMs != 5000 || got.EnrichGraceMs != 60000 || got.HostRetryMs != 45000 ||
-		got.ReconnectDelayMs != 5000 || got.GridPreviewMs != 10000 {
+		got.ReconnectDelayMs != 5000 || got.GridPreviewMs != 10000 || got.AutoMarkReadMs != 15000 {
 		t.Fatalf("reloaded timing = %+v", got)
 	}
 
@@ -113,6 +113,7 @@ func TestPrefsStore_TimingSection(t *testing.T) {
 		`{"enrich_grace_ms":1000}`, `{"enrich_grace_ms":600001}`,
 		`{"host_retry_ms":4999}`, `{"reconnect_delay_ms":100}`,
 		`{"grid_preview_ms":999}`, `{"snapshot_poll_ms":-5}`,
+		`{"auto_mark_read_ms":999}`, `{"auto_mark_read_ms":600001}`,
 	} {
 		if err := s.SetSection("timing", json.RawMessage(bad)); err == nil {
 			t.Errorf("timing %s should be rejected", bad)

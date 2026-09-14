@@ -8,11 +8,13 @@ import { useDiffStore } from '../../stores/diff'
 import { useTodoStore } from '../../stores/todo'
 import { usePrefsStore } from '../../stores/prefs'
 import { useTermZoom } from '../../composables/useTermZoom'
+import { useDoneAutoMark } from '../../composables/useDoneAutoMark'
 import { ws } from '../../api/ws'
 import TermInput from './TermInput.vue'
 import ShellKeys from './ShellKeys.vue'
 import AnsiStream from './AnsiStream.vue'
 import { tailWindow, computeTailWindow } from '../../utils/tailWindow'
+import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import TodoPanel from '../todo/TodoPanel.vue'
 import type { TodoBinding } from '../../api/types'
 
@@ -166,16 +168,35 @@ function shellSubmit() {
   shellText.value = ''
 }
 
-function onShellFill(t: string) {
-  shellText.value = t
+// Merge fill text into the shell input: 'prepend' (quick-command chips) puts
+// the command at the front with a trailing space; 'append' (todo items, file
+// paths) inserts at the cursor with space padding. Focus lands after it.
+function fillShellInput(snippet: string, kind: 'append' | 'prepend') {
+  const el = shellInputEl.value
+  const r = kind === 'prepend'
+    ? prependSnippet(shellText.value, snippet)
+    : insertSnippet(shellText.value, el ? el.selectionStart : null, snippet)
+  shellText.value = r.text
   nextTick(() => {
-    const el = shellInputEl.value
     if (!el) return
     el.focus()
-    const len = el.value.length
-    el.setSelectionRange(len, len)
+    el.setSelectionRange(r.cursor, r.cursor)
   })
 }
+
+function onShellFill(t: string) {
+  fillShellInput(t, 'prepend')
+}
+
+// Todo/path fills (fillSignal) — TermInput only exists on agent panes, so the
+// shell inline input consumes them here.
+watch(
+  () => term.fillSignal,
+  (sig) => {
+    if (!sig || !isShell.value) return
+    fillShellInput(sig.text, sig.kind)
+  },
+)
 
 function focusShellInput() {
   shellInputEl.value?.focus()
@@ -236,6 +257,14 @@ function markDone() {
   if (!pane.value || statusBucket.value !== 'done') return
   ws.send({ type: 'mark_pane_read', pane_id: pane.value.pane_id })
 }
+
+// Viewing a finished pane for auto_mark_read_ms auto-marks it read → idle.
+// paneId is passed so a done→done switch on a reused view (mobile) restarts
+// the delay for the new pane instead of firing the old pane's timer.
+const isDone = computed(() => statusBucket.value === 'done')
+const autoMarkReadMs = computed(() => prefs.autoMarkReadMs)
+const paneIdentity = computed(() => props.paneId)
+useDoneAutoMark(isDone, autoMarkReadMs, paneIdentity, markDone)
 
 function onTodoFill(text: string) {
   term.requestFill(text)

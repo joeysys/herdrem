@@ -66,7 +66,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   const stickBottom = ref(true)
   const lastReadAt = ref(0)
   const fullscreen = ref(false)
-  const fillSignal = ref<{ text: string; ts: number } | null>(null)
+  const fillSignal = ref<{ text: string; ts: number; kind: 'append' | 'prepend' } | null>(null)
   const inputDrafts = ref<Record<string, string>>({})
 
   // Local content cache: paneId → { text, ts }
@@ -104,24 +104,16 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   // requestFill asks the terminal input to insert text (from todo/quick chips).
-  function requestFill(text: string) {
-    fillSignal.value = { text, ts: Date.now() }
+  // kind 'append' inserts at the cursor with space padding; 'prepend' puts the
+  // text at the front followed by a space (command-style chips).
+  function requestFill(text: string, kind: 'append' | 'prepend' = 'append') {
+    fillSignal.value = { text, ts: Date.now(), kind }
   }
 
-  // fillPath appends or sets a file/directory path in the active pane's terminal input
+  // fillPath inserts a file/directory path into the active pane's terminal
+  // input at the cursor (the consumer handles spacing and draft persistence).
   function fillPath(path: string) {
-    const paneId = activePane.value
-    const current = paneId ? getInputDraft(paneId) : ''
-    let next = ''
-    if (!current) {
-      next = path
-    } else if (/\s$/.test(current)) {
-      next = current + path
-    } else {
-      next = current + ' ' + path
-    }
-    if (paneId) setInputDraft(paneId, next)
-    fillSignal.value = { text: next, ts: Date.now() }
+    fillSignal.value = { text: path, ts: Date.now(), kind: 'append' }
   }
 
   function getInputDraft(paneId: string): string {

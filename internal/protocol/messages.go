@@ -69,6 +69,7 @@ type TodosSnapshot struct {
 type PrefsSnapshot struct {
 	Type  string      `json:"type"` // "prefs" | "prefs_updated"
 	Prefs interface{} `json:"prefs"`
+	ReqID string      `json:"req_id,omitempty"` // echoed from the triggering PrefsSet
 }
 
 // FileContent carries file preview content.
@@ -193,6 +194,7 @@ type PrefsSet struct {
 	Type    string          `json:"type"`
 	Section string          `json:"section"` // "skills" | "shell_cmds" | "kind_overrides" | "prefix_by_agent" | "agent_cmds" | "terminal"
 	Data    json.RawMessage `json:"data"`
+	ReqID   string          `json:"req_id,omitempty"` // client-generated; echoed in prefs_updated / error
 }
 
 // KindOverrideSet marks a pane as agent with a display name.

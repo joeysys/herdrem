@@ -560,3 +560,75 @@ func TestHandleReadPanePollBypassesCache(t *testing.T) {
 		t.Fatalf("poll response must be unversioned so the client merges the tail, got rev=%v", reply["rev"])
 	}
 }
+
+// prefs_set carries a client-generated req_id; the relay must echo it on the
+// prefs_updated broadcast and on errors so the client can correlate acks of
+// multi-section saves.
+func TestHandleMessage_PrefsSetEchoesReqID(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := hub.New(logger)
+	client := &herdr.FakeClient{}
+
+	prefsStore, err := store.NewPrefsStore(t.TempDir() + "/prefs.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(client, nil, nil, prefsStore, nil, h, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go h.Run(ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Production path: registers the conn so broadcasts reach it.
+		h.HandleConn(ctx, conn, "", svc.HandleMessage)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	read := func() map[string]interface{} {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply map[string]interface{}
+		if err := json.Unmarshal(data, &reply); err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+
+	// Success path: prefs_updated echoes the request's req_id.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"prefs_set","section":"terminal","data":{"poll_ms":6000},"req_id":"save-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	reply := read()
+	if reply["type"] != "prefs_updated" {
+		t.Fatalf("expected prefs_updated, got %v", reply)
+	}
+	if reply["req_id"] != "save-1" {
+		t.Fatalf("expected req_id echo save-1, got %v", reply["req_id"])
+	}
+
+	// Failure path: the error echoes the req_id of the rejected request.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"prefs_set","section":"timing","data":{"snapshot_poll_ms":7},"req_id":"save-2"}`)); err != nil {
+		t.Fatal(err)
+	}
+	reply = read()
+	if reply["type"] != "error" || reply["op"] != "prefs_set" {
+		t.Fatalf("expected prefs_set error, got %v", reply)
+	}
+	if reply["req_id"] != "save-2" {
+		t.Fatalf("expected req_id echo save-2, got %v", reply["req_id"])
+	}
+}

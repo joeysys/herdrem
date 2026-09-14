@@ -19,6 +19,7 @@ const { start, stop } = useKeyRepeat()
 
 const showArrows = ref(false)
 const arrowBtnEl = ref<HTMLElement | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
 const arrowPos = ref({ left: -1, right: -1, bottom: 0 })
 const isDesktop = ref(typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches)
 const agentName = computed(() => String(props.pane?.display_agent || props.pane?.agent || ''))
@@ -47,7 +48,11 @@ function toggleArrows() {
   showArrows.value = !showArrows.value
   if (showArrows.value && arrowBtnEl.value) {
     const r = arrowBtnEl.value.getBoundingClientRect()
-    const bottom = window.innerHeight - r.top + 8
+    // Anchor above the whole key bar. On shell panes the inline input line
+    // sits at the bottom of the scroll area just above this bar — ~two line
+    // heights of gap keeps the pad from covering the line being typed.
+    const top = rootEl.value?.getBoundingClientRect().top ?? r.top
+    const bottom = window.innerHeight - top + 44
     if (isDesktop.value) {
       arrowPos.value = { left: r.left, right: -1, bottom }
     } else {
@@ -156,7 +161,7 @@ function onArrowKey(key: string) {
 </script>
 
 <template>
-  <div class="term-input">
+  <div ref="rootEl" class="term-input">
     <div v-if="isBlocked" class="approve-bar" role="group" aria-label="Approve">
       <span class="approve-label">waiting</span>
       <button

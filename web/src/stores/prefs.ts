@@ -14,6 +14,7 @@ export const DEFAULT_ENRICH_GRACE_MS = 30000
 export const DEFAULT_HOST_RETRY_MS = 30000
 export const DEFAULT_RECONNECT_DELAY_MS = 2000
 export const DEFAULT_GRID_PREVIEW_MS = 8000
+export const DEFAULT_AUTO_MARK_READ_MS = 10000
 
 // prefs store mirrors the relay's prefs (skills / agent_cmds / shell_cmds / kind_overrides / prefix_by_agent).
 export const usePrefsStore = defineStore('prefs', () => {
@@ -28,6 +29,7 @@ export const usePrefsStore = defineStore('prefs', () => {
   const hostRetryMs = ref(DEFAULT_HOST_RETRY_MS)
   const reconnectDelayMs = ref(DEFAULT_RECONNECT_DELAY_MS)
   const gridPreviewMs = ref(DEFAULT_GRID_PREVIEW_MS)
+  const autoMarkReadMs = ref(DEFAULT_AUTO_MARK_READ_MS)
 
   function setPrefs(p: Prefs) {
     if (p.skills) skills.value = p.skills
@@ -41,37 +43,71 @@ export const usePrefsStore = defineStore('prefs', () => {
     hostRetryMs.value = p.timing?.host_retry_ms || DEFAULT_HOST_RETRY_MS
     reconnectDelayMs.value = p.timing?.reconnect_delay_ms || DEFAULT_RECONNECT_DELAY_MS
     gridPreviewMs.value = p.timing?.grid_preview_ms || DEFAULT_GRID_PREVIEW_MS
+    autoMarkReadMs.value = p.timing?.auto_mark_read_ms || DEFAULT_AUTO_MARK_READ_MS
     ws.setReconnectDelay(reconnectDelayMs.value)
   }
 
+  // Sections whose prefs_set has been sent but not yet confirmed by the
+  // relay's prefs_updated broadcast. Drives save-button feedback. Pending is
+  // tracked per request id: a multi-section save (timing writes terminal +
+  // timing) must wait for every ack, another client's broadcast must not
+  // clear our pending, and a late failure must still surface as error.
+  const pendingSaves = ref<Set<string>>(new Set())
+  const pendingByReq = new Map<string, string[]>()
+  const saveError = ref('')
+  let saveSeq = 0
+
+  function rebuildPending() {
+    pendingSaves.value = new Set(Array.from(pendingByReq.values()).flat())
+  }
+
   function setSection(section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing', data: unknown) {
-    const msg: PrefsSet = { type: 'prefs_set', section, data }
-    ws.send(msg)
+    const reqId = `save-${Date.now().toString(36)}-${++saveSeq}`
+    const msg: PrefsSet = { type: 'prefs_set', section, data, req_id: reqId }
+    if (!ws.send(msg)) return false
+    saveError.value = ''
+    pendingByReq.set(reqId, [section])
+    rebuildPending()
+    return true
+  }
+
+  /** A prefs_updated echoing a save's req_id confirms that request's sections. */
+  function confirmSaves(reqId?: string) {
+    if (!reqId) return // unattributed broadcast can't prove a pending save landed
+    if (pendingByReq.delete(reqId)) rebuildPending()
+  }
+
+  /** Server rejected a prefs_set — surface the reason to the save buttons. */
+  function failSaves(message: string, reqId?: string) {
+    if (reqId) pendingByReq.delete(reqId)
+    else pendingByReq.clear()
+    rebuildPending()
+    saveError.value = message
   }
 
   function setShellCmds(list: string[]) {
     shellCmds.value = list
-    setSection('shell_cmds', list)
+    return setSection('shell_cmds', list)
   }
 
   function setAgentCmds(list: string[]) {
     agentCmds.value = list
-    setSection('agent_cmds', list)
+    return setSection('agent_cmds', list)
   }
 
   function setSkills(list: Skill[]) {
     skills.value = list
-    setSection('skills', list)
+    return setSection('skills', list)
   }
 
   function setPrefixByAgent(map: Record<string, string>) {
     prefixByAgent.value = map
-    setSection('prefix_by_agent', map)
+    return setSection('prefix_by_agent', map)
   }
 
   function setTermPollMs(ms: number) {
     termPollMs.value = ms || DEFAULT_TERM_POLL_MS
-    setSection('terminal', { poll_ms: ms })
+    return setSection('terminal', { poll_ms: ms })
   }
 
   /** Save the whole timing section; patch keys are TimingPrefs field names. */
@@ -82,6 +118,7 @@ export const usePrefsStore = defineStore('prefs', () => {
       host_retry_ms: hostRetryMs.value,
       reconnect_delay_ms: reconnectDelayMs.value,
       grid_preview_ms: gridPreviewMs.value,
+      auto_mark_read_ms: autoMarkReadMs.value,
       ...patch,
     }
     snapshotPollMs.value = merged.snapshot_poll_ms || DEFAULT_SNAPSHOT_POLL_MS
@@ -89,7 +126,8 @@ export const usePrefsStore = defineStore('prefs', () => {
     hostRetryMs.value = merged.host_retry_ms || DEFAULT_HOST_RETRY_MS
     reconnectDelayMs.value = merged.reconnect_delay_ms || DEFAULT_RECONNECT_DELAY_MS
     gridPreviewMs.value = merged.grid_preview_ms || DEFAULT_GRID_PREVIEW_MS
-    setSection('timing', merged)
+    autoMarkReadMs.value = merged.auto_mark_read_ms || DEFAULT_AUTO_MARK_READ_MS
+    return setSection('timing', merged)
   }
 
   /** resolve the prefix for a given agent name from prefix_by_agent config */
@@ -117,7 +155,8 @@ export const usePrefsStore = defineStore('prefs', () => {
 
   return {
     skills, agentCmds, shellCmds, kindOverrides, prefixByAgent, termPollMs,
-    snapshotPollMs, enrichGraceMs, hostRetryMs, reconnectDelayMs, gridPreviewMs,
+    snapshotPollMs, enrichGraceMs, hostRetryMs, reconnectDelayMs, gridPreviewMs, autoMarkReadMs,
+    pendingSaves, saveError, confirmSaves, failSaves,
     setPrefs, setSection, setShellCmds, setAgentCmds, setSkills, setPrefixByAgent, setTermPollMs, setTiming,
     prefixForAgent, resolveSkill, kindOverrideFor,
   }
