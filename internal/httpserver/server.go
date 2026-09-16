@@ -150,7 +150,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFile serves static files (HTML, CSS, JS, images, etc.) via HTTP stream.
-// GET /file?path=<path>&host=<host>&token=<token>.
+// GET /file?path=<path>&host=<host> (session cookie, Bearer, or WS subprotocol).
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	if s.files == nil {
 		http.Error(w, "files not available", http.StatusServiceUnavailable)
@@ -303,12 +303,26 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	filePath := "/" + strings.TrimPrefix(filePart, "/")
 
 	// Force the response into a sandboxed context even if loaded via
-	// top-level navigation. This prevents scripts in previewed HTML from
-	// executing in the Relay's origin when the capability allows access.
-	// connect-src 'none' keeps a previewed script from beaconing the
-	// capability-bearing URL out (fetch/XHR/WebSocket/sendBeacon); the IP
-	// binding is the primary replay mitigation.
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; connect-src 'none'")
+	// top-level navigation. The preview is fully static — bare `sandbox`
+	// grants no capabilities, so no script may run. That is what makes the
+	// capability in the URL safe: any credential a script could read
+	// (location.href, document.baseURI, element.src) is exfiltratable via
+	// frame self-navigation, which no CSP directive covers, so the only
+	// complete fix is removing script execution. Static markup cannot read
+	// its own URL and cannot embed a per-view minted capability it does
+	// not know. The deny-by-default CSP stays as defense in depth:
+	// 'self' never matches inside an opaque-origin document, so the
+	// request's own scheme://host is emitted explicitly to keep relative
+	// subresources (CSS/images/fonts) loading under this origin + data:.
+	proto := "http"
+	if r.TLS != nil || (isLoopback(r.RemoteAddr) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
+		proto = "https"
+	}
+	self := proto + "://" + r.Host
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; "+
+		"style-src 'unsafe-inline' "+self+"; "+
+		"img-src "+self+" data:; media-src "+self+" data:; font-src "+self+" data:; "+
+		"connect-src 'none'; form-action 'none'; base-uri 'none'")
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := s.files.ServeStream(w, r, host, filePath); err != nil {
@@ -570,6 +584,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	tokenAuthed := s.cfg.Token != "" && auth.Check(r, s.cfg.Token)
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: tokenAuthed,
+		// The browser carries the token as a Sec-WebSocket-Protocol value;
+		// a WHATWG-conformant client fails the handshake when an offered
+		// subprotocol is not echoed in the 101, even though auth already
+		// passed above. Echo back whichever offered value authenticated.
+		Subprotocols: auth.MatchSubprotocols(r, s.cfg.Token),
 	})
 	if err != nil {
 		s.logger.Error("ws accept error", "err", err)
@@ -589,6 +608,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
 			"pane-create", "incremental-terminal", "git-diff",
 		},
+	}
+	if s.tunnels != nil && s.tunnels.DirectAllowed() {
+		hello.Features = append(hello.Features, "tunnel-direct")
 	}
 	if data, err := json.Marshal(hello); err == nil {
 		_ = conn.Write(ctx, websocket.MessageText, data)

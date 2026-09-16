@@ -87,8 +87,10 @@ unset herdrem_bin_dir herdr_bin_dir
 The user unit requires this file. The PATH line above is stored in the
 file, so it remains available after logout, linger, or reboot. It defaults to
 `HERDREM_BIND=127.0.0.1` (loopback only); change to `HERDREM_BIND=0.0.0.0` for LAN access.
-Only a same-origin page opened through `localhost`, `127.0.0.1`, or `::1` may omit the token;
-LAN addresses, tunnels, and other origins must provide `HERDREM_TOKEN` when prompted by the PWA.
+If `HERDREM_TOKEN` is set (recommended for any install that is not throwaway
+dev), the PWA prompts for it even on `http://localhost:8766`. Leave the token
+empty only for local same-origin development. LAN, `--tunnel`, and other
+origins always need the token.
 You can view the saved token at any time by running:
 
 ```bash
@@ -189,24 +191,31 @@ See [docker-compose.yml](../docker-compose.yml) for the Web-only container.
 
 ## Security notes
 
-- **Always set `HERDREM_TOKEN`** for any non-loopback exposure or any
-  connection that is not same-origin `localhost`/`127.0.0.1`/`::1`.
+- **Always set `HERDREM_TOKEN`** for anything that is not throwaway local
+  dev. Once it is set, localhost needs it too (the PWA will prompt). An empty
+  token is accepted only for same-origin `localhost`/`127.0.0.1`/`::1` when
+  no token is configured at all.
 - The systemd unit defaults to `HERDREM_BIND=127.0.0.1` (loopback only).
   Set `HERDREM_BIND=0.0.0.0` in the env file for LAN access — the relay
   refuses to start with a non-loopback bind and an empty token.
+- `--tunnel` also requires `HERDREM_TOKEN`.
 - The systemd unit uses `--require-herdr` so it fails loudly if the
   `herdr` CLI is not installed, instead of silently serving fake data.
 - The env file is required (not optional) — the user unit fails to start
   without it. It should be `chmod 600` and readable only by the user.
+  `~/.config/herdrem` is created `0700`.
 - The user unit runs as the current login user, so it can access that
   user's Herdr socket/session.
-- The token is required for LAN, tunnel, cross-origin WebSocket, and
-  non-browser connections.
-- **Token persistence**: Relay tokens are held in tab memory only and are never
-  stored in `localStorage`. On same-origin connections, a successful login sets
-  an HttpOnly session cookie that allows page reloads without re-entering the token.
-  Connecting to cross-origin relays or clearing cookies requires entering the token
-  again in that tab session.
+- **Token persistence**: the token stays in tab memory, never `localStorage`.
+  Same-origin login mints an HttpOnly **opaque session** cookie (not the raw
+  token). Reloads reuse it; clear site data or a new token revokes it.
+  The PWA never puts the token in a URL; query `?token=` is not accepted.
+- **Port forwards** (PWA tunnel panel): only `5173,3000,8080,4173` plus
+  `HERDREM_TUNNEL_PORTS` (singles or `8000-8100` ranges). Ports `<1024` are
+  never forwarded. `direct` (no gate) stays off unless
+  `HERDREM_ALLOW_DIRECT_TUNNEL=1`. At most `HERDREM_TUNNEL_MAX` (default 8)
+  forwards at once. See [README configuration](../README.md#configuration).
+- Repeated failed logins from a remote IP return HTTP 429.
 - **Docker vs host boundary**: Docker serves only the Web/PWA. The host systemd
   service is the only supported relay deployment and is where the real `herdr`
   CLI, user socket, agents, and relay token live.

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useConnectionStore } from '../../stores/connection'
 import { useTunnelsStore } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
@@ -11,6 +11,13 @@ const { haptic } = useHaptic()
 const inputPort = ref(5173)
 const authMode = ref<'token_gate' | 'basic_auth' | 'direct'>('token_gate')
 const inputPin = ref('')
+
+watch(
+  () => conn.hasFeature('tunnel-direct'),
+  (ok) => {
+    if (!ok && authMode.value === 'direct') authMode.value = 'token_gate'
+  },
+)
 
 const copiedId = ref<string | null>(null)
 
@@ -90,8 +97,11 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
             <select v-model="authMode">
               <option value="token_gate">🔒 Token Gate (Default - Web Auto-Auth)</option>
               <option value="basic_auth">🔑 Basic Auth (Native Browser Popup)</option>
-              <option value="direct">⚠ No Auth — public, anyone with the URL</option>
+              <option v-if="conn.hasFeature('tunnel-direct')" value="direct">⚠ No Auth — public, anyone with the URL</option>
             </select>
+            <p class="tp-sub" style="margin-top:6px">
+              Allowed ports: 5173, 3000, 8080, 4173 (plus <code>HERDREM_TUNNEL_PORTS</code> singles or ranges like <code>8000-8100</code>; ports below 1024 are blocked).
+            </p>
             <p v-if="authMode === 'direct'" class="tp-danger-note">
               This publishes <code>localhost:{{ inputPort }}</code> to the public internet
               with <strong>no authentication</strong>. It does not use Cloudflare Access.

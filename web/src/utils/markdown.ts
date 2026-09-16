@@ -24,14 +24,26 @@ function decodeEntities(s: string): string {
 const LINK_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 const IMG_SCHEMES = new Set(['http:', 'https:'])
 
-// safeUrl allows scheme-less URLs (relative paths, //host, #anchor) plus a
-// whitelist of schemes. Images additionally allow data:image/… sources.
-function safeUrl(u: string, kind: 'link' | 'img'): boolean {
-  const d = decodeEntities(u).trim()
-  if (kind === 'img' && /^data:image\//i.test(d)) return true
+// stripUrlIgnorables removes characters the WHATWG URL parser discards before
+// scheme resolution — ASCII C0 controls, DEL, and whitespace. Scheme checks
+// must run on the stripped value or "\x01javascript:" slips through as a
+// scheme-less relative URL that the browser then re-parses as javascript:.
+function stripUrlIgnorables(s: string): string {
+  return s.replace(/[\x00-\x20\x7F]/g, '')
+}
+
+// safeUrl returns the normalized URL when it is safe to emit, else null.
+// Scheme-less URLs (relative paths, //host, #anchor) plus a whitelist of
+// schemes are allowed; images additionally allow data:image/… sources.
+// The returned value is entity-decoded and control-stripped; callers must
+// re-escape it into the attribute so the emitted markup parses to the same
+// URL the check validated.
+function safeUrl(u: string, kind: 'link' | 'img'): string | null {
+  const d = stripUrlIgnorables(decodeEntities(u))
+  if (kind === 'img' && /^data:image\//i.test(d)) return d
   const m = d.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)
-  if (!m) return true
-  return (kind === 'img' ? IMG_SCHEMES : LINK_SCHEMES).has(m[1].toLowerCase() + ':')
+  if (!m) return d
+  return (kind === 'img' ? IMG_SCHEMES : LINK_SCHEMES).has(m[1].toLowerCase() + ':') ? d : null
 }
 
 function inlineMd(text: string): string {
@@ -42,10 +54,14 @@ function inlineMd(text: string): string {
     codes.push(c)
     return `${codes.length - 1}`
   })
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) =>
-    safeUrl(src, 'img') ? `<img class="md-img" alt="${alt}" src="${src}" />` : alt)
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, href) =>
-    safeUrl(href, 'link') ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>` : label)
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) => {
+    const u = safeUrl(src, 'img')
+    return u ? `<img class="md-img" alt="${alt}" src="${esc(u)}" />` : alt
+  })
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, href) => {
+    const u = safeUrl(href, 'link')
+    return u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${label}</a>` : label
+  })
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
   s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>')

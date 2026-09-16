@@ -42,8 +42,8 @@ describe('extractRelayCredentials', () => {
 describe('relay file URL helpers', () => {
   it('normalizes the relay base and encodes one file URL consistently', () => {
     expect(relayHttpBase('ws://relay.example/ws/')).toBe('http://relay.example')
-    expect(relayFileUrl('wss://relay.example/ws', '/a b.txt', 'remote', 'secret', true)).toBe(
-      'https://relay.example/file?path=%2Fa+b.txt&host=remote&token=secret&download=1',
+    expect(relayFileUrl('wss://relay.example/ws', '/a b.txt', 'remote', true)).toBe(
+      'https://relay.example/file?path=%2Fa+b.txt&host=remote&download=1',
     )
   })
 

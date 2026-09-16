@@ -82,9 +82,10 @@ func TestWSSameOriginLocalhostRequiresCredentialWithToken(t *testing.T) {
 		}
 		// The same dial carrying the token must succeed.
 		ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn, _, err := websocket.Dial(ctx, wsURL+"/ws?token=s3cret", &websocket.DialOptions{
-			HTTPHeader: map[string][]string{"Origin": {origin}},
-			Host:       host,
+		conn, _, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
+			HTTPHeader:   map[string][]string{"Origin": {origin}},
+			Host:         host,
+			Subprotocols: []string{"s3cret"},
 		})
 		ctxCancel()
 		if err != nil {
@@ -171,11 +172,18 @@ func TestWSValidTokenAuthorizesAnyOrigin(t *testing.T) {
 
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer ctxCancel()
-	conn, _, err := websocket.Dial(ctx, wsURL+"/ws?token=s3cret", &websocket.DialOptions{
-		HTTPHeader: map[string][]string{"Origin": {"http://localhost:8765"}},
+	conn, _, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
+		HTTPHeader:   map[string][]string{"Origin": {"http://localhost:8765"}},
+		Subprotocols: []string{"s3cret"},
 	})
 	if err != nil {
 		t.Fatalf("cross-origin dial with valid token failed: %v", err)
+	}
+	// The server must echo an offered subprotocol it authenticated: a
+	// WHATWG-conformant client (browsers, undici) fails the handshake when
+	// the 101 omits Sec-WebSocket-Protocol.
+	if conn.Subprotocol() != "s3cret" {
+		t.Errorf("negotiated subprotocol = %q, want %q", conn.Subprotocol(), "s3cret")
 	}
 	conn.Close(websocket.StatusNormalClosure, "")
 
@@ -195,13 +203,32 @@ func TestWSSubprotocolTokenAuthenticates(t *testing.T) {
 
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer ctxCancel()
+	want := "herdrem." + base64.RawURLEncoding.EncodeToString([]byte(tok))
 	conn, _, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
-		Subprotocols: []string{"herdrem." + base64.RawURLEncoding.EncodeToString([]byte(tok))},
+		Subprotocols: []string{want},
 	})
 	if err != nil {
 		t.Fatalf("subprotocol-authenticated dial failed: %v", err)
 	}
+	// Browsers require the offered subprotocol echoed in the 101 response;
+	// without it the handshake fails even though auth succeeded.
+	if conn.Subprotocol() != want {
+		t.Errorf("negotiated subprotocol = %q, want %q", conn.Subprotocol(), want)
+	}
 	conn.Close(websocket.StatusNormalClosure, "")
+}
+
+// The relay token must not authenticate from the URL. A configured relay with
+// ?token=<correct> in the query must still refuse the upgrade.
+func TestWSQueryTokenDoesNotAuthenticate(t *testing.T) {
+	wsURL, _, cancel := wsOriginServer(t, config.Config{Token: "s3cret"})
+	defer cancel()
+
+	if ok, code := dialWS(t, wsURL+"/ws?token=s3cret", wsURL); ok {
+		t.Fatal("query ?token= authenticated the WS upgrade")
+	} else if code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
+	}
 }
 
 // Regression guard for the subtle part of the fix: auth.Check returns true for
@@ -214,8 +241,9 @@ func TestWSEmptyTokenDoesNotDisableOriginCheck(t *testing.T) {
 	// A bogus token must not buy cross-origin access on a token-less relay.
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer ctxCancel()
-	conn, resp, err := websocket.Dial(ctx, wsURL+"/ws?token=anything", &websocket.DialOptions{
-		HTTPHeader: map[string][]string{"Origin": {"http://evil.example.com"}},
+	conn, resp, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
+		HTTPHeader:   map[string][]string{"Origin": {"http://evil.example.com"}},
+		Subprotocols: []string{"anything"},
 	})
 	if err == nil {
 		conn.Close(websocket.StatusNormalClosure, "")

@@ -40,10 +40,9 @@ export function relayHttpBase(raw: string): string {
   return raw.replace(/^ws/i, 'http').replace(/\/ws\/?$/i, '').replace(/\/$/, '')
 }
 
-export function relayFileUrl(relayUrl: string, path: string, host = '', token = '', download = false): string {
+export function relayFileUrl(relayUrl: string, path: string, host = '', download = false): string {
   const params = new URLSearchParams({ path })
   if (host && host !== 'local') params.set('host', host)
-  if (token) params.set('token', token)
   if (download) params.set('download', '1')
   return `${relayHttpBase(relayUrl)}/file?${params}`
 }

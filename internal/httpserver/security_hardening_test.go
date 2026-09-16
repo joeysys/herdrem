@@ -30,7 +30,8 @@ func TestHandleFileFlattensActiveMIME(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
 
 	for _, name := range []string{"evil.js", "page.html"} {
-		r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, name))+"&token=secret", nil)
+		r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, name)), nil)
+		r.Header.Set("Authorization", "Bearer secret")
 		w := httptest.NewRecorder()
 		s.handleFile(w, r)
 		if w.Code != http.StatusOK {
@@ -59,14 +60,16 @@ func TestHandleFileKeepsImageMIMEAndDownloadType(t *testing.T) {
 	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
 	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
 
-	r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, "x.png"))+"&token=secret", nil)
+	r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, "x.png")), nil)
+	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	s.handleFile(w, r)
 	if ct := w.Header().Get("Content-Type"); ct != "image/png" {
 		t.Errorf("png Content-Type = %q, want image/png", ct)
 	}
 
-	r = httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, "evil.js"))+"&token=secret&download=1", nil)
+	r = httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, "evil.js"))+"&download=1", nil)
+	r.Header.Set("Authorization", "Bearer secret")
 	w = httptest.NewRecorder()
 	s.handleFile(w, r)
 	if ct := w.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/plain") {
@@ -77,12 +80,41 @@ func TestHandleFileKeepsImageMIMEAndDownloadType(t *testing.T) {
 	}
 }
 
+// A correctly-spelled token in the query string must not authenticate /file
+// either — the URL channel is gone on every relay endpoint.
+func TestHandleFileRejectsQueryToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(path, []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
+	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+
+	r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(path)+"&token=secret", nil)
+	w := httptest.NewRecorder()
+	s.handleFile(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("query-token /file status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+
+	// The Bearer channel is the supported one.
+	r = httptest.NewRequest("GET", "/file?path="+url.QueryEscape(path), nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	w = httptest.NewRecorder()
+	s.handleFile(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bearer /file status = %d, want 200", w.Code)
+	}
+}
+
 // Repeated auth failures from a non-loopback client are throttled; loopback
 // clients stay exempt so a local user can never lock themselves out.
 func TestRelayAuthGateRateLimitsRemoteFailures(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
 	for i := 0; i < gateMaxFailedAttempts; i++ {
-		r := httptest.NewRequest("GET", "http://relay.local/ws?token=wrong", nil)
+		r := httptest.NewRequest("GET", "http://relay.local/ws", nil)
+		r.Header.Set("Authorization", "Bearer wrong")
 		w := httptest.NewRecorder()
 		if s.relayAuthGate(w, r) {
 			t.Fatal("bad token authenticated")
@@ -92,7 +124,8 @@ func TestRelayAuthGateRateLimitsRemoteFailures(t *testing.T) {
 		}
 	}
 	// Next failure trips the block — the limiter answers before re-checking.
-	r := httptest.NewRequest("GET", "http://relay.local/ws?token=wrong", nil)
+	r := httptest.NewRequest("GET", "http://relay.local/ws", nil)
+	r.Header.Set("Authorization", "Bearer wrong")
 	w := httptest.NewRecorder()
 	if s.relayAuthGate(w, r) {
 		t.Fatal("blocked request authenticated")
@@ -105,7 +138,8 @@ func TestRelayAuthGateRateLimitsRemoteFailures(t *testing.T) {
 func TestRelayAuthGateExemptsLoopback(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
 	for i := 0; i < gateMaxFailedAttempts+3; i++ {
-		r := httptest.NewRequest("GET", "http://localhost:8766/ws?token=wrong", nil)
+		r := httptest.NewRequest("GET", "http://localhost:8766/ws", nil)
+		r.Header.Set("Authorization", "Bearer wrong")
 		r.RemoteAddr = "127.0.0.1:5555"
 		w := httptest.NewRecorder()
 		s.relayAuthGate(w, r)

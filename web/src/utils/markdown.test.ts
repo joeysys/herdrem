@@ -28,6 +28,25 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<a')
     expect(html).not.toContain('javascript:')
   })
+  it('drops control-char-obfuscated javascript: URLs', () => {
+    // WHATWG URL parsing strips leading C0 controls and removes tab/LF/CR
+    // anywhere, so "\u0001javascript:" re-parses as javascript: in the browser.
+    for (const u of [
+      '\u0001javascript:alert(1)',
+      '\u0000javascript:alert(1)',
+      'java\u0001script:alert(1)',
+      '\u007fjavascript:alert(1)',
+      'data:text/html,<b>',
+    ]) {
+      const out = renderMarkdown(`[x](${u})`)
+      expect(out, JSON.stringify(u)).not.toContain('<a')
+      const img = renderMarkdown(`![x](${u})`)
+      expect(img, JSON.stringify(u)).not.toContain('<img')
+    }
+  })
+  it('emits the control-stripped URL, not the raw text', () => {
+    expect(renderMarkdown('[x](a\u0001b)')).toContain('href="ab"')
+  })
   it('drops non-image data: and javascript: image URLs', () => {
     expect(renderMarkdown('![a](javascript:alert(1))')).not.toContain('<img')
     expect(renderMarkdown('![a](data:text/html;base64,PGI+)')).not.toContain('<img')

@@ -208,7 +208,7 @@ function downloadEntry(e: FileEntry) {
   haptic()
   const form = document.createElement('form')
   form.method = 'post'
-  form.action = relayFileUrl(conn.url, fullEntryPath(e), files.host, '', true)
+  form.action = relayFileUrl(conn.url, fullEntryPath(e), files.host, true)
   form.hidden = true
   if (conn.token) {
     const input = document.createElement('input')

@@ -217,15 +217,12 @@ const isCrossOrigin = computed(() => {
   return !!o && typeof window !== 'undefined' && o !== window.location.origin
 })
 
-// rawFileUrl carries the relay token only when the file URL is cross-origin:
-// same-origin /file requests authenticate with the HttpOnly session cookie,
-// keeping the long-term token out of the URL/history. Cross-origin <img> and
-// navigation have no header channel, so ?token= remains the transition path
-// there (the server still accepts it for old bookmarks too).
+// rawFileUrl never carries the relay token. Same-origin /file uses the
+// HttpOnly session cookie; cross-origin image tags cannot send headers, so
+// they only work when the relay is same-origin (or token-less local dev).
 const rawFileUrl = computed(() => {
   if (!preview.value?.path) return ''
-  const urlToken = isCrossOrigin.value ? conn.token : ''
-  return relayFileUrl(conn.url, preview.value.path, preview.value.host, urlToken)
+  return relayFileUrl(conn.url, preview.value.path, preview.value.host)
 })
 
 // authReady stays false on any failure, so the iframe is never rendered
@@ -444,7 +441,7 @@ function fmtSize(bytes: number): string {
           class="fp-iframe"
           :style="{ width: viewportWidth }"
           :src="previewUrl"
-          sandbox="allow-scripts allow-forms allow-popups"
+          sandbox=""
           title="HTML Preview"
         ></iframe>
         <div v-else class="fp-loading">preparing preview…</div>

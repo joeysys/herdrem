@@ -301,8 +301,6 @@ func (c *CLIClient) StatusServer(ctx context.Context, host string) (bool, error)
 	return c.Alive(ctx, host)
 }
 
-
-
 // PaneSplit splits an existing pane and returns the new pane's ID.
 // If fromPaneID is empty, the current pane is split.
 func (c *CLIClient) PaneSplit(ctx context.Context, host, fromPaneID, direction, cwd string) (string, error) {

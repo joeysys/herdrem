@@ -39,7 +39,8 @@ func TestPreviewCapabilityBindsHostAndExpires(t *testing.T) {
 
 func TestPreviewAuthReturnsCapability(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, previewCaps: make(map[string]previewCapability)}
-	r := httptest.NewRequest("GET", "http://relay.local/preview-auth?host=local&token=secret", nil)
+	r := httptest.NewRequest("GET", "http://relay.local/preview-auth?host=local", nil)
+	r.Header.Set("Authorization", "Bearer secret")
 	r.Host = "relay.local"
 	w := httptest.NewRecorder()
 
@@ -92,8 +93,32 @@ func TestHandleFilePreviewUsesCapabilityPath(t *testing.T) {
 	if !strings.Contains(string(body), "style.css") {
 		t.Fatalf("body = %q, want preview content", body)
 	}
-	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") {
-		t.Fatalf("Content-Security-Policy = %q, want sandbox", got)
+	csp := w.Header().Get("Content-Security-Policy")
+	for _, want := range []string{
+		"sandbox;",
+		"default-src 'none'",
+		"connect-src 'none'",
+		"form-action 'none'",
+		"base-uri 'none'",
+		// 'self' never matches inside an opaque-origin sandbox, so the
+		// handler emits the request's own scheme://host explicitly.
+		"img-src http://example.com data:",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("Content-Security-Policy = %q, missing %q", csp, want)
+		}
+	}
+	// The preview must be fully static: any sandbox escape token
+	// (allow-scripts/allow-forms/allow-popups) or script-src re-opens a
+	// channel that can read the capability URL and ride it out via frame
+	// self-navigation, images, forms, or popups.
+	for _, bad := range []string{"allow-scripts", "allow-forms", "allow-popups", "script-src"} {
+		if strings.Contains(csp, bad) {
+			t.Fatalf("Content-Security-Policy = %q, still contains %q", csp, bad)
+		}
+	}
+	if strings.Contains(csp, "img-src http:") && !strings.Contains(csp, "img-src http://example.com") {
+		t.Fatalf("Content-Security-Policy = %q, img-src not pinned to self origin", csp)
 	}
 	if got := w.Header().Get("Cache-Control"); got != "private, no-store" {
 		t.Fatalf("Cache-Control = %q, want private, no-store", got)

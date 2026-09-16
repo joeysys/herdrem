@@ -201,6 +201,11 @@ func main() {
 	tunnelSvc := service.NewTunnelService(portInt, func(info protocol.TunnelInfo) {
 		h.BroadcastJSON(protocol.TunnelUpdated{Type: "tunnel_updated", Tunnel: info})
 	}, logger)
+	tunnelSvc.SetPolicy(service.TunnelPolicy{
+		AllowedPorts: cfg.AllowedTunnelPorts(),
+		AllowDirect:  cfg.AllowDirectTunnel,
+		MaxActive:    cfg.MaxTunnels(),
+	})
 	svc.SetTunnels(tunnelSvc)
 	srv.SetTunnels(tunnelSvc)
 

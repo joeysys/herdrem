@@ -70,7 +70,7 @@ deploy/                  systemd unit, env template, deployment guide
 - **File browser** — navigate, preview, and edit files remotely
 - **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
 - **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
-- **Token auth** — only same-origin requests addressed to `localhost`, `127.0.0.1`, or `::1` may omit `HERDREM_TOKEN`; all other relay connections require it.
+- **Token auth** — when `HERDREM_TOKEN` is unset (dev), only a same-origin page on `localhost` / `127.0.0.1` / `::1` may connect without a token. Once the token is set, **every** connection needs it, including localhost.
 - **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
 
 ## Screenshots
@@ -106,24 +106,52 @@ All config is environment-based (see `internal/config/config.go`):
 |-----|---------|-------------|
 | `HERDREM_PORT` | `8766` | Listen port |
 | `HERDREM_BIND` | `127.0.0.1` | Listen address; non-loopback binds require a token |
-| `HERDREM_TOKEN` | _(empty = local same-origin only)_ | Shared secret required for non-local or cross-origin relay access |
+| `HERDREM_TOKEN` | _(empty = localhost same-origin only)_ | Shared secret. Empty is allowed only for loopback same-origin with no token configured; if this is set, localhost needs it too |
 | `HERDR_BIN` | `herdr` | Path to herdr binary |
 | `HERDR_REMOTES` | — | Comma-separated SSH remotes (optional) |
 | `HERDREM_KINDS` | — | Comma-separated agent kind filter (optional) |
 | `HERDREM_DATA_DIR` | `~/.config/herdrem` | Data directory |
 | `HERDREM_STATIC` | — | Override embedded static dir (debug) |
+| `HERDREM_TUNNEL_PORTS` | — | Extra allowed ports/ranges on top of `5173,3000,8080,4173` (e.g. `8000-8100,9000`). Privileged ports (`<1024`) and malformed tokens are ignored |
+| `HERDREM_ALLOW_DIRECT_TUNNEL` | off | Set to `1` to allow ungated (`direct`) port tunnels |
+| `HERDREM_TUNNEL_MAX` | `8` | Cap on concurrent starting+active port tunnels |
 
 ### Relay authentication
 
-The embedded PWA may connect without a token only when the browser page and relay
-are same-origin and the relay host is `localhost`, `127.0.0.1`, or `::1`. Connections via
-a LAN IP, hostname, tunnel, separate UI, or non-browser client must present the
-configured `HERDREM_TOKEN`. The PWA asks for it on first connection; the
-relay switcher also accepts it when connecting to a non-local relay. Tokens are kept in memory
-for the tab only and are never written to localStorage. On the same origin, a
-successful login sets an HttpOnly session cookie so a reload can reconnect
-without re-entering the token. Switching to a different origin requires the
-token again. Clear site data (or the cookie) to forget it.
+- **No token configured** (local dev): a same-origin page opened at `localhost`,
+  `127.0.0.1`, or `::1` may connect without a token.
+- **Token configured** (LAN, `--tunnel`, or you set `HERDREM_TOKEN` even on
+  loopback): every connection must present it — including localhost. The PWA
+  prompts on first connect; a 401 from `/session-auth` also surfaces the prompt
+  after boot timeout.
+
+The token is held in tab memory only (never `localStorage`). The PWA does not
+put it in the WebSocket or `/session-auth` URL (it uses a WebSocket subprotocol
+and `Authorization: Bearer`). Query `?token=` is not accepted — paste the token
+into the relay switcher field instead. Same-origin login mints an HttpOnly
+**opaque session** cookie (not the raw token) so a reload can reconnect;
+`/session-logout` or clearing site data revokes it. Cross-origin relays need
+the token again in that tab. File downloads use a `POST` form field, which is
+also why a file/image preview across origins (no cookie, no header channel)
+requires opening the PWA from the relay's own origin.
+
+Repeated failed logins from a non-loopback IP are rate-limited (HTTP 429).
+
+### Port forwarding (Cloudflare quick tunnels)
+
+From the PWA tunnel panel (or `tunnel_create` over the relay WebSocket), the
+relay can publish a local HTTP port as `https://*.trycloudflare.com`.
+
+| Rule | Default |
+|------|---------|
+| Allowed ports | `5173`, `3000`, `8080`, `4173` |
+| Extra ports | `HERDREM_TUNNEL_PORTS` — singles or ranges (`8000-8100,9000`). Malformed tokens are ignored. Privileged ports (`<1024`) are never forwarded |
+| `direct` (no PIN/Basic gate) | Off. Set `HERDREM_ALLOW_DIRECT_TUNNEL=1` to show/enable it. Anyone with the URL then has full access to that port |
+| Concurrent tunnels | 8 (`HERDREM_TUNNEL_MAX`) |
+
+`token_gate` (default) and `basic_auth` still sit in front of the published
+port. `--tunnel` on `herdrem serve` is the **relay itself**, not these
+per-port forwards; it still requires `HERDREM_TOKEN`.
 
 ## License
 

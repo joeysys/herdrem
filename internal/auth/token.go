@@ -7,8 +7,9 @@ import (
 	"strings"
 )
 
-// SessionCookieName is the HttpOnly cookie that carries the relay token for
-// same-origin requests (WS upgrade, /file, /session-auth).
+// SessionCookieName is the HttpOnly cookie used by same-origin requests
+// (WS upgrade, /file, /session-auth). It carries either a minted session id
+// or, for legacy/self-issued values, the raw token.
 const SessionCookieName = "herdrem_auth"
 
 // Check validates the token against the expected value.
@@ -17,15 +18,10 @@ func Check(r *http.Request, expected string) bool {
 	if expected == "" {
 		return true
 	}
-	// Token via query param ?token=… — kept for old bookmarks and for
-	// cross-origin subresource URLs (<img>, navigation) that cannot carry
-	// headers. First-party code paths use the channels below instead so the
-	// long-term token stays out of URLs, history, and proxy logs.
-	q := r.URL.Query().Get("token")
-	if subtle.ConstantTimeCompare([]byte(q), []byte(expected)) == 1 {
-		return true
-	}
-	// Token via Authorization: Bearer (fetch/XHR clients).
+	// Token via Authorization: Bearer (fetch/XHR clients). Query ?token= is
+	// deliberately not accepted: the long-term secret must not live in URLs,
+	// history, or proxy logs. (The tunnel gate's PIN query is a separate
+	// per-tunnel credential handled in tunnel_gate.go.)
 	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
 		if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(a, "Bearer ")), []byte(expected)) == 1 {
 			return true
@@ -38,7 +34,7 @@ func Check(r *http.Request, expected string) bool {
 		}
 	}
 	// Token via Sec-WebSocket-Protocol header (browser WebSocket — its only
-	// credential channel besides query). Subprotocol values must be HTTP
+	// credential channel). Subprotocol values must be HTTP
 	// tchar-safe, so the frontend sends "herdrem.<base64url(token)>"; a raw
 	// token value is still accepted for non-browser clients and simple tokens.
 	for _, proto := range r.Header.Values("Sec-WebSocket-Protocol") {
@@ -51,6 +47,29 @@ func Check(r *http.Request, expected string) bool {
 		}
 	}
 	return false
+}
+
+// MatchSubprotocols returns the client-offered Sec-WebSocket-Protocol values
+// that carry expected — the raw token or the herdrem.<base64url> form. The
+// WS upgrade must echo one back: a browser (and any WHATWG-conformant
+// client) that offered subprotocols and receives none in the 101 response
+// fails the handshake, regardless of whether the credential authenticated.
+func MatchSubprotocols(r *http.Request, expected string) []string {
+	if expected == "" {
+		return nil
+	}
+	var out []string
+	for _, proto := range r.Header.Values("Sec-WebSocket-Protocol") {
+		if subtle.ConstantTimeCompare([]byte(proto), []byte(expected)) == 1 {
+			out = append(out, proto)
+			continue
+		}
+		if decoded, ok := decodeWSAuthSubprotocol(proto); ok &&
+			subtle.ConstantTimeCompare([]byte(decoded), []byte(expected)) == 1 {
+			out = append(out, proto)
+		}
+	}
+	return out
 }
 
 const wsAuthSubprotocolPrefix = "herdrem."

@@ -29,11 +29,32 @@ type TunnelItem struct {
 	waited chan struct{}
 }
 
+// TunnelPolicy is the server-side control plane for CreateTunnel.
+// Zero values mean: default port allowlist, direct disabled, max 8.
+type TunnelPolicy struct {
+	AllowedPorts map[int]struct{}
+	AllowDirect  bool
+	MaxActive    int
+}
+
+const defaultTunnelMax = 8
+
+var defaultTunnelPorts = []int{5173, 3000, 8080, 4173}
+
+func defaultAllowedPorts() map[int]struct{} {
+	set := make(map[int]struct{}, len(defaultTunnelPorts))
+	for _, p := range defaultTunnelPorts {
+		set[p] = struct{}{}
+	}
+	return set
+}
+
 // TunnelService manages cloudflared dynamic port forwarding tunnels.
 type TunnelService struct {
 	mu        sync.RWMutex
 	tunnels   map[string]*TunnelItem
 	relayPort int
+	policy    TunnelPolicy
 	logger    *slog.Logger
 	onUpdate  func(info protocol.TunnelInfo)
 }
@@ -46,9 +67,36 @@ func NewTunnelService(relayPort int, onUpdate func(info protocol.TunnelInfo), lo
 	return &TunnelService{
 		tunnels:   make(map[string]*TunnelItem),
 		relayPort: relayPort,
-		onUpdate:  onUpdate,
-		logger:    logger,
+		policy: TunnelPolicy{
+			AllowedPorts: defaultAllowedPorts(),
+			MaxActive:    defaultTunnelMax,
+		},
+		onUpdate: onUpdate,
+		logger:   logger,
 	}
+}
+
+// SetPolicy replaces the tunnel control-plane policy.
+func (ts *TunnelService) SetPolicy(p TunnelPolicy) {
+	if p.AllowedPorts == nil {
+		p.AllowedPorts = defaultAllowedPorts()
+	}
+	if p.MaxActive < 1 {
+		p.MaxActive = defaultTunnelMax
+	}
+	ts.mu.Lock()
+	ts.policy = p
+	ts.mu.Unlock()
+}
+
+// DirectAllowed reports whether ungated (direct) tunnels may be created.
+func (ts *TunnelService) DirectAllowed() bool {
+	if ts == nil {
+		return false
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.policy.AllowDirect
 }
 
 // CreateTunnel starts a cloudflared tunnel for targetPort.
@@ -63,6 +111,15 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	if authMode != "token_gate" && authMode != "basic_auth" && authMode != "direct" {
 		return nil, fmt.Errorf("invalid auth_mode %q", authMode)
 	}
+	if authMode == "direct" && !ts.DirectAllowed() {
+		return nil, fmt.Errorf("direct tunnels are disabled; set HERDREM_ALLOW_DIRECT_TUNNEL=1 to enable")
+	}
+	if targetPort < 1024 {
+		return nil, fmt.Errorf("port %d is a privileged system port (<1024) and cannot be forwarded", targetPort)
+	}
+	if !ts.portAllowed(targetPort) {
+		return nil, fmt.Errorf("port %d is not in the tunnel allowlist (default 5173,3000,8080,4173; add extras with HERDREM_TUNNEL_PORTS, ranges like 8000-8100 ok)", targetPort)
+	}
 	// Enforce minimum PIN length for user-provided credentials.
 	// The default (empty pin) generates a 128-bit hex token; custom PINs
 	// must be at least 8 characters to resist brute force.
@@ -73,7 +130,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 	ts.mu.Lock()
 	// Check if active tunnel already exists for this port
 	for _, item := range ts.tunnels {
-		if item.Info.Port == targetPort && item.Info.Status == "active" {
+		if item.Info.Port == targetPort && (item.Info.Status == "active" || item.Info.Status == "starting") {
 			// Reject reuse if auth_mode or pin doesn't match.
 			if item.Info.AuthMode != authMode || (pin != "" && item.Info.Token != pin) {
 				ts.mu.Unlock()
@@ -83,6 +140,21 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 			ts.mu.Unlock()
 			return &infoCopy, nil
 		}
+	}
+
+	live := 0
+	for _, item := range ts.tunnels {
+		if item.Info.Status == "active" || item.Info.Status == "starting" {
+			live++
+		}
+	}
+	maxActive := ts.policy.MaxActive
+	if maxActive < 1 {
+		maxActive = defaultTunnelMax
+	}
+	if live >= maxActive {
+		ts.mu.Unlock()
+		return nil, fmt.Errorf("too many tunnels (max %d); close one first or raise HERDREM_TUNNEL_MAX", maxActive)
 	}
 
 	// Credential generation must fail closed. A silent entropy failure
@@ -332,6 +404,20 @@ func (ts *TunnelService) GetTunnel(id string) (*protocol.TunnelInfo, bool) {
 	// Return a copy to prevent callers from racing with concurrent map mutations.
 	infoCopy := item.Info
 	return &infoCopy, true
+}
+
+func (ts *TunnelService) portAllowed(port int) bool {
+	if port < 1024 || port > 65535 {
+		return false
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if len(ts.policy.AllowedPorts) == 0 {
+		_, ok := defaultAllowedPorts()[port]
+		return ok
+	}
+	_, ok := ts.policy.AllowedPorts[port]
+	return ok
 }
 
 // ListTunnels returns all current tunnel states.

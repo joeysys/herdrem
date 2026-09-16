@@ -16,13 +16,10 @@ func TestCheckEmptyTokenAllowsAll(t *testing.T) {
 	}
 }
 
-func TestCheckQueryToken(t *testing.T) {
+func TestCheckIgnoresQueryToken(t *testing.T) {
 	r := httptest.NewRequest("GET", "/ws?token=secret", nil)
-	if !Check(r, "secret") {
-		t.Error("correct query token should pass")
-	}
-	if Check(r, "wrong") {
-		t.Error("wrong query token should fail")
+	if Check(r, "secret") {
+		t.Error("query token must not authenticate")
 	}
 }
 

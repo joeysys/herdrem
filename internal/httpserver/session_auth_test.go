@@ -13,7 +13,8 @@ import (
 
 func TestSessionAuthSetsHttpOnlyCookie(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, sessions: map[string]time.Time{}}
-	r := httptest.NewRequest("GET", "http://relay.local/session-auth?token=secret", nil)
+	r := httptest.NewRequest("GET", "http://relay.local/session-auth", nil)
+	r.Header.Set("Authorization", "Bearer secret")
 	r.Host = "relay.local"
 	w := httptest.NewRecorder()
 
@@ -50,7 +51,8 @@ func TestSessionAuthSetsHttpOnlyCookie(t *testing.T) {
 
 func TestSessionLogoutRevokesSession(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, sessions: map[string]time.Time{}}
-	r := httptest.NewRequest("GET", "http://relay.local/session-auth?token=secret", nil)
+	r := httptest.NewRequest("GET", "http://relay.local/session-auth", nil)
+	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	s.handleSessionAuth(w, r)
 	var session *http.Cookie
@@ -81,8 +83,9 @@ func TestSessionLogoutRevokesSession(t *testing.T) {
 
 func TestSessionAuthRejectsCrossOrigin(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}}
-	r := httptest.NewRequest("GET", "http://relay.local/session-auth?token=secret", nil)
+	r := httptest.NewRequest("GET", "http://relay.local/session-auth", nil)
 	r.Host = "relay.local"
+	r.Header.Set("Authorization", "Bearer secret")
 	r.Header.Set("Origin", "https://evil.example")
 	w := httptest.NewRecorder()
 
