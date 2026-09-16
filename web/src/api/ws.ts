@@ -2,6 +2,19 @@ import type { ServerMessage, ClientMessage } from './types'
 
 type MessageHandler = (msg: ServerMessage) => void
 
+// The relay token rides the WebSocket handshake as a subprotocol —
+// `herdrem.<base64url(token)>` — instead of a ?token= query, so the
+// long-term credential stays out of the URL, browser history, and proxy
+// logs. base64url (unpadded) is required because subprotocol values must be
+// HTTP tchar-safe; the server decodes the same form in auth.Check.
+export function wsAuthSubprotocol(token: string): string {
+  const bytes = new TextEncoder().encode(token)
+  let bin = ''
+  bytes.forEach((b) => { bin += String.fromCharCode(b) })
+  const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `herdrem.${b64}`
+}
+
 export class WSClient {
   private ws: WebSocket | null = null
   private url = ''
@@ -43,8 +56,7 @@ export class WSClient {
     // strips /ws for storage/display, so re-append it here if missing.
     let base = this.url
     if (!/\/ws$/i.test(base)) base = base.replace(/\/+$/, '') + '/ws'
-    const wsUrl = this.token ? `${base}?token=${encodeURIComponent(this.token)}` : base
-    const socket = new WebSocket(wsUrl)
+    const socket = this.token ? new WebSocket(base, [wsAuthSubprotocol(this.token)]) : new WebSocket(base)
     this.ws = socket
 
     socket.onopen = () => {

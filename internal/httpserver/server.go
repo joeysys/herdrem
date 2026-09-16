@@ -32,10 +32,23 @@ const previewCapabilityTTL = 10 * time.Minute
 
 // spaCSP is the Content-Security-Policy for the Vue SPA and JSON APIs.
 // Preview responses set their own sandbox CSP and must not inherit this.
-const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: http: https:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'"
+const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: http: https:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+
+// sessionTTL bounds a minted session's lifetime. The cookie is
+// browser-session scoped, so it may end sooner; the server-side TTL bounds
+// an idle session even if a client holds onto it.
+const sessionTTL = 24 * time.Hour
+
+// maxSessions/maxPreviewCaps bound the server-side credential maps so an
+// authenticated client cannot grow them without limit.
+const (
+	maxSessions    = 4096
+	maxPreviewCaps = 1024
+)
 
 type previewCapability struct {
 	host      string
+	ip        string // minter's client IP — the cap must be used from it
 	expiresAt time.Time
 }
 
@@ -53,6 +66,8 @@ type Server struct {
 	gateLimiter *gateRateLimiter
 	previewMu   sync.Mutex
 	previewCaps map[string]previewCapability
+	sessionMu   sync.Mutex
+	sessions    map[string]time.Time
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
@@ -79,6 +94,7 @@ func New(cfg config.Config, h *hub.Hub, client herdr.Client, todo *store.Store, 
 		staticFS:    staticFS,
 		gateLimiter: newGateRateLimiter(),
 		previewCaps: make(map[string]previewCapability),
+		sessions:    make(map[string]time.Time),
 	}
 }
 
@@ -97,6 +113,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/preview/", s.handleFilePreview)
 	mux.HandleFunc("/preview-auth", s.handlePreviewAuth)
 	mux.HandleFunc("/session-auth", s.handleSessionAuth)
+	mux.HandleFunc("/session-logout", s.handleSessionLogout)
 	mux.HandleFunc("/api/tunnel-gate/", s.handleTunnelGate)
 	// Static SPA — catch-all
 	if s.staticFS != nil {
@@ -140,8 +157,9 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	download := r.URL.Query().Get("download") == "1" || r.URL.Query().Get("download") == "true"
-	if !s.relayAuthOK(r) && !(download && s.fileFormAuthOK(w, r)) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.authGate(w, r, func() bool {
+		return s.relayAuthOK(r) || (download && s.fileFormAuthOK(w, r))
+	}) {
 		return
 	}
 	path := r.URL.Query().Get("path")
@@ -153,6 +171,16 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	// Workspace files are mutable: revalidate a reopened image instead of
 	// showing the browser's cached copy for up to five minutes.
 	w.Header().Set("Cache-Control", "private, no-cache")
+	// A workspace file must never render as an active document on the relay
+	// origin: the SPA's script-src 'self' would otherwise let a workspace .js
+	// load as a first-party <script src="/file?...">. The sandbox CSP covers
+	// top-level navigation; flattening non-inline MIME types to text/plain
+	// (with nosniff) blocks script/style subresource abuse. Downloads keep
+	// the real type so saved files are unaffected.
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	if !download && !inlineFileMIME(path) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
 	if download {
 		name := filepath.Base(filepath.ToSlash(path))
 		w.Header().Set("Content-Disposition", contentDisposition(name))
@@ -180,6 +208,29 @@ func (s *Server) fileFormAuthOK(w http.ResponseWriter, r *http.Request) bool {
 	}
 	token := r.PostForm.Get("token")
 	return s.cfg.Token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) == 1
+}
+
+// inlineFileMIME reports whether path's extension maps to a MIME type that is
+// safe to serve inline on the relay origin — images, audio, video, fonts,
+// PDFs and plain text are not scriptable. Everything else (HTML, JS, CSS,
+// XML, unknown extensions) is flattened to text/plain by the caller so a
+// workspace file cannot become a first-party document or <script> source.
+// SVG stays allowed: <img>-loaded SVG cannot script, and top-level
+// navigation is covered by the response's sandbox CSP.
+func inlineFileMIME(path string) bool {
+	mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if mt == "" {
+		return false
+	}
+	base, _, _ := strings.Cut(mt, ";")
+	switch base = strings.TrimSpace(base); {
+	case base == "text/plain", base == "application/pdf":
+		return true
+	case strings.HasPrefix(base, "image/"), strings.HasPrefix(base, "video/"),
+		strings.HasPrefix(base, "audio/"), strings.HasPrefix(base, "font/"):
+		return true
+	}
+	return false
 }
 
 func contentDisposition(name string) string {
@@ -245,7 +296,7 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := string(hostBytes)
-	if s.cfg.Token != "" && !s.validPreviewCapability(capability, host) {
+	if s.cfg.Token != "" && !s.validPreviewCapability(capability, host, realClientIP(r)) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -254,7 +305,10 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	// Force the response into a sandboxed context even if loaded via
 	// top-level navigation. This prevents scripts in previewed HTML from
 	// executing in the Relay's origin when the capability allows access.
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+	// connect-src 'none' keeps a previewed script from beaconing the
+	// capability-bearing URL out (fetch/XHR/WebSocket/sendBeacon); the IP
+	// binding is the primary replay mitigation.
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; connect-src 'none'")
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := s.files.ServeStream(w, r, host, filePath); err != nil {
@@ -282,8 +336,7 @@ func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.relayAuthOK(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.relayAuthGate(w, r) {
 		return
 	}
 	if s.cfg.Token == "" {
@@ -294,7 +347,7 @@ func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "local"
 	}
-	capability, err := s.issuePreviewCapability(host)
+	capability, err := s.issuePreviewCapability(host, realClientIP(r))
 	if err != nil {
 		http.Error(w, "preview capability unavailable", http.StatusInternalServerError)
 		return
@@ -314,28 +367,65 @@ func (s *Server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !s.relayAuthOK(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.relayAuthGate(w, r) {
 		return
 	}
 	if s.cfg.Token == "" {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	secure := r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil
+	// X-Forwarded-Proto is only meaningful from a trusted local proxy —
+	// a remote client must not be able to force the Secure attribute on
+	// (self-DoS) or influence the SameSite tier.
+	secure := r.TLS != nil || (isLoopback(r.RemoteAddr) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
 	sameSite := http.SameSiteLaxMode
 	if secure {
 		sameSite = http.SameSiteStrictMode
 	}
+	// The cookie carries an opaque, revocable session id — never the raw
+	// relay token — so a leaked or retired session cannot be replayed as
+	// the long-term credential and can be killed via /session-logout.
+	sessionID, err := s.issueSession()
+	if err != nil {
+		http.Error(w, "session unavailable", http.StatusInternalServerError)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
-		Value:    s.cfg.Token,
+		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
 	})
 	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSessionLogout revokes the presented session and clears the cookie.
+// Same-origin only — a cross-site POST must not be able to kill the user's
+// session.
+func (s *Server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isSameOrigin(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
+		s.sessionMu.Lock()
+		delete(s.sessions, c.Value)
+		s.sessionMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -353,7 +443,7 @@ func sameOriginCheck(origin, host string) bool {
 	return originHost == host
 }
 
-func (s *Server) issuePreviewCapability(host string) (string, error) {
+func (s *Server) issuePreviewCapability(host, ip string) (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
@@ -371,16 +461,39 @@ func (s *Server) issuePreviewCapability(host string) (string, error) {
 			delete(s.previewCaps, key)
 		}
 	}
-	s.previewCaps[token] = previewCapability{host: host, expiresAt: now.Add(previewCapabilityTTL)}
+	// Hard bound: minting is authenticated, but the map must not grow
+	// without limit. Evict the soonest-expiring entry when full.
+	if len(s.previewCaps) >= maxPreviewCaps {
+		oldestKey, oldestAt, first := "", time.Time{}, true
+		for key, capability := range s.previewCaps {
+			if first || capability.expiresAt.Before(oldestAt) {
+				oldestKey, oldestAt, first = key, capability.expiresAt, false
+			}
+		}
+		delete(s.previewCaps, oldestKey)
+	}
+	s.previewCaps[token] = previewCapability{host: host, ip: ip, expiresAt: now.Add(previewCapabilityTTL)}
 	return token, nil
 }
 
-func (s *Server) validPreviewCapability(token, host string) bool {
+// sameClientIP reports whether two client IPs refer to the same client.
+// Loopback representations (127.0.0.1 vs ::1) are interchangeable — the
+// local operator is already trusted; the binding exists to stop a remote
+// party replaying a leaked capability.
+func sameClientIP(a, b string) bool {
+	if a == b {
+		return true
+	}
+	pa, pb := net.ParseIP(a), net.ParseIP(b)
+	return pa != nil && pb != nil && pa.IsLoopback() && pb.IsLoopback()
+}
+
+func (s *Server) validPreviewCapability(token, host, ip string) bool {
 	now := time.Now()
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
 	capability, ok := s.previewCaps[token]
-	if !ok || !capability.expiresAt.After(now) || capability.host != host {
+	if !ok || !capability.expiresAt.After(now) || capability.host != host || !sameClientIP(capability.ip, ip) {
 		if ok && !capability.expiresAt.After(now) {
 			delete(s.previewCaps, token)
 		}
@@ -389,9 +502,64 @@ func (s *Server) validPreviewCapability(token, host string) bool {
 	return true
 }
 
+// issueSession mints an opaque session id for the session cookie. Sessions
+// stand in for the relay token: they are revocable via /session-logout and
+// expire after sessionTTL of inactivity.
+func (s *Server) issueSession() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(raw[:])
+	now := time.Now()
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]time.Time)
+	}
+	for k, exp := range s.sessions {
+		if !exp.After(now) {
+			delete(s.sessions, k)
+		}
+	}
+	if len(s.sessions) >= maxSessions {
+		oldestKey, oldestAt, first := "", time.Time{}, true
+		for k, exp := range s.sessions {
+			if first || exp.Before(oldestAt) {
+				oldestKey, oldestAt, first = k, exp, false
+			}
+		}
+		delete(s.sessions, oldestKey)
+	}
+	s.sessions[id] = now.Add(sessionTTL)
+	return id, nil
+}
+
+// validSession reports whether the request carries a live session cookie.
+// A successful check slides the expiry forward so an active browser session
+// never hits the TTL mid-work.
+func (s *Server) validSession(r *http.Request) bool {
+	c, err := r.Cookie(auth.SessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	now := time.Now()
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	exp, ok := s.sessions[c.Value]
+	if !ok {
+		return false
+	}
+	if !exp.After(now) {
+		delete(s.sessions, c.Value)
+		return false
+	}
+	s.sessions[c.Value] = now.Add(sessionTTL)
+	return true
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	if !s.relayAuthOK(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.relayAuthGate(w, r) {
 		return
 	}
 	// Origin policy for the upgrade itself. coder/websocket enforces a
@@ -446,8 +614,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.relayAuthOK(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.relayAuthGate(w, r) {
 		return
 	}
 	// Limit body size to prevent unbounded memory allocation
@@ -507,12 +674,54 @@ func toAny(panes []herdr.Pane) []interface{} {
 }
 
 // relayAuthOK permits only the explicitly local browser exception without a
-// token. Every other request needs a configured, matching relay token.
+// token, and only when no token is configured at all (dev mode). With
+// HERDREM_TOKEN set — the documented contract — every request needs a
+// credential: the raw token (query / Sec-WebSocket-Protocol / legacy cookie
+// value) or a live minted session cookie.
 func (s *Server) relayAuthOK(r *http.Request) bool {
-	if isLocalSameOrigin(r) {
+	if s.cfg.Token == "" {
+		return isLocalSameOrigin(r)
+	}
+	if auth.Check(r, s.cfg.Token) {
 		return true
 	}
-	return s.cfg.Token != "" && auth.Check(r, s.cfg.Token)
+	return s.validSession(r)
+}
+
+// authGate wraps an auth predicate with the shared failure rate limiter so a
+// remote client brute-forcing the relay token on any authenticated endpoint
+// is throttled after repeated failures. Loopback clients are exempt — a
+// local user must never lock themselves out of their own relay (e.g. a stale
+// token triggering a WS reconnect loop).
+func (s *Server) authGate(w http.ResponseWriter, r *http.Request, ok func() bool) bool {
+	ip := realClientIP(r)
+	tracked := ip != "" && !isLoopbackIP(ip)
+	if tracked && s.gateLimiter != nil && !s.gateLimiter.allow(ip) {
+		http.Error(w, "too many authentication failures", http.StatusTooManyRequests)
+		return false
+	}
+	if ok() {
+		if tracked && s.gateLimiter != nil {
+			s.gateLimiter.recordSuccess(ip)
+		}
+		return true
+	}
+	if tracked && s.gateLimiter != nil {
+		s.gateLimiter.recordFailure(ip)
+	}
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+// relayAuthGate is authGate bound to the standard relay credential check.
+func (s *Server) relayAuthGate(w http.ResponseWriter, r *http.Request) bool {
+	return s.authGate(w, r, func() bool { return s.relayAuthOK(r) })
+}
+
+// isLoopbackIP reports whether a bare IP string is loopback.
+func isLoopbackIP(ip string) bool {
+	p := net.ParseIP(strings.TrimSpace(ip))
+	return p != nil && p.IsLoopback()
 }
 
 // isSameOrigin checks if the request's Origin header matches the Host.

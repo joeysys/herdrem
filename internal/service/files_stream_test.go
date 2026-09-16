@@ -13,7 +13,7 @@ import (
 
 // withRemoteCat swaps the remote streaming command for a local one and restores
 // it afterwards.
-func withRemoteCat(t *testing.T, build func(ctx context.Context, host, path string) *exec.Cmd) {
+func withRemoteCat(t *testing.T, build func(ctx context.Context, host, path string, roots []string) *exec.Cmd) {
 	t.Helper()
 	orig := remoteCatCommand
 	remoteCatCommand = build
@@ -33,7 +33,7 @@ func withStreamCap(t *testing.T, cap int64) {
 // blocked on a full stdout pipe and this test hangs instead of failing fast.
 func TestServeRemoteStreamCapDoesNotDeadlock(t *testing.T) {
 	withStreamCap(t, 64<<10)
-	withRemoteCat(t, func(ctx context.Context, host, path string) *exec.Cmd {
+	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "yes hello")
 	})
 
@@ -42,7 +42,7 @@ func TestServeRemoteStreamCapDoesNotDeadlock(t *testing.T) {
 	r := httptest.NewRequest("GET", "/preview/x", nil)
 
 	done := make(chan error, 1)
-	go func() { done <- fs.serveRemoteStream(w, r, "remote", "/big.bin") }()
+	go func() { done <- fs.serveRemoteStream(w, r, "remote", "/big.bin", []string{"/"}) }()
 
 	select {
 	case err := <-done:
@@ -61,7 +61,7 @@ func TestServeRemoteStreamCapDoesNotDeadlock(t *testing.T) {
 // A client that disappears mid-stream must also not wedge the request.
 func TestServeRemoteStreamAbortDoesNotDeadlock(t *testing.T) {
 	withStreamCap(t, 1<<30) // effectively uncapped; the abort path is what matters
-	withRemoteCat(t, func(ctx context.Context, host, path string) *exec.Cmd {
+	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "yes hello")
 	})
 
@@ -69,7 +69,7 @@ func TestServeRemoteStreamAbortDoesNotDeadlock(t *testing.T) {
 	r := httptest.NewRequest("GET", "/preview/x", nil)
 
 	done := make(chan error, 1)
-	go func() { done <- fs.serveRemoteStream(failingWriter{}, r, "remote", "/big.bin") }()
+	go func() { done <- fs.serveRemoteStream(failingWriter{}, r, "remote", "/big.bin", []string{"/"}) }()
 
 	select {
 	case err := <-done:
@@ -84,7 +84,7 @@ func TestServeRemoteStreamAbortDoesNotDeadlock(t *testing.T) {
 // A normal, complete file streams through and reaps cleanly.
 func TestServeRemoteStreamWholeFile(t *testing.T) {
 	withStreamCap(t, 1<<20)
-	withRemoteCat(t, func(ctx context.Context, host, path string) *exec.Cmd {
+	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "printf '<h1>hi</h1>'")
 	})
 
@@ -93,7 +93,7 @@ func TestServeRemoteStreamWholeFile(t *testing.T) {
 	w.Header().Set("Cache-Control", "private, no-cache")
 	r := httptest.NewRequest("GET", "/preview/x", nil)
 
-	if err := fs.serveRemoteStream(w, r, "remote", "/page.html"); err != nil {
+	if err := fs.serveRemoteStream(w, r, "remote", "/page.html", []string{"/"}); err != nil {
 		t.Fatalf("serveRemoteStream: %v", err)
 	}
 	if got := w.Body.String(); got != "<h1>hi</h1>" {
@@ -113,7 +113,7 @@ func TestServeRemoteStreamWholeFile(t *testing.T) {
 // A failing remote command with no output must surface as an error, not a 200
 // with an empty body.
 func TestServeRemoteStreamMissingFileErrors(t *testing.T) {
-	withRemoteCat(t, func(ctx context.Context, host, path string) *exec.Cmd {
+	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "echo 'cat: no such file' >&2; exit 1")
 	})
 
@@ -121,7 +121,7 @@ func TestServeRemoteStreamMissingFileErrors(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/preview/x", nil)
 
-	err := fs.serveRemoteStream(w, r, "remote", "/missing.html")
+	err := fs.serveRemoteStream(w, r, "remote", "/missing.html", []string{"/"})
 	if err == nil {
 		t.Fatal("expected an error for a failing remote command")
 	}

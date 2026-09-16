@@ -41,20 +41,44 @@ export const useConnectionStore = defineStore('connection', () => {
     return features.value.includes(f);
   }
 
-  function mintSessionCookie() {
-    if (typeof window === 'undefined' || !token.value) return;
+  function sessionHttpBase(): string | null {
     try {
       const httpBase = url.value.replace(/^ws/i, 'http').replace(/\/ws$/i, '');
-      if (new URL(httpBase).origin !== window.location.origin) return;
-      const q = `?token=${encodeURIComponent(token.value)}`;
-      void fetch(`${httpBase}/session-auth${q}`, { credentials: 'include' }).then((res) => {
-        if (res.ok || res.status === 204) markSessionCookieHint();
-      }).catch(() => {
-        /* ignore mint failures; WS query token still authenticates */
-      });
+      if (new URL(httpBase).origin !== window.location.origin) return null;
+      return httpBase;
     } catch {
-      /* ignore mint failures; WS query token still authenticates */
+      return null;
     }
+  }
+
+  function mintSessionCookie() {
+    if (typeof window === 'undefined' || !token.value) return;
+    const httpBase = sessionHttpBase();
+    if (!httpBase) return;
+    // Bearer header keeps the relay token out of the URL (history/logs);
+    // the cookie the server sets carries an opaque session id, not the token.
+    void fetch(`${httpBase}/session-auth`, {
+      credentials: 'include',
+      headers: { Authorization: `Bearer ${token.value}` },
+    }).then((res) => {
+      if (res.ok || res.status === 204) markSessionCookieHint();
+    }).catch(() => {
+      /* ignore mint failures; WS query token still authenticates */
+    });
+  }
+
+  // Re-auth mints a fresh server-side session; revoke the previous one so a
+  // stolen/rotated cookie stops working immediately.
+  function revokeSessionCookie(): Promise<void> {
+    const httpBase = typeof window === 'undefined' ? null : sessionHttpBase();
+    if (!httpBase) return Promise.resolve();
+    return fetch(`${httpBase}/session-logout`, { method: 'POST', credentials: 'include' })
+      .then((res) => {
+        if (res.ok || res.status === 204) clearSessionCookieHint();
+      })
+      .catch(() => {
+        /* ignore revoke failures; the new session still mints */
+      });
   }
 
   function persistRelayUrl(raw: string): string {
@@ -84,8 +108,12 @@ export const useConnectionStore = defineStore('connection', () => {
     if (targetToken !== undefined) {
       token.value = targetToken;
       safeStorage.removeItem('herdrem_token');
+      // Explicit re-auth: drop the previous session server-side before
+      // minting, so the old cookie cannot linger as a live credential.
+      void revokeSessionCookie().then(mintSessionCookie);
+    } else {
+      mintSessionCookie();
     }
-    mintSessionCookie();
     // Clear agent state to prevent stale data from old relay bleeding through
     const agents = useAgentsStore();
     agents.setAgents([]);

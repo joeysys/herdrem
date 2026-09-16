@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,48 @@ func TestCheckSecWebSocketProtocol(t *testing.T) {
 	r.Header.Set("Sec-WebSocket-Protocol", "secret")
 	if !Check(r, "secret") {
 		t.Error("correct Sec-WebSocket-Protocol should pass")
+	}
+}
+
+func TestCheckSecWebSocketProtocolEncoded(t *testing.T) {
+	// Browser clients send herdrem.<base64url(token)> so tokens containing
+	// subprotocol-illegal characters still authenticate.
+	tok := "s3cret token/with=specials?"
+	enc := base64.RawURLEncoding.EncodeToString([]byte(tok))
+	r := httptest.NewRequest("GET", "/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "herdrem."+enc)
+	if !Check(r, tok) {
+		t.Error("encoded Sec-WebSocket-Protocol should pass")
+	}
+	r = httptest.NewRequest("GET", "/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "herdrem."+base64.RawURLEncoding.EncodeToString([]byte("wrong")))
+	if Check(r, tok) {
+		t.Error("wrong encoded Sec-WebSocket-Protocol should fail")
+	}
+	// Malformed encodings must not panic or authenticate.
+	r = httptest.NewRequest("GET", "/ws", nil)
+	r.Header.Set("Sec-WebSocket-Protocol", "herdrem.!!!not-b64")
+	if Check(r, tok) {
+		t.Error("malformed encoded subprotocol should fail")
+	}
+}
+
+func TestCheckAuthorizationBearer(t *testing.T) {
+	r := httptest.NewRequest("GET", "/session-auth", nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	if !Check(r, "secret") {
+		t.Error("correct Bearer token should pass")
+	}
+	r = httptest.NewRequest("GET", "/session-auth", nil)
+	r.Header.Set("Authorization", "Bearer wrong")
+	if Check(r, "secret") {
+		t.Error("wrong Bearer token should fail")
+	}
+	// Non-Bearer schemes must not be treated as token carriers.
+	r = httptest.NewRequest("GET", "/session-auth", nil)
+	r.Header.Set("Authorization", "Basic c2VjcmV0")
+	if Check(r, "secret") {
+		t.Error("non-Bearer Authorization should fail")
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -212,5 +214,56 @@ func TestToProtocol(t *testing.T) {
 	pc := r.toProtocol("req-1")
 	if pc.Type != "file_content" || pc.Encoding != "utf-8" || !pc.IsText || !pc.Truncated || pc.Size != 1 || pc.ReqID != "req-1" {
 		t.Errorf("pc = %+v", pc)
+	}
+}
+
+// remoteResolveScript runs the exact shell snippet the remote file commands
+// prepend — resolving $p through symlinks and requiring the result to land
+// inside a root. Running it through local sh exercises the same logic the
+// remote shell will execute.
+func TestRemoteResolveScript(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// leaf symlink inside the root pointing outside
+	if err := os.Symlink(secret, filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// symlinked dir inside the root pointing outside
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+	ok := filepath.Join(root, "ok.txt")
+	if err := os.WriteFile(ok, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(path string) (string, error) {
+		script := remoteResolveScript(path, []string{root}) + ` cat "$r"`
+		out, err := exec.Command("sh", "-c", script).CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := run(ok); err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("real file should resolve and read: out=%q err=%v", out, err)
+	}
+	if out, err := run(filepath.Join(root, "link.txt")); err == nil {
+		t.Fatalf("leaf symlink escape was not blocked: %q", out)
+	}
+	if out, err := run(filepath.Join(root, "linkdir", "secret.txt")); err == nil {
+		t.Fatalf("symlinked dir escape was not blocked: %q", out)
+	}
+	if out, err := run(secret); err == nil {
+		t.Fatalf("path outside roots was not blocked: %q", out)
 	}
 }

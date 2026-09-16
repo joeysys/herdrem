@@ -34,6 +34,9 @@ const (
 	gateMaxFailedAttempts = 5
 	gateBlockDuration     = 5 * time.Minute
 	gateAttemptWindow     = 10 * time.Minute
+	// gateMaxTrackedIPs bounds the attempts map so a spoofed-source flood
+	// cannot grow it without limit.
+	gateMaxTrackedIPs = 8192
 )
 
 func newGateRateLimiter() *gateRateLimiter {
@@ -59,12 +62,30 @@ func (rl *gateRateLimiter) allow(ip string) bool {
 	return true
 }
 
+// evictStaleLocked drops entries that are neither blocked nor inside the
+// attempt window. Callers must hold rl.mu.
+func (rl *gateRateLimiter) evictStaleLocked() {
+	now := time.Now()
+	for ip, st := range rl.attempts {
+		if !now.Before(st.blockUntil) && now.Sub(st.lastFail) > gateAttemptWindow {
+			delete(rl.attempts, ip)
+		}
+	}
+}
+
 // recordFailure increments the failure count for an IP and blocks if threshold reached.
 func (rl *gateRateLimiter) recordFailure(ip string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	st, ok := rl.attempts[ip]
 	if !ok {
+		if len(rl.attempts) >= gateMaxTrackedIPs {
+			rl.evictStaleLocked()
+		}
+		if len(rl.attempts) >= gateMaxTrackedIPs {
+			// Still full of live entries — refuse to grow unboundedly.
+			return
+		}
 		st = &gateAttemptState{}
 		rl.attempts[ip] = st
 	}
@@ -134,8 +155,7 @@ func (s *Server) handleTunnelGate(w http.ResponseWriter, r *http.Request) {
 
 	// Relay-level auth: only local same-origin browser access may omit the token.
 	// cloudflared-forwarded traffic uses the .tunnel.local host route, not this path.
-	if !s.relayAuthOK(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	if !s.relayAuthGate(w, r) {
 		return
 	}
 
@@ -319,17 +339,17 @@ func (s *Server) setTunnelCookie(w http.ResponseWriter, token string) {
 // realClientIP extracts the real client IP from cloudflared proxy headers.
 // RemoteAddr is always 127.0.0.1 behind cloudflared, so use CF-Connecting-IP
 // or X-Forwarded-For to distinguish actual clients for rate limiting.
-// XFF first item is client-controlled and forgeable. Only trust XFF
-// from loopback (local proxy), and take the LAST item (added by the proxy),
-// not the first (which the client can set arbitrarily).
+// Both headers are client-controlled before the proxy rewrites them, so they
+// are only trusted when the immediate peer is loopback (a local proxy);
+// a direct remote client must not be able to pick its rate-limit key.
+// XFF takes the LAST item (added by the proxy), not the first.
 func realClientIP(r *http.Request) string {
-	// CF-Connecting-IP is set by Cloudflare edge and is not client-forgeable.
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return strings.TrimSpace(ip)
-	}
-	// Only trust XFF when the request comes from loopback (local cloudflared).
-	// Take the last item (proxy-appended), not the first (client-set).
 	if isLoopback(r.RemoteAddr) {
+		// CF-Connecting-IP is set by Cloudflare edge; trusting it only for
+		// loopback peers keeps direct clients from spoofing it.
+		if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+			return strings.TrimSpace(ip)
+		}
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			last := strings.TrimSpace(parts[len(parts)-1])

@@ -26,7 +26,7 @@ import { useHaptic } from './composables/useHaptic';
 import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/useHistoryTrap';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
-import { canCookieReconnect, relayHostLabel, relayNeedsToken } from './utils/relay';
+import { canCookieReconnect, relayHostLabel, relayHttpBase, relayNeedsToken } from './utils/relay';
 import TermView from './components/term/TermView.vue';
 import AgentIcon from './components/agent/AgentIcon.vue';
 import AgentFilters from './components/agent/AgentFilters.vue';
@@ -69,15 +69,35 @@ const showTodoManager = ref(false);
 const settingsSection = ref<'shell_cmds' | 'skills' | 'agent_cmds' | null>(null);
 const showRelaySwitch = ref(false);
 const bootToken = ref('');
+// Loopback is no longer an implicit credential when the relay has
+// HERDREM_TOKEN set: a same-origin local relay answers 401 on
+// /session-auth just like a remote one. Probe it once boot times out so the
+// token prompt can appear for local relays too (a down/unreachable relay
+// answers with a fetch error instead and keeps the old "just reconnect"
+// behavior).
+const serverNeedsToken = ref(false);
+watch(
+  () => conn.bootTimedOut,
+  async (timedOut) => {
+    serverNeedsToken.value = false;
+    if (!timedOut) return;
+    try {
+      const res = await fetch(`${relayHttpBase(conn.url)}/session-auth`, { credentials: 'include' });
+      serverNeedsToken.value = res.status === 401;
+    } catch {
+      serverNeedsToken.value = false;
+    }
+  }
+);
 const showBootAuth = computed(() => {
   const current = relays.current();
   const targetUrl = current?.url || conn.url;
   const hasMemoryToken = Boolean(conn.token || current?.token);
-  return (
-    conn.status !== 'connected' &&
-    relayNeedsToken(targetUrl) &&
-    (conn.bootTimedOut || (!hasMemoryToken && !canCookieReconnect(targetUrl)))
-  );
+  if (conn.status === 'connected') return false;
+  if (relayNeedsToken(targetUrl)) {
+    return conn.bootTimedOut || (!hasMemoryToken && !canCookieReconnect(targetUrl));
+  }
+  return serverNeedsToken.value;
 });
 const ctxPane = ref<Pane | null>(null);
 const ctxOpen = ref(false);

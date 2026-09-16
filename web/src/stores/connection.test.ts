@@ -93,7 +93,16 @@ describe('useConnectionStore token storage', () => {
     const conn = useConnectionStore()
     conn.connect(`ws://${location.host}`, 'lan-token')
     expect(fetchMock).toHaveBeenCalled()
-    await Promise.resolve()
+    // Explicit re-auth revokes the old session first, then mints — flush the
+    // promise chain with a macrotask.
+    await new Promise((r) => setTimeout(r, 0))
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(urls[0]).toContain('/session-logout')
+    expect(urls[1]).toContain('/session-auth')
+    // The relay token rides the Authorization header, not the URL.
+    expect(urls[1]).not.toContain('token=')
+    const mintOpts = fetchMock.mock.calls[1][1] as RequestInit
+    expect((mintOpts.headers as Record<string, string>).Authorization).toBe('Bearer lan-token')
     expect(localStorage.getItem('herdrem_session')).toBe('1')
     fetchMock.mockRestore()
   })

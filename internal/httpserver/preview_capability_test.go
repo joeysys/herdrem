@@ -18,21 +18,21 @@ import (
 
 func TestPreviewCapabilityBindsHostAndExpires(t *testing.T) {
 	s := &Server{previewCaps: make(map[string]previewCapability)}
-	capability, err := s.issuePreviewCapability("local")
+	capability, err := s.issuePreviewCapability("local", "192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.validPreviewCapability(capability, "local") {
+	if !s.validPreviewCapability(capability, "local", "192.0.2.1") {
 		t.Fatal("fresh capability should be valid for its host")
 	}
-	if s.validPreviewCapability(capability, "remote") {
+	if s.validPreviewCapability(capability, "remote", "192.0.2.1") {
 		t.Fatal("capability should not be valid for another host")
 	}
 
 	s.previewMu.Lock()
-	s.previewCaps[capability] = previewCapability{host: "local", expiresAt: time.Now().Add(-time.Second)}
+	s.previewCaps[capability] = previewCapability{host: "local", ip: "192.0.2.1", expiresAt: time.Now().Add(-time.Second)}
 	s.previewMu.Unlock()
-	if s.validPreviewCapability(capability, "local") {
+	if s.validPreviewCapability(capability, "local", "192.0.2.1") {
 		t.Fatal("expired capability should be rejected")
 	}
 }
@@ -56,7 +56,7 @@ func TestPreviewAuthReturnsCapability(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Capability == "" || !s.validPreviewCapability(body.Capability, "local") {
+	if body.Capability == "" || !s.validPreviewCapability(body.Capability, "local", "192.0.2.1") {
 		t.Fatal("response did not contain a valid local capability")
 	}
 }
@@ -73,7 +73,7 @@ func TestHandleFilePreviewUsesCapabilityPath(t *testing.T) {
 		files:       files,
 		previewCaps: make(map[string]previewCapability),
 	}
-	capability, err := s.issuePreviewCapability("local")
+	capability, err := s.issuePreviewCapability("local", "192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
 	}

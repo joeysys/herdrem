@@ -71,8 +71,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Ensure data dir exists
-	_ = os.MkdirAll(cfg.DataDir, 0o755)
+	// Ensure data dir exists, owner-only: it holds session state and cached
+	// pane data that other local users should not read. Chmod as well so a
+	// directory created by an older release gets tightened too.
+	_ = os.MkdirAll(cfg.DataDir, 0o700)
+	_ = os.Chmod(cfg.DataDir, 0o700)
 
 	// Stores
 	todoStore, err := store.New(cfg.DataDir + "/todo.json")
@@ -162,6 +165,7 @@ func main() {
 
 	// File service (sandboxed reads/listings; roots from the poller's panes)
 	fileSvc := service.NewFileService(poller.CwdRoots, logger)
+	fileSvc.SetAllowedHosts(cfg.Hosts())
 	poller.SetFileService(fileSvc)
 
 	// Static FS
@@ -200,9 +204,14 @@ func main() {
 	svc.SetTunnels(tunnelSvc)
 	srv.SetTunnels(tunnelSvc)
 
+	// ReadHeaderTimeout blunts Slowloris on an exposed relay; ReadTimeout is
+	// intentionally unset — /ws hijacks its connection and preview/tunnel
+	// responses can be long-lived. IdleTimeout reaps abandoned keep-alives.
 	httpSrv := &http.Server{
-		Addr:    cfg.Addr(),
-		Handler: srv.Routes(),
+		Addr:              cfg.Addr(),
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Context for graceful shutdown

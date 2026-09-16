@@ -18,6 +18,26 @@ describe('renderMarkdown', () => {
   it('renders links', () => {
     expect(renderMarkdown('[x](https://a.b)')).toContain('href="https://a.b"')
   })
+  it('escapes quotes so link/image URLs cannot break out of attributes', () => {
+    const html = renderMarkdown('![a](x"onerror="alert(1))')
+    expect(html).toContain('src="x&quot;onerror=&quot;alert(1"')
+    expect(html).not.toContain('onerror="')
+  })
+  it('drops javascript: link URLs', () => {
+    const html = renderMarkdown('[x](javascript:alert(1))')
+    expect(html).not.toContain('<a')
+    expect(html).not.toContain('javascript:')
+  })
+  it('drops non-image data: and javascript: image URLs', () => {
+    expect(renderMarkdown('![a](javascript:alert(1))')).not.toContain('<img')
+    expect(renderMarkdown('![a](data:text/html;base64,PGI+)')).not.toContain('<img')
+    expect(renderMarkdown('![a](data:image/png;base64,iVBOR)')).toContain('src="data:image/png;base64,iVBOR"')
+  })
+  it('keeps scheme-less and whitelisted URLs', () => {
+    expect(renderMarkdown('[r](./docs/a.md)')).toContain('href="./docs/a.md"')
+    expect(renderMarkdown('[m](mailto:a@b.c)')).toContain('href="mailto:a@b.c"')
+    expect(renderMarkdown('![i](//cdn.example/x.png)')).toContain('src="//cdn.example/x.png"')
+  })
   it('renders unordered list', () => {
     const html = renderMarkdown('- one\n- two')
     expect(html).toContain('<ul>')

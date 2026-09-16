@@ -52,9 +52,13 @@ function getFullUrlWithToken(t: { public_url: string; token?: string; auth_mode:
 
 function previewTunnel(t: { public_url: string; token?: string; auth_mode: string; port: number }) {
   haptic()
-  const fullUrl = getFullUrlWithToken(t)
-  if (fullUrl) {
-    tunnels.openPreview(fullUrl, `Local Port :${t.port}`)
+  // The embedded iframe must not carry the gate token in its src: the URL
+  // lives in the DOM and browser history, and a sandboxed previewed page
+  // could otherwise read it. The clean URL lands on the tunnel's PIN/login
+  // page, which works inside the iframe; the "open in new tab" link still
+  // carries the token for one-click auth.
+  if (t.public_url) {
+    tunnels.openPreview(t.public_url, `Local Port :${t.port}`)
   }
 }
 </script>

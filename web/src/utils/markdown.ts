@@ -5,7 +5,33 @@
 // Output is sanitized HTML (input is escaped first).
 
 function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+// decodeEntities performs a single entity-decoding pass over already-escaped
+// text so scheme checks see the value the browser will decode inside an
+// attribute (e.g. "&amp;#58;" decodes to the literal "&#58;", not ":").
+function decodeEntities(s: string): string {
+  const map: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" }
+  return s.replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => map[e] ?? m)
+}
+
+const LINK_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:'])
+const IMG_SCHEMES = new Set(['http:', 'https:'])
+
+// safeUrl allows scheme-less URLs (relative paths, //host, #anchor) plus a
+// whitelist of schemes. Images additionally allow data:image/… sources.
+function safeUrl(u: string, kind: 'link' | 'img'): boolean {
+  const d = decodeEntities(u).trim()
+  if (kind === 'img' && /^data:image\//i.test(d)) return true
+  const m = d.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)
+  if (!m) return true
+  return (kind === 'img' ? IMG_SCHEMES : LINK_SCHEMES).has(m[1].toLowerCase() + ':')
 }
 
 function inlineMd(text: string): string {
@@ -16,8 +42,10 @@ function inlineMd(text: string): string {
     codes.push(c)
     return `${codes.length - 1}`
   })
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img class="md-img" alt="$1" src="$2" />')
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) =>
+    safeUrl(src, 'img') ? `<img class="md-img" alt="${alt}" src="${src}" />` : alt)
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, href) =>
+    safeUrl(href, 'link') ? `<a href="${href}" target="_blank" rel="noopener">${label}</a>` : label)
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
   s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>')

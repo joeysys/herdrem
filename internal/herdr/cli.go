@@ -54,14 +54,29 @@ func (c *CLIClient) buildCmd(ctx context.Context, host string, args ...string) *
 	if strings.HasPrefix(host, "-") {
 		return exec.CommandContext(ctx, "/bin/false")
 	}
+	// OpenSSH concatenates all args after the host into a single shell
+	// command on the remote. Quote each argument so values containing
+	// spaces or shell metacharacters (e.g. send-text payloads, pane ids,
+	// cwd paths) cannot inject shell syntax or be word-split.
+	var remoteCmd strings.Builder
+	remoteCmd.WriteString(shellQuote(c.bin))
+	for _, a := range args {
+		remoteCmd.WriteString(" ")
+		remoteCmd.WriteString(shellQuote(a))
+	}
 	sshArgs := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=5",
 		host,
-		c.bin,
+		remoteCmd.String(),
 	}
-	sshArgs = append(sshArgs, args...)
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
+}
+
+// shellQuote wraps s in single quotes so it survives one remote shell parse
+// as a single literal argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (c *CLIClient) exec(ctx context.Context, host string, args ...string) ([]byte, error) {

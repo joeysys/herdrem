@@ -177,11 +177,6 @@ const renderedMd = computed(() => {
   return renderMarkdown(preview.value.content)
 })
 
-const rawFileUrl = computed(() => {
-  if (!preview.value?.path) return ''
-  return relayFileUrl(conn.url, preview.value.path, preview.value.host, conn.token)
-})
-
 // previewUrl uses a path-based URL (/preview/<path>) so that relative URLs in
 // HTML documents (CSS, JS, images) resolve against the file's directory.
 // The URL carries only a short-lived preview capability, never the relay token.
@@ -196,11 +191,11 @@ const previewUrl = computed(() => {
 })
 
 // previewAuthUrl mints a scoped preview capability via a same-origin fetch.
-// The relay token stays in this parent-page request, never in the iframe URL.
+// The relay token stays in this parent-page request's Authorization header,
+// never in a URL or the iframe URL.
 const previewAuthUrl = computed(() => {
   const base = relayHttpBase(conn.url)
   const params = new URLSearchParams({ host: preview.value?.host || 'local' })
-  if (conn.token) params.set('token', conn.token)
   return `${base}/preview-auth?${params.toString()}`
 })
 
@@ -222,6 +217,17 @@ const isCrossOrigin = computed(() => {
   return !!o && typeof window !== 'undefined' && o !== window.location.origin
 })
 
+// rawFileUrl carries the relay token only when the file URL is cross-origin:
+// same-origin /file requests authenticate with the HttpOnly session cookie,
+// keeping the long-term token out of the URL/history. Cross-origin <img> and
+// navigation have no header channel, so ?token= remains the transition path
+// there (the server still accepts it for old bookmarks too).
+const rawFileUrl = computed(() => {
+  if (!preview.value?.path) return ''
+  const urlToken = isCrossOrigin.value ? conn.token : ''
+  return relayFileUrl(conn.url, preview.value.path, preview.value.host, urlToken)
+})
+
 // authReady stays false on any failure, so the iframe is never rendered
 // into a known-broken state; the message below explains what to do instead.
 watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], async ([path]) => {
@@ -239,7 +245,10 @@ watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], as
   }
 
   try {
-    const resp = await fetch(previewAuthUrl.value, { credentials: 'include' })
+    const resp = await fetch(previewAuthUrl.value, {
+      credentials: 'include',
+      headers: conn.token ? { Authorization: `Bearer ${conn.token}` } : undefined,
+    })
     if (!resp.ok && resp.status !== 204) {
       authError.value =
         `Preview auth failed (${resp.status}). The Relay rejected the capability request. ` +

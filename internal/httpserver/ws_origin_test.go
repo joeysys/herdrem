@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"herdrem/internal/auth"
 	"herdrem/internal/config"
 	"herdrem/internal/hub"
 )
@@ -58,7 +60,12 @@ func dialWSWithHost(t *testing.T, wsURL, origin, host string) (bool, int) {
 	return true, 0
 }
 
-func TestWSSameOriginLocalhostAllowsConfiguredTokenWithoutToken(t *testing.T) {
+// With a configured token, even a same-origin localhost browser must present
+// a credential (token or minted session) — the loopback bypass would
+// otherwise let any process that can produce a same-origin request drive the
+// relay. Without a token configured, the same-origin loopback path stays
+// open (dev mode).
+func TestWSSameOriginLocalhostRequiresCredentialWithToken(t *testing.T) {
 	wsURL, _, cancel := wsOriginServer(t, config.Config{Token: "s3cret"})
 	defer cancel()
 
@@ -68,9 +75,22 @@ func TestWSSameOriginLocalhostAllowsConfiguredTokenWithoutToken(t *testing.T) {
 	}
 	for _, host := range []string{"localhost:" + port, "127.0.0.1:" + port} {
 		origin := "http://" + host
-		if ok, code := dialWSWithHost(t, wsURL, origin, host); !ok {
-			t.Fatalf("local same-origin host %q without token failed with status %d", host, code)
+		if ok, code := dialWSWithHost(t, wsURL, origin, host); ok {
+			t.Fatalf("local same-origin host %q without credential succeeded", host)
+		} else if code != http.StatusUnauthorized {
+			t.Errorf("local same-origin host %q status = %d, want %d", host, code, http.StatusUnauthorized)
 		}
+		// The same dial carrying the token must succeed.
+		ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, _, err := websocket.Dial(ctx, wsURL+"/ws?token=s3cret", &websocket.DialOptions{
+			HTTPHeader: map[string][]string{"Origin": {origin}},
+			Host:       host,
+		})
+		ctxCancel()
+		if err != nil {
+			t.Fatalf("local same-origin host %q with token failed: %v", host, err)
+		}
+		conn.Close(websocket.StatusNormalClosure, "")
 	}
 }
 
@@ -102,14 +122,25 @@ func TestLocalOriginHeadersFromRemotePeerRequireToken(t *testing.T) {
 	}
 }
 
-func TestIPv6LoopbackHostAllowsConfiguredTokenWithoutToken(t *testing.T) {
-	s := &Server{cfg: config.Config{Token: "s3cret"}}
+func TestIPv6LoopbackHostRequiresCredentialWithToken(t *testing.T) {
+	s := &Server{cfg: config.Config{Token: "s3cret"}, sessions: map[string]time.Time{}}
 	r := httptest.NewRequest("GET", "http://[::1]:8766/ws", nil)
 	r.Header.Set("Origin", "http://[::1]:8766")
 	r.RemoteAddr = "[::1]:12345"
 
+	if s.relayAuthOK(r) {
+		t.Fatal("IPv6 loopback same-origin request bypassed a configured token")
+	}
+
+	// A minted session cookie is the credential that keeps localhost UX
+	// token-free after the first login.
+	session, err := s.issueSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
 	if !s.relayAuthOK(r) {
-		t.Fatal("IPv6 loopback same-origin request should not require a token")
+		t.Fatal("session cookie did not authenticate the IPv6 loopback request")
 	}
 }
 
@@ -152,6 +183,25 @@ func TestWSValidTokenAuthorizesAnyOrigin(t *testing.T) {
 	if ok, _ := dialWS(t, wsURL, "http://localhost:8765"); ok {
 		t.Error("cross-origin dial without the token succeeded")
 	}
+}
+
+// The browser client carries the token as the herdrem.<base64url> subprotocol
+// instead of ?token=, keeping the credential out of the URL. Prove the whole
+// path works end to end through the WS upgrade.
+func TestWSSubprotocolTokenAuthenticates(t *testing.T) {
+	tok := "s3cret token/with=specials?"
+	wsURL, _, cancel := wsOriginServer(t, config.Config{Token: tok})
+	defer cancel()
+
+	ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer ctxCancel()
+	conn, _, err := websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{
+		Subprotocols: []string{"herdrem." + base64.RawURLEncoding.EncodeToString([]byte(tok))},
+	})
+	if err != nil {
+		t.Fatalf("subprotocol-authenticated dial failed: %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
 }
 
 // Regression guard for the subtle part of the fix: auth.Check returns true for

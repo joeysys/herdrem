@@ -105,6 +105,25 @@ func TestBuildCmd_LocalVsSSH(t *testing.T) {
 	}
 }
 
+// Remote args must be single-quoted inside the one command string ssh
+// concatenates — a pane id or send-text payload containing shell
+// metacharacters must not re-parse on the remote.
+func TestBuildCmdSSHQuotesRemoteArgs(t *testing.T) {
+	c := &CLIClient{bin: "/usr/bin/herdr"}
+	ssh := c.buildCmd(context.Background(), "user@remote", "pane", "send-text", "p1", "hi; rm -rf $HOME & `id`")
+	remote := ssh.Args[len(ssh.Args)-1]
+	for _, want := range []string{"'/usr/bin/herdr'", "'pane'", "'send-text'", `'hi; rm -rf $HOME & ` + "`id`" + `'`} {
+		if !strings.Contains(remote, want) {
+			t.Errorf("remote command missing quoted %q: %q", want, remote)
+		}
+	}
+	// The remote command is a single ssh argv item — word-splitting or
+	// operator injection cannot leak out of it.
+	if ssh.Args[len(ssh.Args)-2] != "user@remote" {
+		t.Errorf("ssh arg before remote command = %q, want host", ssh.Args[len(ssh.Args)-2])
+	}
+}
+
 func TestHostLabel(t *testing.T) {
 	if hostLabel("") != "local" || hostLabel("local") != "local" {
 		t.Error("local host should map to 'local'")

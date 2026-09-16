@@ -33,8 +33,9 @@ type FileEntry struct {
 // FileService serves sandboxed file reads and directory listings, locally or
 // over SSH for remote hosts. Roots come from the poller's known pane cwds.
 type FileService struct {
-	roots  func(host string) []string
-	logger *slog.Logger
+	roots   func(host string) []string
+	allowed map[string]bool
+	logger  *slog.Logger
 }
 
 // NewFileService creates a FileService. roots returns allowed cwd roots per host.
@@ -43,6 +44,33 @@ func NewFileService(roots func(host string) []string, logger *slog.Logger) *File
 		logger = slog.Default()
 	}
 	return &FileService{roots: roots, logger: logger}
+}
+
+// SetAllowedHosts sets the set of remote hosts file operations may target —
+// the same allowlist Service applies to pane_create. It is defense in depth:
+// roots() already yields nothing for an unknown host, so the check fails
+// closed either way.
+func (fs *FileService) SetAllowedHosts(hosts []string) {
+	set := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		if h != "" {
+			set[h] = true
+		}
+	}
+	fs.allowed = set
+}
+
+// hostOK reports whether a client-supplied host may be used for file
+// operations. Leading-dash hosts are rejected since the string reaches
+// ssh's argument list; a nil allowlist means local-only.
+func (fs *FileService) hostOK(host string) bool {
+	if isLocal(host) {
+		return true
+	}
+	if strings.HasPrefix(host, "-") {
+		return false
+	}
+	return fs.allowed[host]
 }
 
 func isLocal(host string) bool { return host == "" || host == "local" }
@@ -184,6 +212,9 @@ type FileReadResult struct {
 
 // Read reads a file within the sandbox (local or remote).
 func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadResult, error) {
+	if !fs.hostOK(host) {
+		return nil, fmt.Errorf("unauthorized host %q", host)
+	}
 	roots := fs.roots(host)
 	var data []byte
 	var err error
@@ -193,7 +224,7 @@ func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadRe
 		if err := isSafePath(path, roots); err != nil {
 			return nil, err
 		}
-		data, err = readRemote(ctx, host, path)
+		data, err = readRemote(ctx, host, path, roots)
 	}
 	if err != nil {
 		return nil, err
@@ -224,6 +255,9 @@ func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadRe
 // ServeStream streams a file to http.ResponseWriter using http.ServeContent (local) or byte stream (remote).
 // Safe-path checked. Bypasses 1 MiB maxFileRead truncation.
 func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host, path string) error {
+	if !fs.hostOK(host) {
+		return fmt.Errorf("unauthorized host %q", host)
+	}
 	roots := fs.roots(host)
 	if !isLocal(host) {
 		if err := isSafePath(path, roots); err != nil {
@@ -235,7 +269,7 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 		// large asset — which HTML previews fetch automatically via relative
 		// URLs — could OOM the Relay. `cat` + io.Copy keeps memory at the
 		// copy-buffer size regardless of file size.
-		return fs.serveRemoteStream(w, r, host, path)
+		return fs.serveRemoteStream(w, r, host, path, roots)
 	}
 
 	f, err := openWithinRoots(path, roots)
@@ -274,11 +308,32 @@ var maxStreamBytes int64 = 256 << 20 // 256 MiB
 // for error reporting. Unbounded buffering here is its own memory sink.
 const maxStderrBytes = 8 << 10
 
+// remoteResolveScript emits a shell snippet that resolves the client-supplied
+// path through symlinks on the remote and verifies the result stays inside
+// one of roots, exiting 1 otherwise. The check runs remotely inside the same
+// ssh command as the subsequent action, so it sees the remote filesystem —
+// the local isSafePath pre-check cannot observe remote symlinks.
+// Resolution is POSIX-portable (cd -P + leaf readlink) because BSD remotes
+// lack `realpath`/`readlink -f`.
+func remoteResolveScript(path string, roots []string) string {
+	var b strings.Builder
+	b.WriteString("p=")
+	b.WriteString(shellQuote(path))
+	b.WriteString(`; while :; do d=$(dirname "$p"); b=$(basename "$p"); rd=$(cd -P "$d" 2>/dev/null && pwd -P) || exit 1; r="$rd/$b"; if [ -L "$r" ]; then p=$(readlink "$r") || exit 1; case "$p" in /*) ;; *) p="$rd/$p";; esac; else break; fi; done`)
+	b.WriteString(`; ok=0; for R in`)
+	for _, root := range roots {
+		b.WriteString(" ")
+		b.WriteString(shellQuote(filepath.Clean(root)))
+	}
+	b.WriteString(`; do RR=$(cd -P "$R" 2>/dev/null && pwd -P) || RR=$R; case "$r" in "$RR"|"$RR"/*) ok=1;; esac; done; [ "$ok" = 1 ] || { echo "path outside allowed roots" >&2; exit 1; };`)
+	return b.String()
+}
+
 // remoteCatCommand builds the command that streams a remote file to stdout.
 // Indirected through a var so tests can substitute a local process.
-var remoteCatCommand = func(ctx context.Context, host, path string) *exec.Cmd {
+var remoteCatCommand = func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
 	return exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-		host, "cat", "--", shellQuote(path))
+		host, remoteResolveScript(path, roots)+` cat -- "$r"`)
 }
 
 // boundedWriter keeps at most limit bytes and silently discards the rest. It
@@ -312,10 +367,10 @@ func (b *boundedWriter) String() string { return b.buf.String() }
 // writing into a full pipe. Calling cmd.Wait() in that state waits for a
 // process that can never exit, so the context must be cancelled (killing the
 // child) *before* reaping. Getting this backwards deadlocks the request.
-func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request, host, path string) error {
+func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request, host, path string, roots []string) error {
 	ctx, cancel := context.WithCancel(r.Context())
 
-	cmd := remoteCatCommand(ctx, host, path)
+	cmd := remoteCatCommand(ctx, host, path, roots)
 	stderr := &boundedWriter{limit: maxStderrBytes}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
@@ -361,8 +416,12 @@ func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request,
 		// Genuinely empty file.
 	}
 
-	mime, _, _ := guessMime(path, head)
-	w.Header().Set("Content-Type", mime)
+	// A caller-provided Content-Type wins (e.g. /file flattens active MIME
+	// types to text/plain); otherwise infer from extension + sniffed content.
+	if w.Header().Get("Content-Type") == "" {
+		mime, _, _ := guessMime(path, head)
+		w.Header().Set("Content-Type", mime)
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private, max-age=300")
@@ -405,6 +464,9 @@ func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request,
 // Exists checks if a file exists within the sandbox (local or remote).
 // Does not read the file content — just a stat. Safe-path checked.
 func (fs *FileService) Exists(ctx context.Context, host, path string) bool {
+	if !fs.hostOK(host) {
+		return false
+	}
 	roots := fs.roots(host)
 	if isLocal(host) {
 		f, err := openWithinRoots(path, roots)
@@ -417,17 +479,19 @@ func (fs *FileService) Exists(ctx context.Context, host, path string) bool {
 	if err := isSafePath(path, roots); err != nil {
 		return false
 	}
-	// remote: ssh test -e
+	// remote: resolve through symlinks and check containment, then test -e
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(checkCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, "test", "-e", shellQuote(path), "&&", "echo", "ok")
+	cmd := exec.CommandContext(checkCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+		host, remoteResolveScript(path, roots)+` test -e "$r"`)
 	return cmd.Run() == nil
 }
 
-func readRemote(ctx context.Context, host, path string) ([]byte, error) {
+func readRemote(ctx context.Context, host, path string, roots []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "base64", shellQuote(path))
+	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+		host, remoteResolveScript(path, roots)+` base64 < "$r"`)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -439,6 +503,9 @@ func readRemote(ctx context.Context, host, path string) ([]byte, error) {
 
 // List returns the entries of a directory within the sandbox (local or remote).
 func (fs *FileService) List(ctx context.Context, host, path string) ([]FileEntry, error) {
+	if !fs.hostOK(host) {
+		return nil, fmt.Errorf("unauthorized host %q", host)
+	}
 	roots := fs.roots(host)
 	if isLocal(host) {
 		return listLocalWithinRoots(path, roots)
@@ -446,7 +513,7 @@ func (fs *FileService) List(ctx context.Context, host, path string) ([]FileEntry
 	if err := isSafePath(path, roots); err != nil {
 		return nil, err
 	}
-	return listRemote(ctx, host, path)
+	return listRemote(ctx, host, path, roots)
 }
 
 func readLocalWithinRoots(path string, roots []string) ([]byte, error) {
@@ -487,11 +554,12 @@ func listLocalWithinRoots(path string, roots []string) ([]FileEntry, error) {
 	return out, nil
 }
 
-func listRemote(ctx context.Context, host, path string) ([]FileEntry, error) {
+func listRemote(ctx context.Context, host, path string, roots []string) ([]FileEntry, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	// emit "type\tsize\tmtime\tname" per line via a portable shell one-liner
-	sh := fmt.Sprintf(`cd %s 2>/dev/null && for f in .* *; do [ "$f" = "." ] || [ "$f" = ".." ] || [ -e "$f" ] || continue; if [ -d "$f" ]; then t=dir; s=0; elif [ -L "$f" ]; then t=link; s=0; else t=file; s=$(wc -c <"$f" 2>/dev/null || echo 0); fi; m=$(stat -c '%%Y' "$f" 2>/dev/null || echo 0); printf '%%s\t%%s\t%%s\t%%s\n' "$t" "$s" "$m" "$f"; done`, shellQuote(path))
+	// emit "type\tsize\tmtime\tname" per line via a portable shell one-liner,
+	// after resolving the dir and checking containment on the remote side.
+	sh := remoteResolveScript(path, roots) + ` cd "$r" 2>/dev/null && for f in .* *; do [ "$f" = "." ] || [ "$f" = ".." ] || [ -e "$f" ] || continue; if [ -d "$f" ]; then t=dir; s=0; elif [ -L "$f" ]; then t=link; s=0; else t=file; s=$(wc -c <"$f" 2>/dev/null || echo 0); fi; m=$(stat -c '%Y' "$f" 2>/dev/null || echo 0); printf '%s\t%s\t%s\t%s\n' "$t" "$s" "$m" "$f"; done`
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "sh", "-c", sh)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

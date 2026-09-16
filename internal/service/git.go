@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -46,11 +47,17 @@ const (
 // The diff is limited to files under cwd (via `-- .` pathspec) so the
 // preview respects the same sandbox boundary as the file browser.
 func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDiffMode, commit string) (string, error) {
+	if !fs.hostOK(host) {
+		return "", fmt.Errorf("unauthorized host %q", host)
+	}
 	roots := fs.roots(host)
 	if err := isSafePath(cwd, roots); err != nil {
 		return "", err
 	}
-	args := []string{"--no-pager", "diff", "--no-color"}
+	// --no-ext-diff/--no-textconv pin the diff to builtin text diffing: repo
+	// or user config could otherwise name a diff.external command or a
+	// diff.<driver>.textconv helper, which git would execute.
+	args := []string{"--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv"}
 	switch mode {
 	case GitDiffCached:
 		args = append(args, "--cached")
@@ -63,7 +70,7 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 		}
 		// `git show` includes the commit header + diff; use --format= to keep
 		// the subject line so the user sees what they picked, then the patch.
-		args = []string{"--no-pager", "show", "--no-color", "--format=fuller", commit}
+		args = []string{"--no-pager", "show", "--no-color", "--format=fuller", "--no-ext-diff", "--no-textconv", commit}
 	case GitDiffUnstaged, "":
 		// plain diff
 	default:
@@ -85,6 +92,9 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 // GitLog returns the most recent commits for the repo at cwd, newest first.
 // cwd must resolve inside the host's allowed roots.
 func (fs *FileService) GitLog(ctx context.Context, host, cwd string) ([]CommitEntry, error) {
+	if !fs.hostOK(host) {
+		return nil, fmt.Errorf("unauthorized host %q", host)
+	}
 	roots := fs.roots(host)
 	if err := isSafePath(cwd, roots); err != nil {
 		return nil, err
@@ -93,7 +103,7 @@ func (fs *FileService) GitLog(ctx context.Context, host, cwd string) ([]CommitEn
 	// records. Subject is the final field so embedded newlines in the body
 	// (rare in a one-line subject) don't break parsing.
 	format := "%H%x1f%an%x1f%ad%x1f%s%x1e"
-	args := []string{"--no-pager", "log", "--no-color", "-n", fmt.Sprintf("%d", maxLogCommits), "--date=short", "--pretty=format:" + format}
+	args := []string{"--no-pager", "log", "--no-color", "--no-ext-diff", "--no-textconv", "-n", fmt.Sprintf("%d", maxLogCommits), "--date=short", "--pretty=format:" + format}
 	out, err := fs.runGit(ctx, host, cwd, args...)
 	if err != nil {
 		return nil, err
@@ -147,6 +157,38 @@ func (w *cancelOnFullWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// gitUnsafeEnv lists environment variables that could alter diff plumbing or
+// spawn helper processes; they are scrubbed from git invocations. Repo or
+// user config exec vectors are additionally pinned off via --no-ext-diff and
+// --no-textconv on every git command.
+var gitUnsafeEnv = []string{
+	"GIT_EXTERNAL_DIFF",
+	"GIT_DIFF_OPTS",
+	"GIT_PAGER",
+	"PAGER",
+	"GIT_CONFIG_COUNT",
+	"GIT_CONFIG_PARAMETERS",
+}
+
+// gitSafeEnv returns the process environment without variables that could
+// redirect git's diff/config machinery.
+func gitSafeEnv() []string {
+	blocked := make(map[string]bool, len(gitUnsafeEnv))
+	for _, n := range gitUnsafeEnv {
+		blocked[n] = true
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if blocked[name] || strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // runGit executes `git <args...>` with cwd as the working directory, locally
 // or over SSH for remote hosts. The cwd has already been validated against
 // the sandbox roots by the caller. stdout and stderr are capped at
@@ -155,20 +197,33 @@ func (w *cancelOnFullWriter) Write(p []byte) (int, error) {
 var remoteGitCommand = func(ctx context.Context, host, cwd string, args ...string) *exec.Cmd {
 	if isLocal(host) {
 		gitArgs := append([]string{"-C", cwd}, args...)
-		return exec.CommandContext(ctx, "git", gitArgs...)
+		cmd := exec.CommandContext(ctx, "git", gitArgs...)
+		cmd.Env = gitSafeEnv()
+		return cmd
 	}
 	// For SSH remotes, OpenSSH concatenates all args after the host into a
 	// single shell command string. Each argument must be shell-quoted to
-	// prevent injection and word-splitting on the remote side.
-	remoteCmd := "git " + shellQuote("-C") + " " + shellQuote(cwd)
+	// prevent injection and word-splitting on the remote side. `env -u`
+	// scrubs the same diff/config env knobs on the remote.
+	var remoteCmd strings.Builder
+	for _, n := range gitUnsafeEnv {
+		remoteCmd.WriteString("env -u ")
+		remoteCmd.WriteString(n)
+		remoteCmd.WriteString(" ")
+	}
+	remoteCmd.WriteString("git ")
+	remoteCmd.WriteString(shellQuote("-C"))
+	remoteCmd.WriteString(" ")
+	remoteCmd.WriteString(shellQuote(cwd))
 	for _, a := range args {
-		remoteCmd += " " + shellQuote(a)
+		remoteCmd.WriteString(" ")
+		remoteCmd.WriteString(shellQuote(a))
 	}
 	sshArgs := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=5",
 		host,
-		remoteCmd,
+		remoteCmd.String(),
 	}
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
 }
