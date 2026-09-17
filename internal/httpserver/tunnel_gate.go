@@ -89,6 +89,13 @@ func (rl *gateRateLimiter) recordFailure(ip string) {
 		st = &gateAttemptState{}
 		rl.attempts[ip] = st
 	}
+	// A client whose block already expired starts a fresh failure window —
+	// otherwise a single failure after each block re-arms it and a retrying
+	// client (e.g. the PWA's WS reconnect loop) stays locked out indefinitely
+	// even after the user supplies a valid credential.
+	if !st.blockUntil.IsZero() && !time.Now().Before(st.blockUntil) {
+		st.failures = 0
+	}
 	st.failures++
 	st.lastFail = time.Now()
 	if st.failures >= gateMaxFailedAttempts {

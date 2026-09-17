@@ -37,6 +37,11 @@ func TestSessionAuthSetsHttpOnlyCookie(t *testing.T) {
 	if !found.HttpOnly || found.Path != "/" {
 		t.Fatalf("cookie = %+v, want HttpOnly Path=/", found)
 	}
+	// The cookie must be persistent, not session-scoped: some PWA containers
+	// drop session cookies on close, which would re-prompt for the token.
+	if found.MaxAge != int(sessionTTL.Seconds()) {
+		t.Fatalf("cookie MaxAge = %d, want %d", found.MaxAge, int(sessionTTL.Seconds()))
+	}
 	// The cookie must carry an opaque session id, never the relay token.
 	if found.Value == "" || found.Value == "secret" {
 		t.Fatalf("cookie value %q must be an opaque session id, not the token", found.Value)

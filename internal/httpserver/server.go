@@ -34,9 +34,11 @@ const previewCapabilityTTL = 10 * time.Minute
 // Preview responses set their own sandbox CSP and must not inherit this.
 const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: http: https:; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
 
-// sessionTTL bounds a minted session's lifetime. The cookie is
-// browser-session scoped, so it may end sooner; the server-side TTL bounds
-// an idle session even if a client holds onto it.
+// sessionTTL bounds a minted session's lifetime. The cookie carries
+// Max-Age=sessionTTL so it survives PWA container restarts — session-scope
+// cookies are dropped by some Android WebAPK/standalone containers when the
+// window closes, which re-prompts for the token on every cold start. The
+// server-side TTL still bounds an idle session even if a client holds onto it.
 const sessionTTL = 24 * time.Hour
 
 // maxSessions/maxPreviewCaps bound the server-side credential maps so an
@@ -411,6 +413,7 @@ func (s *Server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
+		MaxAge:   int(sessionTTL.Seconds()),
 	})
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
@@ -572,9 +575,40 @@ func (s *Server) validSession(r *http.Request) bool {
 	return true
 }
 
+// sessionSlideInterval paces session renewal for open WS connections —
+// comfortably below sessionTTL so an active session never lapses.
+const sessionSlideInterval = time.Hour
+
+// slideSession renews a session's expiry while the connection that
+// authenticated with it stays open. An already-expired session is not
+// resurrected.
+func (s *Server) slideSession(ctx context.Context, id string) {
+	t := time.NewTicker(sessionSlideInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		s.sessionMu.Lock()
+		if exp, ok := s.sessions[id]; ok && exp.After(time.Now()) {
+			s.sessions[id] = time.Now().Add(sessionTTL)
+		}
+		s.sessionMu.Unlock()
+	}
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !s.relayAuthGate(w, r) {
 		return
+	}
+	// Slide the session that authenticated this connection for as long as
+	// it stays open — WS traffic does not re-authenticate, so without this
+	// the idle TTL would expire under an active client. The slide dies with
+	// the connection, so a genuinely idle client still expires on schedule.
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
+		go s.slideSession(r.Context(), c.Value)
 	}
 	// Origin policy for the upgrade itself. coder/websocket enforces a
 	// same-origin check inside Accept, independently of the token gate above.
@@ -718,7 +752,12 @@ func (s *Server) relayAuthOK(r *http.Request) bool {
 func (s *Server) authGate(w http.ResponseWriter, r *http.Request, ok func() bool) bool {
 	ip := realClientIP(r)
 	tracked := ip != "" && !isLoopbackIP(ip)
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if tracked && s.gateLimiter != nil && !s.gateLimiter.allow(ip) {
+		logger.Info("[DEBUG-a4f2] auth gate: rate-limited", "path", r.URL.Path, "ip", ip)
 		http.Error(w, "too many authentication failures", http.StatusTooManyRequests)
 		return false
 	}
@@ -731,6 +770,15 @@ func (s *Server) authGate(w http.ResponseWriter, r *http.Request, ok func() bool
 	if tracked && s.gateLimiter != nil {
 		s.gateLimiter.recordFailure(ip)
 	}
+	_, hasCookie := r.Cookie(auth.SessionCookieName)
+	logger.Info("[DEBUG-a4f2] auth gate: rejected",
+		"path", r.URL.Path, "ip", ip,
+		"bearer", strings.HasPrefix(r.Header.Get("Authorization"), "Bearer "),
+		"cookie", hasCookie,
+		"subprotocols", len(r.Header.Values("Sec-WebSocket-Protocol")),
+		"origin", r.Header.Get("Origin"),
+		"ua", r.Header.Get("User-Agent"),
+	)
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	return false
 }
