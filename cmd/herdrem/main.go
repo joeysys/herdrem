@@ -71,6 +71,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Relay auth failures return 401 with no IP lockout — brute-force
+	// resistance rests entirely on token entropy. A short token is
+	// online-guessable; push operators toward a generated one.
+	if len(cfg.Token) > 0 && len(cfg.Token) < 16 {
+		logger.Warn("HERDREM_TOKEN is short; relay auth has no failure lockout so a weak token can be guessed online",
+			"hint", "generate one with: openssl rand -hex 16")
+	}
+
 	// Ensure data dir exists, owner-only: it holds session state and cached
 	// pane data that other local users should not read. Chmod as well so a
 	// directory created by an older release gets tightened too.

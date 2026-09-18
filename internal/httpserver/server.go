@@ -48,6 +48,63 @@ const (
 	maxPreviewCaps = 1024
 )
 
+// Rejection logging is throttled per client IP: the first rejectLogBurst
+// rejections inside a rejectLogWindow are logged, further ones are counted
+// and reported once (as "suppressed") on the first rejection of the next
+// window. Without it every rejected request writes one Info line, so a
+// reconnect loop or a hostile spray would turn the log into an amplification
+// channel — the only per-request resource a 401 actually grows.
+const (
+	rejectLogBurst  = 3
+	rejectLogWindow = time.Minute
+	maxRejectLogIPs = 4096
+)
+
+// rejectLogThrottle dedups authGate rejection logs per client IP.
+type rejectLogThrottle struct {
+	mu  sync.Mutex
+	ips map[string]rejectLogState
+}
+
+type rejectLogState struct {
+	logged     int
+	suppressed int
+	windowEnd  time.Time
+}
+
+// allow reports whether this rejection should be logged now, and how many
+// earlier rejections were suppressed since the last logged line.
+func (t *rejectLogThrottle) allow(ip string, now time.Time) (bool, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ips == nil {
+		t.ips = make(map[string]rejectLogState)
+	}
+	st, ok := t.ips[ip]
+	if !ok && len(t.ips) >= maxRejectLogIPs {
+		for k, v := range t.ips {
+			if now.After(v.windowEnd) {
+				delete(t.ips, k)
+			}
+		}
+		if len(t.ips) >= maxRejectLogIPs {
+			t.ips = make(map[string]rejectLogState, maxRejectLogIPs)
+		}
+	}
+	if !ok || now.After(st.windowEnd) {
+		t.ips[ip] = rejectLogState{logged: 1, windowEnd: now.Add(rejectLogWindow)}
+		return true, st.suppressed
+	}
+	st.logged++
+	if st.logged > rejectLogBurst {
+		st.suppressed++
+		t.ips[ip] = st
+		return false, 0
+	}
+	t.ips[ip] = st
+	return true, 0
+}
+
 type previewCapability struct {
 	host      string
 	ip        string // minter's client IP — the cap must be used from it
@@ -70,6 +127,7 @@ type Server struct {
 	previewCaps map[string]previewCapability
 	sessionMu   sync.Mutex
 	sessions    map[string]time.Time
+	rejectLog   rejectLogThrottle
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
@@ -744,43 +802,50 @@ func (s *Server) relayAuthOK(r *http.Request) bool {
 	return s.validSession(r)
 }
 
-// authGate wraps an auth predicate with the shared failure rate limiter so a
-// remote client brute-forcing the relay token on any authenticated endpoint
-// is throttled after repeated failures. Loopback clients are exempt — a
-// local user must never lock themselves out of their own relay (e.g. a stale
-// token triggering a WS reconnect loop).
+// authGate evaluates an auth predicate for relay endpoints. Per-IP failure
+// rate limiting was removed: the relay token is a 128-bit secret that cannot
+// be brute-forced online, and the limiter only wedged legitimate clients
+// (a PWA's reconnect loop reads as "repeated failures"; a shared egress IP
+// then blocks every device behind it). Generic request flooding is left to
+// the edge/deployment layer — relay auth never emits 429. The tunnel gate
+// keeps its own limiter because its user-chosen PIN is short and public-facing.
 func (s *Server) authGate(w http.ResponseWriter, r *http.Request, ok func() bool) bool {
-	ip := realClientIP(r)
-	tracked := ip != "" && !isLoopbackIP(ip)
+	if ok() {
+		return true
+	}
+	s.logRejection(r)
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+// logRejection emits the diagnostic line for a rejected relay auth attempt.
+// Volume is throttled per client IP (rejectLogThrottle) so a failing
+// reconnect loop or a hostile spray cannot amplify the log; the HTTP
+// response is unaffected.
+func (s *Server) logRejection(r *http.Request) {
 	logger := s.logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if tracked && s.gateLimiter != nil && !s.gateLimiter.allow(ip) {
-		logger.Info("[DEBUG-a4f2] auth gate: rate-limited", "path", r.URL.Path, "ip", ip)
-		http.Error(w, "too many authentication failures", http.StatusTooManyRequests)
-		return false
-	}
-	if ok() {
-		if tracked && s.gateLimiter != nil {
-			s.gateLimiter.recordSuccess(ip)
-		}
-		return true
-	}
-	if tracked && s.gateLimiter != nil {
-		s.gateLimiter.recordFailure(ip)
+	ip := realClientIP(r)
+	write, suppressed := s.rejectLog.allow(ip, time.Now())
+	if !write {
+		return
 	}
 	_, hasCookie := r.Cookie(auth.SessionCookieName)
-	logger.Info("[DEBUG-a4f2] auth gate: rejected",
-		"path", r.URL.Path, "ip", ip,
+	attrs := []any{
+		"path", r.URL.Path,
+		"ip", ip,
 		"bearer", strings.HasPrefix(r.Header.Get("Authorization"), "Bearer "),
 		"cookie", hasCookie,
 		"subprotocols", len(r.Header.Values("Sec-WebSocket-Protocol")),
 		"origin", r.Header.Get("Origin"),
 		"ua", r.Header.Get("User-Agent"),
-	)
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	return false
+	}
+	if suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	logger.Info("[DEBUG-a4f2] auth gate: rejected", attrs...)
 }
 
 // relayAuthGate is authGate bound to the standard relay credential check.

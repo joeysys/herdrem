@@ -135,7 +135,12 @@ the token again in that tab. File downloads use a `POST` form field, which is
 also why a file/image preview across origins (no cookie, no header channel)
 requires opening the PWA from the relay's own origin.
 
-Repeated failed logins from a non-loopback IP are rate-limited (HTTP 429).
+Relay auth failures always return HTTP 401 — relay endpoints never
+rate-limit or block client IPs (the token's entropy makes online brute force
+infeasible, and per-IP blocks wedge legitimate clients behind a shared
+egress). Use a high-entropy token (`openssl rand -hex 16`); a startup
+warning fires for short ones. HTTP 429 is still emitted by the tunnel gate's
+PIN/Basic-Auth limiter, which guards short user-chosen credentials.
 
 ### Port forwarding (Cloudflare quick tunnels)
 

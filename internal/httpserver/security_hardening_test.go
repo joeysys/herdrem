@@ -108,11 +108,14 @@ func TestHandleFileRejectsQueryToken(t *testing.T) {
 	}
 }
 
-// Repeated auth failures from a non-loopback client are throttled; loopback
-// clients stay exempt so a local user can never lock themselves out.
-func TestRelayAuthGateRateLimitsRemoteFailures(t *testing.T) {
+// Relay endpoints never rate-limit auth failures: the token is a 128-bit
+// secret (brute force is not online-feasible), and per-IP blocks wedge
+// legitimate clients — a PWA's reconnect loop reads as repeated failures and
+// a shared egress IP then locks out every device behind it. The tunnel gate
+// keeps its own limiter for the short, public-facing PIN.
+func TestRelayAuthGateNeverRateLimits(t *testing.T) {
 	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
-	for i := 0; i < gateMaxFailedAttempts; i++ {
+	for i := 0; i < gateMaxFailedAttempts+10; i++ {
 		r := httptest.NewRequest("GET", "http://relay.local/ws", nil)
 		r.Header.Set("Authorization", "Bearer wrong")
 		w := httptest.NewRecorder()
@@ -123,15 +126,12 @@ func TestRelayAuthGateRateLimitsRemoteFailures(t *testing.T) {
 			t.Fatalf("attempt %d: status = %d, want 401", i+1, w.Code)
 		}
 	}
-	// Next failure trips the block — the limiter answers before re-checking.
+	// A valid credential authenticates immediately after the failure streak.
 	r := httptest.NewRequest("GET", "http://relay.local/ws", nil)
-	r.Header.Set("Authorization", "Bearer wrong")
+	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	if s.relayAuthGate(w, r) {
-		t.Fatal("blocked request authenticated")
-	}
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("blocked status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	if !s.relayAuthGate(w, r) {
+		t.Fatal("valid token rejected after failures")
 	}
 }
 
@@ -146,6 +146,35 @@ func TestRelayAuthGateExemptsLoopback(t *testing.T) {
 		if w.Code == http.StatusTooManyRequests {
 			t.Fatalf("loopback client was rate-limited on attempt %d", i+1)
 		}
+	}
+}
+
+// Rejection logs are throttled per IP: the first rejectLogBurst rejections in
+// a window are logged, the rest are counted and folded into a "suppressed"
+// total on the next window's first logged line. Rejections still return 401
+// every time — only the log volume is bounded.
+func TestRejectLogThrottleBoundsVolume(t *testing.T) {
+	var th rejectLogThrottle
+	now := time.Now()
+	for i := 0; i < rejectLogBurst; i++ {
+		if write, suppressed := th.allow("192.0.2.9", now); !write || suppressed != 0 {
+			t.Fatalf("attempt %d: write=%v suppressed=%d, want true/0", i+1, write, suppressed)
+		}
+	}
+	for i := 0; i < 7; i++ {
+		if write, _ := th.allow("192.0.2.9", now); write {
+			t.Fatalf("attempt %d should have been suppressed", rejectLogBurst+i+1)
+		}
+	}
+	// A different IP is not affected by the first IP's throttle state.
+	if write, _ := th.allow("203.0.113.7", now); !write {
+		t.Fatal("other IP throttled by a different IP's rejections")
+	}
+	// Next window: the first rejection logs again and reports the suppressed
+	// count from the previous window.
+	write, suppressed := th.allow("192.0.2.9", now.Add(rejectLogWindow+time.Second))
+	if !write || suppressed != 7 {
+		t.Fatalf("next window: write=%v suppressed=%d, want true/7", write, suppressed)
 	}
 }
 

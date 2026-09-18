@@ -215,7 +215,9 @@ See [docker-compose.yml](../docker-compose.yml) for the Web-only container.
   never forwarded. `direct` (no gate) stays off unless
   `HERDREM_ALLOW_DIRECT_TUNNEL=1`. At most `HERDREM_TUNNEL_MAX` (default 8)
   forwards at once. See [README configuration](../README.md#configuration).
-- Repeated failed logins from a remote IP return HTTP 429.
+- Failed relay logins always return HTTP 401 — there is no per-IP lockout
+  (a reconnecting client must never wedge its own egress IP). HTTP 429 is
+  only returned by the tunnel gate's PIN/Basic-Auth limiter.
 - **Docker vs host boundary**: Docker serves only the Web/PWA. The host systemd
   service is the only supported relay deployment and is where the real `herdr`
   CLI, user socket, agents, and relay token live.

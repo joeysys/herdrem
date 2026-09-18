@@ -84,9 +84,10 @@ watch(
     try {
       const res = await fetch(`${relayHttpBase(conn.url)}/session-auth`, { credentials: 'include' });
       serverNeedsToken.value = res.status === 401;
-      // The server actively rejected auth (dead credential or rate-limited),
-      // so the background WS retry loop can only fail — stop it instead of
-      // feeding the gate limiter until the user submits a new token.
+      // The server actively rejected auth (the relay itself only ever
+      // answers 401; a 429 can still come from a tunnel gate or an edge
+      // proxy in front of it), so the background WS retry loop can only
+      // fail — stop it until the user submits a new token.
       if (res.status === 401 || res.status === 429) conn.disconnect();
     } catch {
       serverNeedsToken.value = false;

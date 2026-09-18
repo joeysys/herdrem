@@ -42,6 +42,20 @@ describe('useAgentsStore', () => {
     expect(label.value).toBe('1h')
   })
 
+  it('collapses "name•model" display names to the bare agent type', () => {
+    const agents = useAgentsStore()
+    agents.setAgents([
+      { pane_id: '%1', agent: 'cmd', display_agent: 'cmd•sonnet', kind: 'agent' },
+      { pane_id: '%2', agent: 'cmd', display_agent: 'cmd•gpt-5', kind: 'agent' },
+      { pane_id: '%3', agent: 'claude', kind: 'agent' },
+    ])
+
+    expect(agents.agentTypes).toEqual(['claude', 'cmd'])
+
+    agents.typeFilter = 'cmd'
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['%1', '%2'])
+  })
+
   it('binds todos to a workspace instead of individual panes', () => {
     const agents = useAgentsStore()
     const todo = useTodoStore()

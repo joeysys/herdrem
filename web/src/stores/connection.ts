@@ -208,11 +208,11 @@ export const useAgentsStore = defineStore('agents', () => {
     lastSnapshotKey = '';
   }
 
-  /** distinct agent display names for the type filter dropdown */
+  /** distinct agent type names for the type filter dropdown */
   const agentTypes = computed(() => {
     const set = new Set<string>();
     for (const a of agents.value) {
-      const name = displayAgent(a);
+      const name = agentTypeName(a);
       if (name) set.add(name);
     }
     return [...set].sort((x, y) => x.localeCompare(y));
@@ -231,7 +231,7 @@ export const useAgentsStore = defineStore('agents', () => {
         const matchTodo = sf.has('todo') && todo.hasItems(todoKey(a));
         if (!matchStatus && !matchTodo) return false;
       }
-      if (typeFilter.value !== 'all' && displayAgent(a) !== typeFilter.value) return false;
+      if (typeFilter.value !== 'all' && agentTypeName(a) !== typeFilter.value) return false;
       if (q) {
         const hay = [a.project, displayAgent(a), a.pane_id, a.host, a.workspace_label].map((s) =>
           (s || '').toLowerCase(),
@@ -295,6 +295,13 @@ export function paneKind(a: Pane): 'agent' | 'shell' {
 
 export function displayAgent(a: Pane): string {
   return String(a.display_agent || a.agent || '').trim();
+}
+
+/** agentTypeName returns the name used by the type filter — herdr may suffix
+ *  the display name with "•model" (e.g. "cmd•sonnet"), which the filter
+ *  collapses to the bare name so model variants group under one option. */
+export function agentTypeName(a: Pane): string {
+  return displayAgent(a).split('•')[0].trim();
 }
 
 /** paneTitle returns the best display title for a pane.
