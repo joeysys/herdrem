@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
 import { useKeyRepeat } from '../../composables/useKeyRepeat'
@@ -7,11 +7,12 @@ import { useQuickPopover } from '../../composables/useQuickPopover'
 import {
   detectMenu, isStickyChoice, menuLabel,
 } from '../../utils/menu'
+import { safeStorage } from '../../utils/storage'
 import type { Pane } from '../../api/types'
 import ArrowPad from './ArrowPad.vue'
 
-const props = defineProps<{ pane: Pane | null }>()
-const emit = defineEmits<{ fill: [text: string]; edit: [] }>()
+const props = defineProps<{ pane: Pane | null; modelValue?: string }>()
+const emit = defineEmits<{ 'update:modelValue': [value: string]; fill: [text: string]; edit: [] }>()
 
 const term = useTerminalStore()
 const { haptic } = useHaptic()
@@ -130,8 +131,47 @@ function approve(opt: ApproveOption) {
   term.respond(opt.payload, opt.index, true)
 }
 
+// --- optional input box ---
+// The inline prompt input inside the terminal stays the default; this toggle
+// reveals a regular input row below the key bar and is persisted per device.
+const SHOW_INPUT_KEY = 'herdrem_shell_input'
+const showInput = ref(safeStorage.getItem(SHOW_INPUT_KEY) === 'true')
+watch(showInput, (v) => {
+  safeStorage.setItem(SHOW_INPUT_KEY, String(v))
+})
+
+// Shared command buffer — v-model bound to TermView's shellText so the inline
+// prompt and this box always show the same draft.
+const text = computed({
+  get: () => props.modelValue ?? '',
+  set: (v) => emit('update:modelValue', v),
+})
+
+const boxInputEl = ref<HTMLInputElement | null>(null)
+
+function toggleInput() {
+  haptic(8)
+  showInput.value = !showInput.value
+  if (showInput.value) nextTick(() => boxInputEl.value?.focus())
+}
+
+function submitInput() {
+  haptic()
+  const t = text.value
+  if (!t) return
+  term.sendText(t, true)
+  text.value = ''
+}
+
+// The element the parent should treat as the shell's active text input:
+// the box when shown, otherwise null (TermView falls back to the inline one).
+defineExpose({
+  inputEl: () => (showInput.value ? boxInputEl.value : null),
+})
+
 // --- special keys ---
 const SHELL_KEYS: Array<{ label: string; key: string; danger?: boolean; repeat?: boolean }> = [
+  { label: 'Enter', key: 'Enter' },
   { label: 'Esc', key: 'Escape' },
   { label: 'Tab', key: 'Tab' },
   { label: '^C', key: 'Ctrl+c', danger: true, repeat: true },
@@ -176,6 +216,16 @@ function onArrowKey(key: string) {
     </div>
 
     <div class="key-row">
+      <button
+        type="button"
+        class="key input-toggle"
+        :class="{ active: showInput }"
+        aria-label="Toggle input box"
+        :aria-pressed="showInput"
+        title="Input box"
+        @click="toggleInput"
+        @pointerdown.prevent
+      >❯</button>
       <div class="qp-wrap" @mouseleave="qp.hoverClose()">
         <button
           ref="qpBtnCmdsEl"
@@ -222,6 +272,24 @@ function onArrowKey(key: string) {
         @click="toggleCtrl"
       >ctrl</button>
     </div>
+
+    <form v-if="showInput" class="input-row" @submit.prevent="submitInput">
+      <span class="prompt" aria-hidden="true">❯</span>
+      <input
+        ref="boxInputEl"
+        v-model="text"
+        class="cmd"
+        type="text"
+        placeholder="send to shell…"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        enterkeyhint="send"
+        aria-label="Command to send to shell"
+      />
+      <button type="submit" class="send-btn" :disabled="!text.length" aria-label="Send command to shell">send</button>
+    </form>
 
     <Teleport to="body">
       <div v-if="qp.open.value === 'shellCmds'" class="qp-pop" :style="{ left: qp.pos.value.left + 'px', bottom: qp.pos.value.bottom + 'px' }" @click.stop @mouseenter="qp.cancelClose()" @mouseleave="qp.hoverClose()">
@@ -315,11 +383,52 @@ function onArrowKey(key: string) {
 .key:active { transform: translateY(1px); border-bottom-width: 1px; }
 .key.danger { color: var(--red); }
 .key.danger:hover { background: var(--red-soft); }
-.key.ctrl.active, .key.arrows.active {
+.key.ctrl.active, .key.arrows.active, .key.input-toggle.active {
   color: var(--blue);
   background: var(--blue-soft);
   border-color: rgba(96, 165, 250, 0.5);
 }
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--term-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.input-row:focus-within {
+  border-color: rgba(96, 165, 250, 0.5);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.12);
+}
+.prompt { color: var(--green); font-family: var(--font-mono); font-weight: 700; }
+.cmd {
+  flex: 1; min-width: 0;
+  background: transparent; border: none; outline: none;
+  color: var(--term-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  caret-color: var(--green);
+}
+.cmd::placeholder { color: var(--faint); }
+.send-btn {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--blue);
+  background: var(--blue-soft);
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  transition: opacity 0.15s, filter 0.15s, transform 0.1s;
+}
+.send-btn:hover:not(:disabled) { filter: brightness(1.2); }
+.send-btn:active:not(:disabled) { transform: scale(0.94); }
+.send-btn:disabled { opacity: 0.35; cursor: default; }
 
 /* Quick popover buttons inline in key-row */
 .qp-wrap { position: relative; flex-shrink: 0; }

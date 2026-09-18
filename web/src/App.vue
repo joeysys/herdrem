@@ -379,6 +379,13 @@ const currentRelayName = computed(() => {
 function setViewMode(m: 'list' | 'spaces') {
   viewMode.value = m;
   safeStorage.setItem('herdrem_viewmode', m);
+  // Desktop split: entering spaces lands inside the workspace containing the
+  // open terminal instead of the grid. (On mobile the toggle isn't reachable
+  // while a term is open, so grid behavior there is unchanged.)
+  if (m === 'spaces' && splitMode.value) {
+    const pane = agents.agents.find((a) => a.pane_id === activePaneId.value);
+    if (pane) activeSpaceId.value = pane.workspace_id || 'default';
+  }
 }
 
 function openTerminal(paneId: string) {
@@ -737,11 +744,13 @@ onUnmounted(() => {
       </form>
     </div>
   </div>
-  <!-- Boot splash: shown only during the initial WS handshake (connecting
-       and not yet booted). If the connection fails or hello doesn't arrive
-       within 5s (see connection.ts bootTimer), booted becomes true and the
-       main UI renders so the user can access relay switch and settings. -->
-  <div v-else-if="!conn.booted && conn.status === 'connecting'" class="boot-splash">
+  <!-- Boot splash: shown until the first WS hello arrives. The gate is
+       !booted (not status==='connecting') so the reconnect loop of a rejected
+       or restarting relay keeps the splash instead of oscillating
+       splash ↔ empty app on every retry. If hello doesn't arrive within 5s
+       (see connection.ts bootTimer), booted becomes true and the main UI
+       renders so the user can access relay switch and settings. -->
+  <div v-else-if="!conn.booted" class="boot-splash">
     <div class="boot-splash-inner">
       <img src="/brand-mark.png" alt="" width="64" height="58" aria-hidden="true" />
       <div class="boot-spinner"></div>

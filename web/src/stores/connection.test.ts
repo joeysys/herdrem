@@ -185,3 +185,57 @@ describe('useConnectionStore boot timeout', () => {
     vi.useRealTimers()
   })
 })
+
+describe('useConnectionStore session probe', () => {
+  it('fails fast to auth when a cookieless same-origin connect meets a dead session', async () => {
+    markSessionCookieHint()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 401 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`)
+    await new Promise((r) => setTimeout(r, 0))
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(urls).toHaveLength(1)
+    expect(urls[0]).toContain('/session-auth')
+    // No Bearer header — the probe verifies the HttpOnly session cookie.
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toBeUndefined()
+    expect(localStorage.getItem('herdrem_session')).toBeNull()
+    expect(conn.bootTimedOut).toBe(true)
+    // Splash stays up while App.vue's bootTimedOut watcher re-probes.
+    expect(conn.booted).toBe(false)
+    fetchMock.mockRestore()
+  })
+
+  it('leaves the connect alone when the session cookie is still valid', async () => {
+    markSessionCookieHint()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 204 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(conn.bootTimedOut).toBe(false)
+    expect(localStorage.getItem('herdrem_session')).toBe('1')
+    fetchMock.mockRestore()
+  })
+
+  it('ignores a stale probe result after a newer connect supersedes it', async () => {
+    let resolveProbe: (r: Response) => void = () => {}
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () => new Promise<Response>((r) => { resolveProbe = r }),
+    )
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`)
+    conn.connect('ws://relay.example', '')
+    resolveProbe({ status: 401 } as Response)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(conn.bootTimedOut).toBe(false)
+    fetchMock.mockRestore()
+  })
+
+  it('fails fast when the mint probe rejects an explicit token', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 401 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`, 'wrong-token')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(conn.bootTimedOut).toBe(true)
+    fetchMock.mockRestore()
+  })
+})

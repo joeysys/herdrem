@@ -148,6 +148,7 @@ watch(
 const shellText = ref('')
 const shellFocused = ref(false)
 const shellInputEl = ref<HTMLInputElement | null>(null)
+const shellKeysEl = ref<InstanceType<typeof ShellKeys> | null>(null)
 
 // Restore/persist shell input draft per pane
 watch(
@@ -168,11 +169,17 @@ function shellSubmit() {
   shellText.value = ''
 }
 
+// The shell's active text input: the ShellKeys input box when it is toggled
+// on, otherwise the inline input rendered inside the terminal output.
+function activeShellInput(): HTMLInputElement | null {
+  return shellKeysEl.value?.inputEl?.() || shellInputEl.value
+}
+
 // Merge fill text into the shell input: 'prepend' (quick-command chips) puts
 // the command at the front with a trailing space; 'append' (todo items, file
 // paths) inserts at the cursor with space padding. Focus lands after it.
 function fillShellInput(snippet: string, kind: 'append' | 'prepend') {
-  const el = shellInputEl.value
+  const el = activeShellInput()
   const r = kind === 'prepend'
     ? prependSnippet(shellText.value, snippet)
     : insertSnippet(shellText.value, el ? el.selectionStart : null, snippet)
@@ -199,16 +206,16 @@ watch(
 )
 
 function focusShellInput() {
-  shellInputEl.value?.focus()
+  activeShellInput()?.focus()
 }
 
 // Auto-focus shell input when entering a shell pane or when pane data loads
 watch(isShell, (v) => {
-  if (v) nextTick(() => shellInputEl.value?.focus())
+  if (v) nextTick(() => focusShellInput())
 })
 // Also focus when pane data arrives after mount (agents snapshot may be delayed)
 watch(pane, (p) => {
-  if (p && paneKind(p) === 'shell') nextTick(() => shellInputEl.value?.focus())
+  if (p && paneKind(p) === 'shell') nextTick(() => focusShellInput())
 })
 
 function onScroll() {
@@ -311,8 +318,8 @@ onMounted(() => {
   if (scrollEl.value) zoom.bind(scrollEl.value)
   if (!document.hidden) startPoll()
   document.addEventListener('visibilitychange', onVisibility)
-  // Focus shell inline input on mount if this is a shell pane
-  if (isShell.value) nextTick(() => shellInputEl.value?.focus())
+  // Focus shell input on mount if this is a shell pane
+  if (isShell.value) nextTick(() => focusShellInput())
   // Close mobile menu on outside click
   document.addEventListener('click', closeMenu)
   // Close todo panel on external close-todo-panel event (from App.vue global click)
@@ -328,7 +335,7 @@ watch(
   () => props.paneId,
   (id) => {
     term.openPane(id)
-    if (isShell.value) nextTick(() => shellInputEl.value?.focus())
+    if (isShell.value) nextTick(() => focusShellInput())
   },
 )
 
@@ -429,9 +436,17 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Shell: keep special keys + quick chips, hide the text input form -->
+    <!-- Shell: special keys + quick chips; the ❯ toggle reveals an optional
+         input box that shares the inline prompt's draft (v-model). -->
     <TermInput v-if="!isShell" :pane="pane" @edit="emit('editCommands', 'skills')" />
-    <ShellKeys v-else :pane="pane" @fill="onShellFill" @edit="emit('editCommands', 'shell_cmds')" />
+    <ShellKeys
+      v-else
+      ref="shellKeysEl"
+      v-model="shellText"
+      :pane="pane"
+      @fill="onShellFill"
+      @edit="emit('editCommands', 'shell_cmds')"
+    />
     <TodoPanel
       v-if="showTodo"
       :binding="todoBinding"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { bucket, paneKind, paneTitle, spaceTitle, displayAgent, shellLabel, relTime } from '../../stores/connection'
 import { ws } from '../../api/ws'
 import { useHaptic } from '../../composables/useHaptic'
@@ -76,6 +76,20 @@ const groupedPanes = computed<BranchGroup[]>(() => {
 })
 
 function enter(id: string) { activeSpaceId.value = id }
+
+const insideEl = ref<HTMLElement | null>(null)
+
+// Bring the open terminal's card into view when landing inside its space.
+// Covers both transitions while mounted and mounting directly into a space
+// (the desktop list→spaces auto-locate mounts with activeSpaceId preset).
+async function scrollActiveIntoView() {
+  if (!props.activePaneId) return
+  await nextTick()
+  insideEl.value?.querySelector('.agent-card.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}
+watch(activeSpace, scrollActiveIntoView)
+onMounted(scrollActiveIntoView)
+
 function goBack() {
   // Let the parent decide: on desktop split a term may still be open, and the
   // history stack may hold stale entries — App.vue normalizes both.
@@ -109,7 +123,7 @@ function newTab() {
 
 <template>
   <!-- inside a space: show its panes (aligned with list view card style) -->
-  <div v-if="activeSpace" class="space-inside view-enter">
+  <div v-if="activeSpace" ref="insideEl" class="space-inside view-enter">
     <div class="space-topbar">
       <button class="space-back" title="Back to all spaces" @click="goBack">‹ all spaces</button>
       <div v-if="props.canCreatePane" class="space-actions">

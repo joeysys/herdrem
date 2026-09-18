@@ -17,6 +17,7 @@ vi.mock('../../api/ws', () => ({
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  localStorage.clear()
 })
 
 describe('ShellKeys', () => {
@@ -29,9 +30,52 @@ describe('ShellKeys', () => {
     expect(sendKey).toHaveBeenCalledWith('Escape')
   })
 
+  it('sends Enter from the key row', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendKey = vi.spyOn(term, 'sendKey').mockReturnValue(true)
+    const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    await wrapper.get('[aria-label="Enter"]').trigger('pointerdown')
+    expect(sendKey).toHaveBeenCalledWith('Enter')
+  })
+
   it('keeps commands and ctrl controls keyboard-accessible', () => {
     const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
     expect(wrapper.find('[aria-label="Shell commands"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="Ctrl modifier"]').exists()).toBe(true)
+  })
+
+  it('toggles the input box and remembers the choice', async () => {
+    const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    expect(wrapper.find('.input-row').exists()).toBe(false)
+    const toggle = wrapper.get('[aria-label="Toggle input box"]')
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+
+    await toggle.trigger('click')
+    expect(wrapper.find('.input-row').exists()).toBe(true)
+    expect(toggle.attributes('aria-pressed')).toBe('true')
+    expect(localStorage.getItem('herdrem_shell_input')).toBe('true')
+
+    // remount restores the persisted choice
+    const remounted = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    expect(remounted.find('.input-row').exists()).toBe(true)
+
+    await toggle.trigger('click')
+    expect(wrapper.find('.input-row').exists()).toBe(false)
+    expect(localStorage.getItem('herdrem_shell_input')).toBe('false')
+  })
+
+  it('submits the box text with enter and clears the draft', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    localStorage.setItem('herdrem_shell_input', 'true')
+    const wrapper = mount(ShellKeys, {
+      props: { pane: { pane_id: 'p1', status: 'idle' }, modelValue: 'ls -la' },
+    })
+
+    await wrapper.get('form.input-row').trigger('submit')
+    expect(sendText).toHaveBeenCalledWith('ls -la', true)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([''])
   })
 })
