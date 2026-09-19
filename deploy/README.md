@@ -206,10 +206,13 @@ See [docker-compose.yml](../docker-compose.yml) for the Web-only container.
   `~/.config/herdrem` is created `0700`.
 - The user unit runs as the current login user, so it can access that
   user's Herdr socket/session.
-- **Token persistence**: the token stays in tab memory, never `localStorage`.
-  Same-origin login mints an HttpOnly **opaque session** cookie (not the raw
-  token). Reloads reuse it; clear site data or a new token revokes it.
-  The PWA never puts the token in a URL; query `?token=` is not accepted.
+- **Token persistence**: the token is kept in `sessionStorage` keyed by
+  relay URL — it survives reloads in the tab (including relay restarts) and
+  dies with the tab; never `localStorage`. Same-origin login mints an
+  HttpOnly **opaque session** cookie (not the raw token). Clear site data,
+  `/session-logout`, or a new token revokes it; deleting a relay entry or a
+  401 drops its stored token. The PWA never puts the token in a URL; query
+  `?token=` is not accepted.
 - **Port forwards** (PWA tunnel panel): only `5173,3000,8080,4173` plus
   `HERDREM_TUNNEL_PORTS` (singles or `8000-8100` ranges). Ports `<1024` are
   never forwarded. `direct` (no gate) stays off unless

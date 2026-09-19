@@ -28,6 +28,7 @@ let fetchMock: MockInstance<typeof fetch>;
 beforeEach(() => {
   setActivePinia(createPinia());
   localStorage.clear();
+  sessionStorage.clear();
   fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
 });
 
@@ -80,6 +81,8 @@ describe('App boot splash', () => {
     // Store probe → failBootToAuth → watcher re-probe → serverNeedsToken.
     expect(wrapper.find('.relay-auth-form').exists()).toBe(true);
     expect(wrapper.find('.app').exists()).toBe(false);
+    // The prompt names the relay being authenticated — same-origin here.
+    expect(wrapper.find('.relay-auth-url').text()).toContain(location.host);
     expect(localStorage.getItem('herdrem_session')).toBeNull();
   });
 });

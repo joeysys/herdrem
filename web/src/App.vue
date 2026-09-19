@@ -729,7 +729,11 @@ onUnmounted(() => {
       <img src="/brand-mark.png" alt="" width="64" height="58" aria-hidden="true" />
       <form class="relay-auth-form" @submit.prevent="submitBootToken">
         <h2>relay token required</h2>
-        <p>Enter HERDREM_TOKEN for this address.</p>
+        <p class="relay-auth-target">
+          <strong class="relay-auth-name">{{ currentRelayName }}</strong>
+          <span class="relay-auth-url">{{ conn.url }}</span>
+        </p>
+        <p>Enter HERDREM_TOKEN for this relay.</p>
         <label for="boot-relay-token">Relay token</label>
         <input
           id="boot-relay-token"
@@ -1548,6 +1552,23 @@ onUnmounted(() => {
   margin: 0 0 4px;
   font-size: var(--text-sm);
   text-align: center;
+}
+.relay-auth-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+.relay-auth-name {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.relay-auth-url {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  word-break: break-all;
 }
 .relay-auth-form label {
   font-family: var(--font-mono);

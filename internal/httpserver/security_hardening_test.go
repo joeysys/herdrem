@@ -27,7 +27,7 @@ func TestHandleFileFlattensActiveMIME(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
-	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), revoked: map[string]time.Time{}}
 
 	for _, name := range []string{"evil.js", "page.html"} {
 		r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, name)), nil)
@@ -58,7 +58,7 @@ func TestHandleFileKeepsImageMIMEAndDownloadType(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
-	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), revoked: map[string]time.Time{}}
 
 	r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(filepath.Join(dir, "x.png")), nil)
 	r.Header.Set("Authorization", "Bearer secret")
@@ -89,7 +89,7 @@ func TestHandleFileRejectsQueryToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
-	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "secret"}, files: files, gateLimiter: newGateRateLimiter(), revoked: map[string]time.Time{}}
 
 	r := httptest.NewRequest("GET", "/file?path="+url.QueryEscape(path)+"&token=secret", nil)
 	w := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestHandleFileRejectsQueryToken(t *testing.T) {
 // a shared egress IP then locks out every device behind it. The tunnel gate
 // keeps its own limiter for the short, public-facing PIN.
 func TestRelayAuthGateNeverRateLimits(t *testing.T) {
-	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), revoked: map[string]time.Time{}}
 	for i := 0; i < gateMaxFailedAttempts+10; i++ {
 		r := httptest.NewRequest("GET", "http://relay.local/ws", nil)
 		r.Header.Set("Authorization", "Bearer wrong")
@@ -136,7 +136,7 @@ func TestRelayAuthGateNeverRateLimits(t *testing.T) {
 }
 
 func TestRelayAuthGateExemptsLoopback(t *testing.T) {
-	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "secret"}, gateLimiter: newGateRateLimiter(), revoked: map[string]time.Time{}}
 	for i := 0; i < gateMaxFailedAttempts+3; i++ {
 		r := httptest.NewRequest("GET", "http://localhost:8766/ws", nil)
 		r.Header.Set("Authorization", "Bearer wrong")

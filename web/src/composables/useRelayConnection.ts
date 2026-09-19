@@ -8,11 +8,14 @@ import { useTodoStore } from '../stores/todo'
 import { usePreviewsStore } from '../stores/preview'
 import { useFilesStore } from '../stores/files'
 import { useDiffStore } from '../stores/diff'
-import { canCookieReconnect, relayNeedsToken } from '../utils/relay'
+import { canCookieReconnect, relayNeedsToken, sessionTokenFor } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
 
 function canConnect(url: string, token: string): boolean {
-  if (token || !relayNeedsToken(url)) return true
+  // A token parked in sessionStorage for this URL is a usable credential —
+  // checking only entry.token/args would strand cross-origin relays on the
+  // boot splash (their metadata never carries a token on disk).
+  if (token || sessionTokenFor(url) || !relayNeedsToken(url)) return true
   return canCookieReconnect(url)
 }
 

@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import { relTime, useAgentsStore, useConnectionStore } from './connection'
 import { useTodoStore } from './todo'
 import { clearSessionCookieHint, markSessionCookieHint } from '../utils/relay'
+import { ws } from '../api/ws'
 
 vi.mock('../api/ws', () => ({
   ws: {
@@ -19,6 +20,7 @@ vi.mock('../api/ws', () => ({
 beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
+  sessionStorage.clear()
   clearSessionCookieHint()
 })
 
@@ -237,5 +239,71 @@ describe('useConnectionStore session probe', () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(conn.bootTimedOut).toBe(true)
     fetchMock.mockRestore()
+  })
+})
+
+describe('useConnectionStore session tokens', () => {
+  it('persists a connect token in sessionStorage keyed by relay URL', () => {
+    const conn = useConnectionStore()
+    conn.connect('wss://relay.example/ws', 'live-token')
+    const stored = JSON.parse(sessionStorage.getItem('herdrem_tokens') || '{}')
+    expect(stored['wss://relay.example']).toBe('live-token')
+    // Never touches localStorage — the credential dies with the tab.
+    expect(localStorage.getItem('herdrem_tokens')).toBeNull()
+    expect(localStorage.getItem('herdrem_token')).toBeNull()
+  })
+
+  it('seeds the token ref from sessionStorage on init', () => {
+    localStorage.setItem('herdrem_url', 'ws://relay.example')
+    sessionStorage.setItem('herdrem_tokens', JSON.stringify({ 'ws://relay.example': 'init-token' }))
+    const conn = useConnectionStore()
+    expect(conn.token).toBe('init-token')
+  })
+
+  it('restores a session-stored token on a tokenless connect (restart reload)', () => {
+    sessionStorage.setItem('herdrem_tokens', JSON.stringify({ 'wss://relay.example': 'saved-token' }))
+    const conn = useConnectionStore()
+    conn.connect('wss://relay.example', '')
+    expect(conn.token).toBe('saved-token')
+    // The WS dial itself gets the restored credential — no token page needed.
+    expect(ws.connect).toHaveBeenCalledWith('wss://relay.example', 'saved-token')
+  })
+
+  it('drops a session-stored token when the relay rejects it', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 401 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`, 'stale-token')
+    expect(JSON.parse(sessionStorage.getItem('herdrem_tokens') || '{}')[`ws://${location.host}`]).toBe('stale-token')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(conn.bootTimedOut).toBe(true)
+    expect(JSON.parse(sessionStorage.getItem('herdrem_tokens') || '{}')).not.toHaveProperty(`ws://${location.host}`)
+    fetchMock.mockRestore()
+  })
+
+  it('slides the session cookie while connected and stops on disconnect', () => {
+    vi.useFakeTimers()
+    let statusCb: (s: string) => void = () => {}
+    vi.mocked(ws.onStatus).mockImplementation((cb) => {
+      statusCb = cb
+      return () => {}
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 204 } as Response)
+    const conn = useConnectionStore()
+    conn.connect(`ws://${location.host}`, 'tok')
+    fetchMock.mockClear()
+
+    statusCb('connected')
+    vi.advanceTimersByTime(30 * 60 * 1000)
+    expect(fetchMock).toHaveBeenCalled()
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/session-auth')
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe('include')
+
+    statusCb('disconnected')
+    fetchMock.mockClear()
+    vi.advanceTimersByTime(60 * 60 * 1000)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    fetchMock.mockRestore()
+    vi.useRealTimers()
   })
 })

@@ -125,15 +125,21 @@ All config is environment-based (see `internal/config/config.go`):
   prompts on first connect; a 401 from `/session-auth` also surfaces the prompt
   after boot timeout.
 
-The token is held in tab memory only (never `localStorage`). The PWA does not
-put it in the WebSocket or `/session-auth` URL (it uses a WebSocket subprotocol
-and `Authorization: Bearer`). Query `?token=` is not accepted — paste the token
+The token is kept in `sessionStorage` keyed by relay URL (never
+`localStorage`): it survives page reloads in the tab — including relay
+restarts — and dies with the tab. Same-origin JavaScript can read it, so XSS
+hygiene still matters; deleting the relay entry, changing its URL, or a 401
+rejection drops the stored token. The PWA does not put it in the WebSocket
+or `/session-auth` URL (it uses a WebSocket subprotocol and
+`Authorization: Bearer`). Query `?token=` is not accepted — paste the token
 into the relay switcher field instead. Same-origin login mints an HttpOnly
 **opaque session** cookie (not the raw token) so a reload can reconnect;
-`/session-logout` or clearing site data revokes it. Cross-origin relays need
-the token again in that tab. File downloads use a `POST` form field, which is
-also why a file/image preview across origins (no cookie, no header channel)
-requires opening the PWA from the relay's own origin.
+`/session-logout` or clearing site data revokes it. Tokens entered on one
+page origin do not follow the PWA to another origin — a relay opened from
+its own origin needs the token entered there once. File downloads use a
+`POST` form field, which is also why a file/image preview across origins
+(no cookie, no header channel) requires opening the PWA from the relay's
+own origin.
 
 Relay auth failures always return HTTP 401 — relay endpoints never
 rate-limit or block client IPs (the token's entropy makes online brute force

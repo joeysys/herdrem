@@ -10,7 +10,8 @@ import { useFilesStore } from '../stores/files'
 import { useTodoStore } from '../stores/todo'
 import { useTerminalStore } from '../stores/terminal'
 import { ws } from '../api/ws'
-import { clearSessionCookieHint, markSessionCookieHint } from '../utils/relay'
+import { clearSessionCookieHint, markSessionCookieHint, saveSessionToken } from '../utils/relay'
+import { safeStorage } from '../utils/storage'
 
 vi.mock('../api/ws', () => ({
   ws: {
@@ -32,6 +33,12 @@ beforeEach(() => {
   vi.mocked(ws.disconnect).mockClear()
   vi.mocked(ws.send).mockClear()
   localStorage.clear()
+  sessionStorage.clear()
+  // safeStorage mirrors every write into a memStore Map that
+  // localStorage.clear() cannot reach — scrub the keys explicitly.
+  safeStorage.removeItem('herdrem_relays')
+  safeStorage.removeItem('herdrem_relays_current')
+  safeStorage.removeItem('herdrem_url')
   clearSessionCookieHint()
 })
 
@@ -65,6 +72,34 @@ describe('useRelayConnection', () => {
 
     boot()
 
+    expect(ws.connect).not.toHaveBeenCalled()
+  })
+
+  it('boots a cross-origin relay whose token lives only in sessionStorage', () => {
+    // Persisted relay metadata never carries a token; the credential parked
+    // in sessionStorage must still satisfy the boot gate — otherwise a
+    // refresh strands the app on the splash with no way to re-enter it.
+    const relay = seedRelay('remote', 'wss://relay.example', '')
+    useRelaysStore().setCurrent(relay.id)
+    saveSessionToken('wss://relay.example', 'sess-token')
+    const { boot } = useRelayConnection()
+
+    boot()
+
+    expect(ws.connect).toHaveBeenCalledWith('wss://relay.example', 'sess-token')
+  })
+
+  it('does not reuse a dropped session token after the relay is re-added', () => {
+    const relays = useRelaysStore()
+    const a = seedRelay('remote', 'wss://relay.example', '')
+    saveSessionToken('wss://relay.example', 'sess-token')
+    relays.remove(a.id)
+    const b = relays.add('remote-again', 'wss://relay.example')
+    const { connectRelay } = useRelayConnection()
+
+    const ok = connectRelay(b)
+
+    expect(ok).toBe(false)
     expect(ws.connect).not.toHaveBeenCalled()
   })
 

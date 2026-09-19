@@ -2,17 +2,22 @@ package httpserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -126,8 +131,19 @@ type Server struct {
 	previewMu   sync.Mutex
 	previewCaps map[string]previewCapability
 	sessionMu   sync.Mutex
-	sessions    map[string]time.Time
-	rejectLog   rejectLogThrottle
+	// revoked is the denylist of session ids logged out before their signed
+	// expiry. Sessions of one family share a sid (renewals re-sign it), so
+	// one deny entry kills every copy of that session. The list persists to
+	// revokedFile so a restart cannot forgive a revocation while the signed
+	// cookies are still valid; live sessions survive either way.
+	revoked     map[string]time.Time
+	revokedFile string
+	// sessionKey is the per-process HMAC fallback used when no relay token is
+	// configured (tokenless relays don't need restart-proof sessions — local
+	// same-origin requests authenticate without one). With a token set, the
+	// signing key derives from it instead, so sessions survive restarts.
+	sessionKey []byte
+	rejectLog  rejectLogThrottle
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
@@ -142,7 +158,9 @@ func New(cfg config.Config, h *hub.Hub, client herdr.Client, todo *store.Store, 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	var sessionKey [32]byte
+	_, _ = rand.Read(sessionKey[:])
+	s := &Server{
 		cfg:         cfg,
 		hub:         h,
 		client:      client,
@@ -154,8 +172,14 @@ func New(cfg config.Config, h *hub.Hub, client herdr.Client, todo *store.Store, 
 		staticFS:    staticFS,
 		gateLimiter: newGateRateLimiter(),
 		previewCaps: make(map[string]previewCapability),
-		sessions:    make(map[string]time.Time),
+		revoked:     make(map[string]time.Time),
+		sessionKey:  sessionKey[:],
 	}
+	if cfg.DataDir != "" {
+		s.revokedFile = filepath.Join(cfg.DataDir, "revoked_sessions.json")
+		s.loadRevoked()
+	}
+	return s
 }
 
 // SetTunnels sets the TunnelService instance for the server.
@@ -459,7 +483,11 @@ func (s *Server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
 	// The cookie carries an opaque, revocable session id — never the raw
 	// relay token — so a leaked or retired session cannot be replayed as
 	// the long-term credential and can be killed via /session-logout.
-	sessionID, err := s.issueSession()
+	// A request already holding a live session re-signs the same sid: every
+	// slide generation is one session family, so revoking the sid kills all
+	// of its copies (older cookies included) at once.
+	sid, _ := s.sessionSID(r)
+	sessionID, err := s.issueSession(sid)
 	if err != nil {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)
 		return
@@ -490,9 +518,35 @@ func (s *Server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
-		s.sessionMu.Lock()
-		delete(s.sessions, c.Value)
-		s.sessionMu.Unlock()
+		if sid, exp, ok := s.parseSession(c.Value); ok {
+			s.sessionMu.Lock()
+			if s.revoked == nil {
+				s.revoked = make(map[string]time.Time)
+			}
+			// Evict expired denies — they can never match a live cookie. If the
+			// list is still full, drop the soonest-expiring entry instead of
+			// silently skipping: a logout must always land, or the dropped
+			// revoke would resurrect a copied cookie.
+			now := time.Now()
+			for k, e := range s.revoked {
+				if !e.After(now) {
+					delete(s.revoked, k)
+				}
+			}
+			if len(s.revoked) >= maxSessions {
+				oldestKey, oldestAt, first := "", time.Time{}, true
+				for k, e := range s.revoked {
+					if first || e.Before(oldestAt) {
+						oldestKey, oldestAt, first = k, e, false
+					}
+				}
+				delete(s.revoked, oldestKey)
+			}
+			// The deny needs no longer than the cookie's own signed expiry.
+			s.revoked[sid] = time.Unix(exp, 0)
+			s.saveRevokedLocked()
+			s.sessionMu.Unlock()
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
@@ -577,83 +631,149 @@ func (s *Server) validPreviewCapability(token, host, ip string) bool {
 	return true
 }
 
-// issueSession mints an opaque session id for the session cookie. Sessions
-// stand in for the relay token: they are revocable via /session-logout and
-// expire after sessionTTL of inactivity.
-func (s *Server) issueSession() (string, error) {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
+// sessionCookieVersion marks the signed-cookie format so a future change can
+// reject old values instead of mis-parsing them.
+const sessionCookieVersion = "v1"
+
+// sessionKeyFor returns the HMAC key signing session cookies. With a
+// configured relay token the key derives from it — the token is already the
+// root credential, and deriving keeps sessions valid across restarts (and
+// dies with the token on rotation). Tokenless relays fall back to the
+// per-process key generated in New.
+func (s *Server) sessionKeyFor() []byte {
+	if s.cfg.Token == "" {
+		return s.sessionKey
 	}
-	id := hex.EncodeToString(raw[:])
-	now := time.Now()
+	sum := sha256.Sum256([]byte("herdrem-session-v1:" + s.cfg.Token))
+	return sum[:]
+}
+
+// sessionSig computes the HMAC binding a session id to its expiry.
+func (s *Server) sessionSig(sid string, exp int64) string {
+	mac := hmac.New(sha256.New, s.sessionKeyFor())
+	fmt.Fprintf(mac, "%s.%s.%d", sessionCookieVersion, sid, exp)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// issueSession mints a self-authenticating session cookie value:
+// v1.<sid>.<expiry>.<hmac>. The server keeps no per-session state — the
+// signature is the credential — so sessions survive restarts. Sessions
+// stand in for the relay token: they are revocable via /session-logout
+// (denylist persisted under DataDir) and expire at the signed sessionTTL
+// timestamp. A non-empty sid re-signs that session family (slide renewal);
+// an empty sid mints a fresh family.
+func (s *Server) issueSession(sid string) (string, error) {
+	if sid == "" {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return "", err
+		}
+		sid = hex.EncodeToString(raw[:])
+	}
+	exp := time.Now().Add(sessionTTL).Unix()
+	return fmt.Sprintf("%s.%s.%d.%s", sessionCookieVersion, sid, exp, s.sessionSig(sid, exp)), nil
+}
+
+// parseSession validates a session cookie value and returns its sid and
+// expiry when the signature and expiry check out. A session that verifies is
+// authentic even if this process never saw it minted — restart-survival is
+// the point.
+func (s *Server) parseSession(value string) (string, int64, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 4 || parts[0] != sessionCookieVersion || parts[1] == "" {
+		return "", 0, false
+	}
+	exp, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || exp <= time.Now().Unix() {
+		return "", 0, false
+	}
+	if subtle.ConstantTimeCompare([]byte(parts[3]), []byte(s.sessionSig(parts[1], exp))) != 1 {
+		return "", 0, false
+	}
+	return parts[1], exp, true
+}
+
+// sessionSID returns the sid of the request's live session cookie: valid
+// signature, unexpired, and not on the logout denylist.
+func (s *Server) sessionSID(r *http.Request) (string, bool) {
+	c, err := r.Cookie(auth.SessionCookieName)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	sid, _, ok := s.parseSession(c.Value)
+	if !ok {
+		return "", false
+	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	if s.sessions == nil {
-		s.sessions = make(map[string]time.Time)
-	}
-	for k, exp := range s.sessions {
-		if !exp.After(now) {
-			delete(s.sessions, k)
-		}
-	}
-	if len(s.sessions) >= maxSessions {
-		oldestKey, oldestAt, first := "", time.Time{}, true
-		for k, exp := range s.sessions {
-			if first || exp.Before(oldestAt) {
-				oldestKey, oldestAt, first = k, exp, false
-			}
-		}
-		delete(s.sessions, oldestKey)
-	}
-	s.sessions[id] = now.Add(sessionTTL)
-	return id, nil
+	_, denied := s.revoked[sid]
+	return sid, !denied
 }
 
 // validSession reports whether the request carries a live session cookie.
-// A successful check slides the expiry forward so an active browser session
-// never hits the TTL mid-work.
 func (s *Server) validSession(r *http.Request) bool {
-	c, err := r.Cookie(auth.SessionCookieName)
-	if err != nil || c.Value == "" {
-		return false
+	_, ok := s.sessionSID(r)
+	return ok
+}
+
+// loadRevoked restores the persisted logout denylist. Entries whose deny
+// window already lapsed are dropped on load — their cookies are invalid
+// regardless. Missing/corrupt files just start empty.
+func (s *Server) loadRevoked() {
+	b, err := os.ReadFile(s.revokedFile)
+	if err != nil {
+		return
+	}
+	var raw map[string]int64
+	if json.Unmarshal(b, &raw) != nil {
+		return
 	}
 	now := time.Now()
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	exp, ok := s.sessions[c.Value]
-	if !ok {
-		return false
+	for sid, exp := range raw {
+		if t := time.Unix(exp, 0); t.After(now) {
+			s.revoked[sid] = t
+		}
 	}
-	if !exp.After(now) {
-		delete(s.sessions, c.Value)
-		return false
-	}
-	s.sessions[c.Value] = now.Add(sessionTTL)
-	return true
 }
 
-// sessionSlideInterval paces session renewal for open WS connections —
-// comfortably below sessionTTL so an active session never lapses.
-const sessionSlideInterval = time.Hour
-
-// slideSession renews a session's expiry while the connection that
-// authenticated with it stays open. An already-expired session is not
-// resurrected.
-func (s *Server) slideSession(ctx context.Context, id string) {
-	t := time.NewTicker(sessionSlideInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		s.sessionMu.Lock()
-		if exp, ok := s.sessions[id]; ok && exp.After(time.Now()) {
-			s.sessions[id] = time.Now().Add(sessionTTL)
-		}
-		s.sessionMu.Unlock()
+// saveRevokedLocked persists the denylist (caller holds sessionMu). The file
+// holds only opaque sids and expiry timestamps — no secrets. Best-effort: a
+// failed write leaves the in-memory deny standing, matching the pre-persist
+// behavior where a restart forgives revocations.
+func (s *Server) saveRevokedLocked() {
+	if s.revokedFile == "" {
+		return
+	}
+	raw := make(map[string]int64, len(s.revoked))
+	for sid, exp := range s.revoked {
+		raw[sid] = exp.Unix()
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(s.revokedFile)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-revoked-*.json")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Chmod(tmpPath, 0o600)
+	if err := os.Rename(tmpPath, s.revokedFile); err != nil && s.logger != nil {
+		s.logger.Warn("persist revoked sessions failed", "err", err)
 	}
 }
 
@@ -661,13 +781,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !s.relayAuthGate(w, r) {
 		return
 	}
-	// Slide the session that authenticated this connection for as long as
-	// it stays open — WS traffic does not re-authenticate, so without this
-	// the idle TTL would expire under an active client. The slide dies with
-	// the connection, so a genuinely idle client still expires on schedule.
-	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
-		go s.slideSession(r.Context(), c.Value)
-	}
+	// Session freshness is client-driven: the SPA re-mints via /session-auth
+	// while connected, so a stateless signed cookie needs no server-side
+	// slide (and a genuinely idle client still expires on schedule).
 	// Origin policy for the upgrade itself. coder/websocket enforces a
 	// same-origin check inside Accept, independently of the token gate above.
 	//

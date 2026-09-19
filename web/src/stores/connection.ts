@@ -4,7 +4,7 @@ import { ws } from '../api/ws';
 import { useTodoStore } from './todo';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
-import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials } from '../utils/relay';
+import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials, sessionTokenFor, saveSessionToken, dropSessionToken } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
   const status = ref<'disconnected' | 'connecting' | 'connected'>('disconnected');
@@ -30,10 +30,11 @@ export const useConnectionStore = defineStore('connection', () => {
     safeStorage.setItem('herdrem_url', storedCreds.url);
   }
   const url = ref(storedCreds.url || defaultUrl);
-  // Standalone token keys are scrubbed below. Relay tokens stay in
-  // memory for this tab; same-origin reconnect uses the HttpOnly cookie.
+  // Legacy localStorage token keys are scrubbed — relay tokens live in
+  // sessionStorage (survives reload incl. server restarts, dies with the
+  // tab) and same-origin reconnects prefer the HttpOnly session cookie.
   safeStorage.removeItem('herdrem_token');
-  const token = ref(storedCreds.token);
+  const token = ref(storedCreds.token || sessionTokenFor(url.value));
 
   let unsubStatus: (() => void) | null = null;
   // Bumped per connect/disconnect so a stale async auth probe cannot apply
@@ -82,13 +83,15 @@ export const useConnectionStore = defineStore('connection', () => {
   function failBootToAuth(seq: number) {
     if (seq !== connectSeq) return;
     clearSessionCookieHint();
+    // A rejected token must not be replayed on the next reload.
+    if (token.value) dropSessionToken(url.value);
     bootTimedOut.value = true;
     disconnect();
   }
 
   // probeSessionAuth rides alongside a tokenless same-origin connect — the
   // WS dial then relies on the HttpOnly session cookie, and a 401 means the
-  // relay dropped the session (e.g. a restart wiped the in-memory store).
+  // cookie is dead (expired, revoked, or signed under a rotated token).
   // Failing fast here turns a ~5s splash/retry oscillation into a single
   // splash → token-prompt transition.
   function probeSessionAuth(seq: number) {
@@ -101,6 +104,36 @@ export const useConnectionStore = defineStore('connection', () => {
       .catch(() => {
         /* relay unreachable — the WS retry loop keeps trying */
       });
+  }
+
+  // slideTimer re-mints the session cookie while the WS stays connected.
+  // The signed server cookie has a fixed expiry (no server-side slide), so
+  // without this an open app's session would lapse mid-use; each slide is a
+  // fresh mint, giving the connected client a rolling sessionTTL window.
+  let slideTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startSessionSlide() {
+    // Same-origin only — a remote relay never carries the session cookie.
+    if (slideTimer || typeof window === 'undefined' || !sessionHttpBase()) return;
+    slideTimer = setInterval(() => {
+      const httpBase = sessionHttpBase();
+      if (!httpBase || status.value !== 'connected') return;
+      void fetch(`${httpBase}/session-auth`, { credentials: 'include' }).then((res) => {
+        if (res.ok || res.status === 204) markSessionCookieHint();
+        // A dead session mid-connection only matters for the NEXT reload —
+        // the live WS stays open, so drop the stale hint without kicking.
+        else if (res.status === 401) clearSessionCookieHint();
+      }).catch(() => {
+        /* retry next interval */
+      });
+    }, 30 * 60 * 1000); // comfortably under the signed sessionTTL
+  }
+
+  function stopSessionSlide() {
+    if (slideTimer) {
+      clearInterval(slideTimer);
+      slideTimer = null;
+    }
   }
 
   // Re-auth mints a fresh server-side session; revoke the previous one so a
@@ -153,13 +186,17 @@ export const useConnectionStore = defineStore('connection', () => {
       // credential the WS dial is about to rely on.)
       void revokeSessionCookie().then(mintSessionCookie);
     } else {
+      // Tokenless dial: a session-stored token for this relay (survives
+      // reload incl. server restarts) beats the cookie path entirely.
+      if (!token.value) token.value = sessionTokenFor(url.value);
       mintSessionCookie();
-      // Tokenless connect = the WS relies on the session cookie; probe it in
+      // Still tokenless = the WS relies on the session cookie; probe it in
       // parallel so a dead session fails fast instead of cycling retries.
       // (A token lifted from the URL query counts as a credential — the
       // mintSessionCookie fetch above already carries it as Bearer.)
       if (!token.value) probeSessionAuth(mySeq);
     }
+    if (token.value) saveSessionToken(url.value, token.value);
     // Clear agent state to prevent stale data from old relay bleeding through
     const agents = useAgentsStore();
     agents.setAgents([]);
@@ -183,11 +220,14 @@ export const useConnectionStore = defineStore('connection', () => {
     ws.connect(url.value, token.value);
     unsubStatus = ws.onStatus((s) => {
       status.value = s as typeof status.value;
+      if (s === 'connected') startSessionSlide();
+      else stopSessionSlide();
     });
   }
 
   function disconnect() {
     connectSeq++; // invalidate in-flight auth probes from prior connects
+    stopSessionSlide();
     ws.disconnect();
   }
 

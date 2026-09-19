@@ -89,6 +89,54 @@ export function canCookieReconnect(raw: string): boolean {
   return relayMatchesPageOrigin(raw) && hasSessionCookieHint()
 }
 
+// Session tokens: relay tokens kept in sessionStorage keyed by relay URL.
+// Unlike memory-only storage this survives a page reload — including the
+// service-restart case where the HttpOnly session cookie is already dead —
+// and unlike localStorage it dies with the tab instead of persisting
+// long-term. Never write these to localStorage: the goal is a credential
+// that outlives a refresh, not one that outlives the user.
+const SESSION_TOKENS_KEY = 'herdrem_tokens'
+
+function readSessionTokens(): Record<string, string> {
+  try {
+    if (typeof sessionStorage === 'undefined') return {}
+    const raw = sessionStorage.getItem(SESSION_TOKENS_KEY)
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeSessionTokens(all: Record<string, string>): void {
+  try {
+    if (typeof sessionStorage === 'undefined') return
+    sessionStorage.setItem(SESSION_TOKENS_KEY, JSON.stringify(all))
+  } catch {
+    /* sessionStorage blocked — token stays memory-only for this page */
+  }
+}
+
+/** sessionTokenFor returns the session-stored relay token for a URL, or ''. */
+export function sessionTokenFor(url: string): string {
+  return readSessionTokens()[url] ?? ''
+}
+
+/** saveSessionToken remembers a relay token for this tab session. */
+export function saveSessionToken(url: string, token: string): void {
+  if (!url || !token) return
+  const all = readSessionTokens()
+  all[url] = token
+  writeSessionTokens(all)
+}
+
+/** dropSessionToken forgets a session-stored relay token (e.g. it 401'd). */
+export function dropSessionToken(url: string): void {
+  const all = readSessionTokens()
+  if (!(url in all)) return
+  delete all[url]
+  writeSessionTokens(all)
+}
+
 /** relayHostLabel returns a short host label for display.
  *  For domains, shows only the first subdomain level (e.g. "myapp.example.com" → "myapp").
  *  For IP:port or localhost:port, shows the full host:port. */

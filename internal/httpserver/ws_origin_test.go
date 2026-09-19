@@ -124,7 +124,7 @@ func TestLocalOriginHeadersFromRemotePeerRequireToken(t *testing.T) {
 }
 
 func TestIPv6LoopbackHostRequiresCredentialWithToken(t *testing.T) {
-	s := &Server{cfg: config.Config{Token: "s3cret"}, sessions: map[string]time.Time{}}
+	s := &Server{cfg: config.Config{Token: "s3cret"}, revoked: map[string]time.Time{}}
 	r := httptest.NewRequest("GET", "http://[::1]:8766/ws", nil)
 	r.Header.Set("Origin", "http://[::1]:8766")
 	r.RemoteAddr = "[::1]:12345"
@@ -135,7 +135,7 @@ func TestIPv6LoopbackHostRequiresCredentialWithToken(t *testing.T) {
 
 	// A minted session cookie is the credential that keeps localhost UX
 	// token-free after the first login.
-	session, err := s.issueSession()
+	session, err := s.issueSession("")
 	if err != nil {
 		t.Fatal(err)
 	}
