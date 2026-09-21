@@ -27,6 +27,7 @@ import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/use
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
 import { canCookieReconnect, relayHostLabel, relayHttpBase, relayNeedsToken } from './utils/relay';
+import { createAutoHideScroll, autoHideStep, AUTO_HIDE } from './utils/autoHideHeader';
 import TermView from './components/term/TermView.vue';
 import AgentIcon from './components/agent/AgentIcon.vue';
 import AgentFilters from './components/agent/AgentFilters.vue';
@@ -295,73 +296,54 @@ watch(activeSpaceId, (id, oldId) => {
   }
 });
 
-// Auto-hide topbar on scroll-down (mobile list view)
+// Auto-hide topbar on scroll-down (mobile list view). The decision lives in
+// utils/autoHideHeader: scrollTop can move without user input (scroll anchoring
+// after ws-driven DOM churn, clamping during the expand transition), which a
+// bare delta check reads as intent and flip-flops the header — the state
+// machine filters those deltas out.
 const listScrollEl = ref<HTMLElement | null>(null);
 const hideHeader = ref(false);
-let lastScrollTop = 0;
-let suppressScroll = false;
+const autoHide = createAutoHideScroll();
+let contentDirtyAt = 0;
+let listObserver: MutationObserver | null = null;
+
 function onListScroll() {
-  if (suppressScroll) return;
   if (isDesktop.value) return;
   const el = listScrollEl.value;
   if (!el) return;
-  const st = el.scrollTop;
-  const maxScroll = el.scrollHeight - el.clientHeight;
-  // Don't hide if there's barely any scroll room (hiding would cause jitter)
-  if (maxScroll < 120) {
-    if (hideHeader.value) {
-      suppressScroll = true;
-      hideHeader.value = false;
-      requestAnimationFrame(() => {
-        lastScrollTop = el.scrollTop;
-        suppressScroll = false;
-      });
-    }
-    return;
-  }
-  // Don't toggle at the very bottom — clamping after hide causes jitter
-  const atBottom = st >= maxScroll - 2;
-  const atTop = st <= 2;
-  if (atBottom || atTop) {
-    lastScrollTop = st;
-    if (atTop && hideHeader.value) {
-      suppressScroll = true;
-      hideHeader.value = false;
-      requestAnimationFrame(() => {
-        lastScrollTop = el.scrollTop;
-        suppressScroll = false;
-      });
-    }
-    return;
-  }
-  if (st > 80 && st > lastScrollTop + 4) {
-    if (!hideHeader.value) {
-      suppressScroll = true;
-      hideHeader.value = true;
-      requestAnimationFrame(() => {
-        lastScrollTop = el.scrollTop;
-        suppressScroll = false;
-      });
-    }
-  } else if (st < lastScrollTop - 4 || st < 80) {
-    if (hideHeader.value) {
-      suppressScroll = true;
-      hideHeader.value = false;
-      requestAnimationFrame(() => {
-        lastScrollTop = el.scrollTop;
-        suppressScroll = false;
-      });
-    }
-  } else {
-    lastScrollTop = st;
-  }
+  const now = performance.now();
+  autoHideStep(
+    autoHide,
+    el.scrollTop,
+    el.scrollHeight - el.clientHeight,
+    now,
+    now - contentDirtyAt < AUTO_HIDE.dirtyWindow,
+  );
+  hideHeader.value = autoHide.hidden;
 }
+
+watch(listScrollEl, (el, old) => {
+  if (old) listObserver?.disconnect();
+  listObserver = null;
+  if (el) {
+    listObserver = new MutationObserver(() => {
+      contentDirtyAt = performance.now();
+    });
+    listObserver.observe(el, { subtree: true, childList: true, attributes: true, characterData: true });
+  }
+});
+onUnmounted(() => listObserver?.disconnect());
 
 import { useLayoutMode } from './composables/useLayoutMode';
 
 const { isDesktop } = useLayoutMode();
 watch(isDesktop, (val) => {
-  if (val) hideHeader.value = false;
+  if (val) {
+    hideHeader.value = false;
+    autoHide.hidden = false;
+    autoHide.dir = 0;
+    autoHide.acc = 0;
+  }
 });
 
 const splitMode = computed(() => isDesktop.value && view.value === 'term' && activePaneId.value !== '');
