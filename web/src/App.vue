@@ -6,6 +6,7 @@ import {
   handleMessage,
   bucket,
   paneKind,
+  canMarkRead,
   paneTitle,
   workspaceLabel,
   displayAgent,
@@ -436,6 +437,11 @@ function qaTone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
 }
 function qaShort(label: string): string {
   return (label.split(/[,(]/)[0].trim() || label).slice(0, 14);
+}
+
+function markRead(paneId: string) {
+  haptic(12);
+  ws.send({ type: 'mark_pane_read', pane_id: paneId });
 }
 
 // --- context menu ---
@@ -926,7 +932,7 @@ onUnmounted(() => {
                 :aria-current="splitMode && a.pane_id === activePaneId ? 'true' : undefined"
                 :aria-label="`Open terminal for ${a.project || a.agent || a.pane_id}`"
                 @click="openTerminal(a.pane_id)"
-                @keydown.enter="openTerminal(a.pane_id)"
+                @keydown.enter.self="openTerminal(a.pane_id)"
               >
                 <AgentIcon :pane="a" :size="24" />
                 <div class="body">
@@ -940,37 +946,47 @@ onUnmounted(() => {
                     <span class="pane-id">{{ a.pane_id }}</span>
                     <span v-if="a.host && a.host !== 'local'" class="host">{{ a.host }}</span>
                   </div>
-                </div>
+                  <pre v-if="bucket(a.status) === 'blocked' && a.prompt" class="qa-prompt">{{ a.prompt }}</pre>
 
-                <div v-if="bucket(a.status) === 'blocked'" class="quick-approve" @click.stop>
-                  <template v-if="a.options && a.options.length">
-                    <button
-                      v-for="(opt, i) in a.options.slice(0, 3)"
-                      :key="opt"
-                      class="qa-btn"
-                      :class="qaTone(opt, a.option_labels?.[i])"
-                      @click="quickApprove(a.pane_id, opt)"
-                    >
-                      {{ qaShort(a.option_labels?.[i] || opt) }}
-                    </button>
-                  </template>
-                  <template v-else>
-                    <button
-                      class="qa-btn yes"
-                      aria-label="Approve"
-                      title="Approve (y)"
-                      @click="quickApprove(a.pane_id, 'y')"
-                    >
-                      y
-                    </button>
-                    <button class="qa-btn no" aria-label="Deny" title="Deny (n)" @click="quickApprove(a.pane_id, 'n')">
-                      n
-                    </button>
-                  </template>
+                  <div v-if="bucket(a.status) === 'blocked'" class="quick-approve" @click.stop>
+                    <template v-if="a.options && a.options.length">
+                      <button
+                        v-for="(opt, i) in a.options.slice(0, 3)"
+                        :key="opt"
+                        class="qa-btn"
+                        :class="qaTone(opt, a.option_labels?.[i])"
+                        @click="quickApprove(a.pane_id, opt)"
+                      >
+                        {{ qaShort(a.option_labels?.[i] || opt) }}
+                      </button>
+                    </template>
+                    <template v-else>
+                      <button
+                        class="qa-btn yes"
+                        aria-label="Approve"
+                        title="Approve (y)"
+                        @click="quickApprove(a.pane_id, 'y')"
+                      >
+                        y
+                      </button>
+                      <button class="qa-btn no" aria-label="Deny" title="Deny (n)" @click="quickApprove(a.pane_id, 'n')">
+                        n
+                      </button>
+                    </template>
+                  </div>
                 </div>
 
                 <div class="card-right">
                   <span v-if="relTime(a.last_active, now)" class="last-active">{{ relTime(a.last_active, now) }}</span>
+                  <button
+                    v-if="canMarkRead(a)"
+                    class="mark-read"
+                    aria-label="Mark as read"
+                    title="Mark as read"
+                    @click.stop="markRead(a.pane_id)"
+                  >
+                    ✓
+                  </button>
                   <button
                     class="ctx-trigger"
                     aria-label="More actions"

@@ -377,7 +377,44 @@ code, pre { font-family: var(--font-mono); }
 .agent-card.active:hover { background: var(--blue-soft) !important; }
 
 /* quick approve on blocked cards */
-.quick-approve { display: flex; gap: 6px; flex-shrink: 0; }
+.quick-approve { display: flex; gap: 6px; flex-shrink: 0; margin-top: 7px; flex-wrap: wrap; }
+
+/* blocked card prompt excerpt (approval inbox) */
+.qa-prompt {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  color: var(--term-fg);
+  background: var(--term-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+
+/* done-card archive button (approval inbox) */
+.mark-read {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: var(--green);
+  background: transparent;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  line-height: 1;
+  transition: transform 0.1s, filter 0.15s;
+}
+.mark-read:hover { background: var(--green-soft); filter: brightness(1.15); }
+.mark-read:active { transform: scale(0.92); }
 .qa-btn {
   font-family: var(--font-mono);
   font-size: var(--text-sm);

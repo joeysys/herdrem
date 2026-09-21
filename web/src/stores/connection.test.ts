@@ -35,6 +35,60 @@ describe('useAgentsStore', () => {
     expect(store.agents[0].valid_paths).toEqual(['docs/new.md'])
   })
 
+  it('applies a follow-up snapshot that only enriches prompt and options', () => {
+    // Regression: the first broadcast of a blocked pane can precede attachMenu
+    // enrichment; the dedup key must not swallow the later identical-status
+    // snapshot that carries prompt/options/option_labels.
+    const store = useAgentsStore()
+    const base = { pane_id: '%1', kind: 'agent', agent: 'claude', status: 'blocked', host: 'local', workspace_id: 'w1' }
+    store.setAgents([{ ...base }])
+    const first = store.agents[0]
+
+    store.setAgents([{ ...base, prompt: 'allow edit?', options: ['y', 'n'], option_labels: ['Yes', 'No'] }])
+
+    expect(store.agents[0]).not.toBe(first)
+    expect(store.agents[0].prompt).toBe('allow edit?')
+    expect(store.agents[0].options).toEqual(['y', 'n'])
+  })
+
+  it('pins blocked agents first while keeping last_active order inside groups', () => {
+    const agents = useAgentsStore()
+    agents.setAgents([
+      { pane_id: 'w1', kind: 'agent', agent: 'claude', status: 'working', last_active: 100 },
+      { pane_id: 'b1', kind: 'agent', agent: 'claude', status: 'blocked', last_active: 10 },
+      { pane_id: 'w2', kind: 'agent', agent: 'claude', status: 'working', last_active: 50 },
+      { pane_id: 'b2', kind: 'agent', agent: 'claude', status: 'blocked', last_active: 90 },
+    ])
+
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['b2', 'b1', 'w1', 'w2'])
+  })
+
+  it('treats waiting/confirm statuses as approval-blocked like the relay', () => {
+    // The relay's isBlocked covers block/wait/confirm and attaches prompt +
+    // options for all of them; the frontend must classify them identically.
+    const agents = useAgentsStore()
+    agents.setAgents([
+      { pane_id: 'w1', kind: 'agent', agent: 'claude', status: 'waiting', last_active: 1 },
+      { pane_id: 'x1', kind: 'agent', agent: 'claude', status: 'working', last_active: 99 },
+      { pane_id: 'c1', kind: 'agent', agent: 'claude', status: 'confirm', last_active: 2 },
+    ])
+
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['c1', 'w1', 'x1'])
+  })
+
+  it('does not pin shells whose status reads blocked', () => {
+    const agents = useAgentsStore()
+    agents.setAgents([
+      { pane_id: 's1', kind: 'shell', status: 'blocked', last_active: 10 },
+      { pane_id: 'd1', kind: 'agent', agent: 'claude', status: 'done', last_active: 20 },
+      { pane_id: 'b1', kind: 'agent', agent: 'claude', status: 'blocked', last_active: 1 },
+    ])
+
+    // s1 is a shell: it sorts by recency like any other non-blocked pane and
+    // loses to the newer done agent; only the blocked agent is pinned.
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['b1', 'd1', 's1'])
+  })
+
   it('updates relative time when the display clock advances', () => {
     const now = ref(1_060)
     const label = computed(() => relTime(1_000, now.value))

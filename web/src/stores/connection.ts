@@ -278,13 +278,11 @@ export const useAgentsStore = defineStore('agents', () => {
   let lastSnapshotKey = '';
 
   function setAgents(list: Pane[]) {
-    // Include workspace identity because Todo scope and grouping depend on it.
-    const key = list
-      .map(
-        (a) =>
-          `${a.host || ''}:${a.pane_id}:${a.workspace_id || ''}:${a.workspace_label || ''}:${a.status}:${a.last_active || 0}:${a.branch || ''}:${a.cwd || ''}:${JSON.stringify(a.valid_paths || [])}`,
-      )
-      .join('|');
+    // Serialize the whole pane object: a hand-picked field list silently drops
+    // enrichment updates — e.g. a blocked snapshot may arrive before attachMenu
+    // fills prompt/options/option_labels, and the follow-up snapshot would be
+    // deduped away while status/last_active stay identical.
+    const key = list.map((a) => JSON.stringify(a)).join('|');
     if (key === lastSnapshotKey) return;
     lastSnapshotKey = key;
     agents.value = list;
@@ -327,8 +325,13 @@ export const useAgentsStore = defineStore('agents', () => {
       }
       return true;
     });
-    // Sort by last_active descending (most recent first); no timestamp → end
-    list.sort((a, b) => (b.last_active || 0) - (a.last_active || 0));
+    // Blocked agents first (approval inbox), then last_active descending.
+    // Shells never pin — they are tools, not approval targets.
+    list.sort((a, b) => {
+      const ba = paneKind(a) === 'agent' && bucket(a.status) === 'blocked' ? 0 : 1;
+      const bb = paneKind(b) === 'agent' && bucket(b.status) === 'blocked' ? 0 : 1;
+      return ba - bb || (b.last_active || 0) - (a.last_active || 0);
+    });
     return list;
   });
 
@@ -431,10 +434,19 @@ export function bucket(status?: string): string {
   if (!status) return 'idle';
   const s = status.toLowerCase();
   if (s === 'unknown') return 'idle';
-  if (s.includes('block')) return 'blocked';
+  // Match the relay's isBlocked (poller.go): block/wait/confirm are all
+  // approval states that carry prompt + options for quick-approve.
+  if (s.includes('block') || s.includes('wait') || s.includes('confirm')) return 'blocked';
   if (s.includes('work') || s.includes('run') || s.includes('think')) return 'working';
   if (s.includes('done') || s.includes('complete') || s.includes('finish')) return 'done';
   return 'idle';
+}
+
+/** canMarkRead reports whether the relay accepts mark_pane_read for this pane:
+ *  AckDone requires kind 'agent' AND the canonical status 'done' — the wider
+ *  bucket synonyms (completed/finished) are rejected by the backend. */
+export function canMarkRead(a: Pane): boolean {
+  return paneKind(a) === 'agent' && (a.status || '').toLowerCase() === 'done';
 }
 
 /** shellLabel returns a short label for shell panes based on terminal_title_stripped.

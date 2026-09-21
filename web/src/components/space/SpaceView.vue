@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { bucket, paneKind, paneTitle, spaceTitle, displayAgent, shellLabel, relTime } from '../../stores/connection'
+import { bucket, paneKind, canMarkRead, paneTitle, spaceTitle, displayAgent, shellLabel, relTime } from '../../stores/connection'
 import { ws } from '../../api/ws'
 import { useHaptic } from '../../composables/useHaptic'
 import { safeStorage } from '../../utils/storage'
@@ -38,8 +38,17 @@ const spaces = computed<Space[]>(() => {
     const agentCount = panes.filter((p) => paneKind(p) === 'agent').length
     const shellCount = panes.filter((p) => paneKind(p) === 'shell').length
     return { id, label, host, panes, status: aggregateStatus(panes), agentCount, shellCount }
-  })
+  }).sort((a, b) => spaceRecency(b.panes) - spaceRecency(a.panes))
 })
+
+/** Grid order follows each space's most recently active pane, independent of
+ *  the input order — `filtered` pins blocked panes, which must not promote a
+ *  whole workspace in the grid. */
+function spaceRecency(panes: Pane[]): number {
+  let m = 0
+  for (const p of panes) m = Math.max(m, p.last_active || 0)
+  return m
+}
 
 function aggregateStatus(panes: Pane[]): string {
   const bs = panes.map((p) => bucket(p.status))
@@ -113,6 +122,11 @@ function qaShort(label: string): string {
   return (label.split(/[,(]/)[0].trim() || label).slice(0, 14)
 }
 
+function markRead(paneId: string) {
+  haptic(12)
+  ws.send({ type: 'mark_pane_read', pane_id: paneId })
+}
+
 /** Create a new tab in the current space */
 function newTab() {
   haptic(12)
@@ -158,7 +172,7 @@ function newTab() {
           :aria-current="props.activePaneId && p.pane_id === props.activePaneId ? 'true' : undefined"
           :aria-label="`Open terminal for ${paneTitle(p)}`"
           @click="emit('openTerminal', p.pane_id)"
-          @keydown.enter="emit('openTerminal', p.pane_id)"
+          @keydown.enter.self="emit('openTerminal', p.pane_id)"
         >
           <AgentIcon :pane="p" :size="24" />
           <div class="body">
@@ -171,6 +185,7 @@ function newTab() {
               <span class="pane-id">{{ p.pane_id }}</span>
               <span v-if="p.host && p.host !== 'local'" class="host">{{ p.host }}</span>
             </div>
+            <pre v-if="bucket(p.status) === 'blocked' && p.prompt" class="qa-prompt">{{ p.prompt }}</pre>
             <div v-if="bucket(p.status) === 'blocked'" class="quick-approve" @click.stop>
               <template v-if="p.options && p.options.length">
                 <button
@@ -192,6 +207,13 @@ function newTab() {
               <i class="dot"></i>{{ paneKind(p) === 'shell' ? shellLabel(p) : (p.status || '—') }}
             </span>
             <span v-if="relTime(p.last_active, props.now)" class="last-active">{{ relTime(p.last_active, props.now) }}</span>
+            <button
+              v-if="canMarkRead(p)"
+              class="mark-read"
+              aria-label="Mark as read"
+              title="Mark as read"
+              @click.stop="markRead(p.pane_id)"
+            >✓</button>
           </div>
         </article>
       </template>
