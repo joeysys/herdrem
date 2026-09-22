@@ -75,9 +75,15 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   function openBrowserAt(dirPath: string, paneRoot: string, paneHost: string) {
-    root.value = paneRoot || '/'
+    const base = paneRoot || '/'
+    const target = dirPath || base
     host.value = paneHost || 'local'
-    path.value = dirPath || root.value
+    // The dir is listable whenever it sits inside any pane-cwd sandbox root —
+    // not necessarily this pane's cwd. Up-navigation is bounded by root, so a
+    // target outside it must self-root: otherwise ".." no-ops and system back
+    // consumes presses without ever reaching a closable state.
+    root.value = isWithin(target, base) ? base : target
+    path.value = target
     browserOpen.value = true
     list(path.value)
   }
@@ -186,6 +192,16 @@ export const useFilesStore = defineStore('files', () => {
     preview.value = { ...preview.value, content: '', error: 'file not found or unreadable' }
   }
 
+  /** The read target turned out to be a directory (relayed as "is_dir"):
+   *  swap the pending preview for the directory panel at that path. */
+  function previewIsDir(reqId?: string) {
+    const p = preview.value
+    if (!p) return
+    if (reqId && p.reqId && reqId !== p.reqId) return
+    preview.value = null
+    openBrowserAt(p.path, p.root, p.host)
+  }
+
   function toggleDocked() {
     browserDocked.value = !browserDocked.value
   }
@@ -199,13 +215,20 @@ export const useFilesStore = defineStore('files', () => {
     scrollToFile,
     breadcrumbs, canGoUp,
     openBrowser, openBrowserAt, closeBrowser, closePreview, reset, navigate, goUp, openFile, openPath,
-    setListing, setContent, setListError, setPreviewError, toggleDocked,
+    setListing, setContent, setListError, setPreviewError, previewIsDir, toggleDocked,
     clearScrollTarget,
   }
 })
 
 function normalize(p: string): string {
   return p.replace(/\/+$/, '') || '/'
+}
+
+/** isWithin reports whether p equals root or sits underneath it (path-segment boundary). */
+function isWithin(p: string, root: string): boolean {
+  const np = normalize(p)
+  const nr = normalize(root)
+  return np === nr || np.startsWith(nr === '/' ? '/' : nr + '/')
 }
 
 /** makeRelative strips the root prefix from a path, returning a relative path. */

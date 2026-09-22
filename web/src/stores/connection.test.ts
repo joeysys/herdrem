@@ -103,13 +103,24 @@ describe('useAgentsStore', () => {
     agents.setAgents([
       { pane_id: '%1', agent: 'cmd', display_agent: 'cmd•sonnet', kind: 'agent' },
       { pane_id: '%2', agent: 'cmd', display_agent: 'cmd•gpt-5', kind: 'agent' },
-      { pane_id: '%3', agent: 'claude', kind: 'agent' },
+      { pane_id: '%3', agent: 'claude', display_agent: 'claude•sonnet', kind: 'agent' },
+      { pane_id: '%4', agent: 'custom', display_agent: 'custom•label', kind: 'agent' },
     ])
 
-    expect(agents.agentTypes).toEqual(['claude', 'cmd'])
+    expect(agents.agentTypes).toContain('cmd')
+    expect(agents.agentTypes).toContain('claude•sonnet')
+    expect(agents.agentTypes).toContain('custom•label')
+    expect(agents.agentTypes).not.toContain('claude')
+    expect(agents.agentTypes).not.toContain('custom')
 
     agents.typeFilter = 'cmd'
     expect(agents.filtered.map((p) => p.pane_id)).toEqual(['%1', '%2'])
+
+    agents.typeFilter = 'claude•sonnet'
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['%3'])
+
+    agents.typeFilter = 'custom•label'
+    expect(agents.filtered.map((p) => p.pane_id)).toEqual(['%4'])
   })
 
   it('binds todos to a workspace instead of individual panes', () => {

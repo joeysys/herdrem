@@ -8,6 +8,7 @@ import { nextTick } from 'vue';
 import App from './App.vue';
 import { useLayoutMode } from './composables/useLayoutMode';
 import { useAgentsStore, useConnectionStore } from './stores/connection';
+import { useTodoStore } from './stores/todo';
 
 vi.mock('./api/ws', () => ({
   ws: {
@@ -110,5 +111,55 @@ describe('spaces view auto-locate (desktop split)', () => {
     expect(wrapper.findAll('.space-card').length).toBe(2);
     expect(wrapper.find('.split-term').exists()).toBe(false);
     expect(wrapper.find('.term-wrap').exists()).toBe(false);
+  });
+
+  it('opens the todo manager scoped to the active space', async () => {
+    const wrapper = mount(App);
+    await flush();
+    seedAgents();
+    useTodoStore().setAll([
+      { id: 't1', body: 'ws-a note', binding: { host: 'local', workspace_id: 'ws-a' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+      { id: 't2', body: 'ws-b note', binding: { host: 'local', workspace_id: 'ws-b' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ]);
+    await flush();
+
+    await openTerm(wrapper, 'p2');
+    await wrapper.get('[aria-label="Spaces view"]').trigger('click');
+    await flush();
+    expect(wrapper.find('.space-inside .space-id').text()).toBe('ws-b');
+
+    await wrapper.get('[aria-label="Manage todos"]').trigger('click');
+    await flush();
+
+    const manager = wrapper.find('.todo-manager');
+    expect(manager.exists()).toBe(true);
+    expect(manager.text()).toContain('ws-b note');
+    expect(manager.text()).not.toContain('ws-a note');
+    // The workspace select is preset to the current space's binding.
+    const select = manager.find('select[aria-label="Workspace scope: filters list, binds new todos"]');
+    expect((select.element as HTMLSelectElement).value).toBe('local\u0000ws-b');
+  });
+
+  it('scopes todos to the host the space card shows (filtered-first pane)', async () => {
+    const wrapper = mount(App);
+    await flush();
+    // One workspace_id shared by two hosts; filtered sorts by last_active so
+    // h1-pane leads the ws-x group and SpaceView shows the space on h1.
+    useAgentsStore().setAgents([
+      { pane_id: 'h2-pane', project: 'x', cwd: '/x', host: 'h2', status: 'idle', kind: 'agent', workspace_id: 'ws-x', last_active: 1 },
+      { pane_id: 'h1-pane', project: 'x', cwd: '/y', host: 'h1', status: 'idle', kind: 'agent', workspace_id: 'ws-x', last_active: 9 },
+    ]);
+    await flush();
+
+    await openTerm(wrapper, 'h2-pane');
+    await wrapper.get('[aria-label="Spaces view"]').trigger('click');
+    await flush();
+    expect(wrapper.find('.space-inside .space-id').text()).toBe('ws-x');
+
+    await wrapper.get('[aria-label="Manage todos"]').trigger('click');
+    await flush();
+
+    const select = wrapper.find('.todo-manager select[aria-label="Workspace scope: filters list, binds new todos"]');
+    expect((select.element as HTMLSelectElement).value).toBe('h1\u0000ws-x');
   });
 });

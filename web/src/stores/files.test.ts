@@ -95,6 +95,57 @@ describe('useFilesStore', () => {
     expect(files.loading).toBe(true)
   })
 
+  it('previewIsDir swaps the pending preview for the directory panel', () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/src', '/workspace', 'local', null)
+    const reqId = files.preview!.reqId
+
+    files.previewIsDir(reqId)
+
+    expect(files.preview).toBeNull()
+    expect(files.browserOpen).toBe(true)
+    expect(files.path).toBe('/workspace/src')
+    expect(files.root).toBe('/workspace')
+    expect(files.host).toBe('local')
+    const sent = vi.mocked(ws.send).mock.lastCall?.[0] as { type: string; path: string }
+    expect(sent).toMatchObject({ type: 'file_list', path: '/workspace/src' })
+  })
+
+  it('openBrowserAt self-roots a directory outside the pane root', () => {
+    const files = useFilesStore()
+    // A term link can legally point at another pane's cwd: the sandbox roots
+    // span every pane cwd, but the opening pane's root must not bound "up".
+    files.openBrowserAt('/proj/b', '/proj/a', 'local')
+
+    expect(files.path).toBe('/proj/b')
+    expect(files.root).toBe('/proj/b')
+    expect(files.canGoUp).toBe(false)
+
+    files.navigate('/proj/b/sub')
+    expect(files.canGoUp).toBe(true)
+    files.goUp()
+    expect(files.path).toBe('/proj/b')
+    expect(files.canGoUp).toBe(false)
+  })
+
+  it('openBrowserAt keeps the pane root when the dir is inside it', () => {
+    const files = useFilesStore()
+    files.openBrowserAt('/proj/a/sub', '/proj/a', 'local')
+    expect(files.root).toBe('/proj/a')
+    expect(files.path).toBe('/proj/a/sub')
+    expect(files.canGoUp).toBe(true)
+  })
+
+  it('previewIsDir ignores a stale req_id', () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/a.txt', '/workspace', 'local', null)
+
+    files.previewIsDir('stale-req')
+
+    expect(files.preview?.path).toBe('/workspace/a.txt')
+    expect(files.browserOpen).toBe(false)
+  })
+
   it('rejects a stale file_content response with a mismatched req_id', () => {
     const files = useFilesStore()
     files.openPath('/workspace/a.txt', '/workspace', 'local', null)

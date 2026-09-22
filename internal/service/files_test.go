@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,6 +171,18 @@ func TestReadUsesOpenedFDAfterPathSwap(t *testing.T) {
 	}
 	if err := pathInRoots(resolved, []string{dir}); err != nil {
 		t.Fatalf("opened FD should still resolve inside root, got %q: %v", resolved, err)
+	}
+}
+
+func TestFileService_ReadDirIsTyped(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := NewFileService(rootsFor(dir), nil)
+	if _, err := fs.Read(context.Background(), "", sub); !errors.Is(err, errIsDir) {
+		t.Fatalf("reading a directory should return errIsDir, got %v", err)
 	}
 }
 

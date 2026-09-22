@@ -8,6 +8,7 @@ import {
   paneKind,
   canMarkRead,
   paneTitle,
+  todoKey,
   workspaceLabel,
   displayAgent,
   shellLabel,
@@ -68,6 +69,16 @@ const viewMode = ref<'list' | 'spaces'>((safeStorage.getItem('herdrem_viewmode')
 const activeSpaceId = ref<string | null>(null);
 const showSettings = ref(false);
 const showTodoManager = ref(false);
+// When the todo manager is opened while inside a space, scope it to that
+// workspace by default (the workspace select doubles as the list filter).
+// Read from `filtered`, not `agents`: SpaceView derives a space's host from
+// the first pane of the same list, and a space whose panes are all filtered
+// out is not visible — a stale activeSpaceId must then scope to "all".
+const todoScope = computed(() => {
+  if (viewMode.value !== 'spaces' || !activeSpaceId.value) return undefined;
+  const pane = agents.filtered.find((a) => (a.workspace_id || 'default') === activeSpaceId.value);
+  return pane ? todoKey(pane) : undefined;
+});
 const settingsSection = ref<'shell_cmds' | 'skills' | 'agent_cmds' | null>(null);
 const showRelaySwitch = ref(false);
 const bootToken = ref('');
@@ -617,7 +628,12 @@ onMounted(() => {
     if (msg.type === 'git_diff_content') diff.setDiffContent(msg);
     if (msg.type === 'git_log_result') diff.setLogResult(msg);
     if (msg.type === 'error' && msg.op === 'file_list') files.setListError(msg.req_id);
-    if (msg.type === 'error' && msg.op === 'file_read') files.setPreviewError(msg.req_id);
+    // A term link may point at a directory: the relay reports key "is_dir"
+    // and the pending preview becomes a directory-panel open instead.
+    if (msg.type === 'error' && msg.op === 'file_read') {
+      if (msg.key === 'is_dir') files.previewIsDir(msg.req_id);
+      else files.setPreviewError(msg.req_id);
+    }
     if (msg.type === 'error' && msg.op === 'git_diff') diff.setDiffError(msg.req_id);
     if (msg.type === 'error' && msg.op === 'git_log') diff.setLogError(msg.req_id);
     if (msg.type === 'error' && msg.op === 'mark_pane_read') {
@@ -1052,7 +1068,7 @@ onUnmounted(() => {
       @switched="onSettingsSwitched"
     />
     <TunnelPanel v-if="tunnelsStore.showPanel" />
-    <TodoManager v-if="showTodoManager" @close="showTodoManager = false" />
+    <TodoManager v-if="showTodoManager" :initial-binding="todoScope" @close="showTodoManager = false" />
 
     <div class="toast-stack" aria-live="polite">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type" @click="notify.dismissToast(t.id)">

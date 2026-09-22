@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/coder/websocket"
@@ -36,6 +37,8 @@ func (s *Service) handleFileRead(ctx context.Context, conn *websocket.Conn, data
 		code := "not_found"
 		if isPermErr(err) {
 			code = "permission"
+		} else if errors.Is(err, errIsDir) {
+			code = "is_dir"
 		}
 		s.sendErrorKeyReq(ctx, conn, "file_read", err.Error(), code, msg.ReqID)
 		return

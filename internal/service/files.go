@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -197,6 +198,11 @@ func looksText(data []byte) bool {
 	}
 	return float64(printable)/float64(n) > 0.9
 }
+
+// errIsDir reports that a file_read target is a directory. The handler maps it
+// to the "is_dir" key so the client opens the directory panel instead of an
+// error preview.
+var errIsDir = errors.New("is a directory")
 
 // FileReadResult is the outcome of reading a file.
 type FileReadResult struct {
@@ -487,15 +493,24 @@ func (fs *FileService) Exists(ctx context.Context, host, path string) bool {
 	return cmd.Run() == nil
 }
 
+// remoteIsDirExit is the sentinel exit code the remote read command uses to
+// report "path is a directory" — deterministic across remote shells, unlike
+// matching stderr text.
+const remoteIsDirExit = 42
+
 func readRemote(ctx context.Context, host, path string, roots []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-		host, remoteResolveScript(path, roots)+` base64 < "$r"`)
+		host, remoteResolveScript(path, roots)+fmt.Sprintf(` [ -d "$r" ] && exit %d; base64 < "$r"`, remoteIsDirExit))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == remoteIsDirExit {
+			return nil, errIsDir
+		}
 		return nil, fmt.Errorf("ssh base64 %s: %w (%s)", path, err, strings.TrimSpace(stderr.String()))
 	}
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(stdout.String()))
@@ -522,6 +537,13 @@ func readLocalWithinRoots(path string, roots []string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errIsDir
+	}
 	return io.ReadAll(f)
 }
 

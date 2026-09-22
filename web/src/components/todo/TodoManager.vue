@@ -4,6 +4,7 @@ import { useAgentsStore } from '../../stores/connection'
 import { useTodoStore, sameBinding } from '../../stores/todo'
 import type { Todo, TodoBinding } from '../../api/types'
 
+const props = defineProps<{ initialBinding?: TodoBinding }>()
 const emit = defineEmits<{ close: [] }>()
 const agents = useAgentsStore()
 const todo = useTodoStore()
@@ -34,13 +35,24 @@ const groups = computed(() => workspaces.value.map((binding) => ({
   binding,
   items: items.value.filter((item) => sameBinding(item.binding, binding)),
 })).filter((group) => group.items.length))
-const sections = computed(() => [
-  ...(unbound.value.length ? [{ key: 'unbound', label: 'Unbound', unbound: true, items: unbound.value }] : []),
-  ...groups.value.map((group) => ({ key: bindingKey(group.binding), label: bindingLabel(group.binding), unbound: false, items: group.items })),
-])
+// The workspace select doubles as the list filter: a picked workspace scopes
+// the list to it, the empty "All workspaces" option shows every section and
+// creates unbound todos — the option label says so explicitly.
+const scopeKey = newBindingKey
+const sections = computed(() => {
+  const scoped = scopeKey.value
+    ? groups.value.filter((group) => bindingKey(group.binding) === scopeKey.value)
+    : groups.value
+  return [
+    ...(scopeKey.value || !unbound.value.length
+      ? []
+      : [{ key: 'unbound', label: 'Unbound', unbound: true, items: unbound.value }]),
+    ...scoped.map((group) => ({ key: bindingKey(group.binding), label: bindingLabel(group.binding), unbound: false, items: group.items })),
+  ]
+})
 
 function bindingKey(binding: TodoBinding): string {
-  return `${binding.host}\u0000${binding.workspace_id}`
+  return `${binding.host || 'local'}\u0000${binding.workspace_id || 'default'}`
 }
 
 function bindingLabel(binding: TodoBinding): string {
@@ -58,9 +70,9 @@ function add() {
   newText.value = ''
 }
 
-// Ctrl+Enter shortcut: only add when a workspace is already selected
+// Ctrl+Enter mirrors the add button exactly — including "All workspaces"
+// (empty scope), which creates an unbound todo.
 function ctrlEnterAdd() {
-  if (!newBindingKey.value) return
   add()
 }
 
@@ -91,7 +103,13 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  const key = props.initialBinding ? bindingKey(props.initialBinding) : ''
+  if (key && workspaces.value.some((binding) => bindingKey(binding) === key)) {
+    newBindingKey.value = key
+  }
+})
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
@@ -105,15 +123,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
       <form class="tm-add" @submit.prevent="add">
         <textarea v-model="newText" rows="2" maxlength="65536" placeholder="Add a note or snippet…" aria-label="New todo" @keydown.ctrl.enter.prevent="ctrlEnterAdd"></textarea>
-        <select v-model="newBindingKey" aria-label="Workspace for new todo">
-          <option value="">Unbound</option>
+        <select v-model="newBindingKey" aria-label="Workspace scope: filters list, binds new todos" title="Filters the todo list and chooses where new todos go; All workspaces creates unbound todos">
+          <option value="">All workspaces (new todos unbound)</option>
           <option v-for="binding in workspaces" :key="bindingKey(binding)" :value="bindingKey(binding)">{{ bindingLabel(binding) }}</option>
         </select>
         <button :disabled="!newText.trim()">add</button>
       </form>
 
       <div class="tm-list">
-        <div v-if="items.length === 0" class="tm-empty">No todos yet.</div>
+        <div v-if="sections.length === 0" class="tm-empty">No todos yet.</div>
 
         <section v-for="section in sections" :key="section.key" class="tm-group">
           <h3>{{ section.label }}</h3>

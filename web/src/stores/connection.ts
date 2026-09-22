@@ -387,11 +387,12 @@ export function displayAgent(a: Pane): string {
   return String(a.display_agent || a.agent || '').trim();
 }
 
-/** agentTypeName returns the name used by the type filter — herdr may suffix
- *  the display name with "•model" (e.g. "cmd•sonnet"), which the filter
- *  collapses to the bare name so model variants group under one option. */
+/** agentTypeName returns the name used by the type filter.
+ *  Only the commandcode display convention "cmd•model" is grouped as "cmd";
+ *  other custom display names remain exact filter values. */
 export function agentTypeName(a: Pane): string {
-  return displayAgent(a).split('•')[0].trim();
+  const name = displayAgent(a);
+  return name.startsWith('cmd•') ? 'cmd' : name;
 }
 
 /** paneTitle returns the best display title for a pane.
