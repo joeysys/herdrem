@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { ws } from '../api/ws';
+import { uid } from '../utils/id';
 import type { GitDiff, GitLog, GitDiffMode, CommitEntry, GitDiffContent, GitLogResult } from '../api/types';
 
 export interface DiffState {
@@ -26,7 +27,7 @@ export const useDiffStore = defineStore('diff', () => {
   const logReqId = ref('');
 
   function newReqId(): string {
-    return crypto.randomUUID();
+    return uid();
   }
 
   /** Open the diff preview for a working directory. Defaults to unstaged. */

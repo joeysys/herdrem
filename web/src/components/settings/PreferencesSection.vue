@@ -2,12 +2,14 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useTheme } from '../../composables/useTheme'
 import { useLayoutMode } from '../../composables/useLayoutMode'
+import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { usePrefsStore } from '../../stores/prefs'
 import { useAgentsStore } from '../../stores/connection'
 import { useSaveFeedback } from '../../composables/useSaveFeedback'
 
 const { theme, themes, setTheme } = useTheme()
 const { preference, setPreference } = useLayoutMode()
+const { previewWidth, previewWidths, setPreviewWidth } = usePreviewWidth()
 const prefs = usePrefsStore()
 const agents = useAgentsStore()
 
@@ -233,6 +235,19 @@ function clearStale() {
     </section>
 
     <section class="ps-block">
+      <h3>preview width</h3>
+      <p class="ps-hint">max characters per line in the code preview — a fixed width scrolls sideways instead of wrapping at the screen edge</p>
+      <div class="layout-toggle" role="group" aria-label="File preview line width">
+        <button
+          v-for="w in previewWidths"
+          :key="w"
+          :class="{ on: previewWidth === w }"
+          @click="setPreviewWidth(w)"
+        >{{ w === 'none' ? 'no wrap' : w }}</button>
+      </div>
+    </section>
+
+    <section class="ps-block">
       <h3>shell commands</h3>
       <p class="ps-hint">quick commands for shell panes, one per line</p>
       <textarea ref="shellEditEl" v-model="shellText" class="ps-edit" rows="5" placeholder="one per line"></textarea>
@@ -360,7 +375,7 @@ function clearStale() {
 .ov-clear { color: var(--muted); background: none; border: none; font-size: var(--text-md); }
 .ov-clear:hover { color: var(--red); }
 
-.layout-toggle { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+.layout-toggle { display: inline-flex; flex-wrap: wrap; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
 .layout-toggle button {
   font-family: var(--font-mono); font-size: var(--text-2xs); font-weight: 600;
   padding: 5px 16px; border: none; background: transparent; color: var(--text-dim);

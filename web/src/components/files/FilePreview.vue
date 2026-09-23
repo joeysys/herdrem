@@ -4,6 +4,7 @@ import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
+import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { renderMarkdown } from '../../utils/markdown'
 import { highlight, langForPath } from '../../utils/highlight'
 import { relayFileUrl, relayHttpBase } from '../../utils/relay'
@@ -152,6 +153,22 @@ function fillPreviewPath() {
 }
 
 const lang = computed(() => langForPath(preview.value?.path || ''))
+
+// Code line width setting: 'screen' wraps at the panel edge; a number pins
+// wrapping to that many characters; 'none' disables wrapping so one real line
+// stays one visual line. The width constraint must live on an inner block
+// inside the cell — in auto table layout a td's own width is only a floor,
+// so a long line would stretch the column instead of wrapping at N chars.
+const { previewWidth } = usePreviewWidth()
+const codeWidthClass = computed(() => {
+  const w = previewWidth.value
+  if (w === 'none') return 'w-none'
+  if (w === 'screen') return ''
+  return 'w-num'
+})
+const codeCellStyle = computed(() =>
+  codeWidthClass.value === 'w-num' ? { width: `${previewWidth.value}ch` } : undefined,
+)
 
 // markdown & html preview modes
 const mdRendered = ref(true)
@@ -451,7 +468,7 @@ function fmtSize(bytes: number): string {
 
       <div v-else-if="isMd && mdRendered" class="fp-markdown" v-html="renderedMd"></div>
 
-      <table v-else class="fp-code">
+      <table v-else class="fp-code" :class="codeWidthClass">
         <tbody>
           <tr
             v-for="(line, i) in lines"
@@ -460,7 +477,7 @@ function fmtSize(bytes: number): string {
             :class="{ target: preview.targetLine === i + 1 }"
           >
             <td class="ln">{{ i + 1 }}</td>
-            <td class="lc" v-html="line || '&nbsp;'"></td>
+            <td class="lc"><div class="lcw" :style="codeCellStyle" v-html="line || '&nbsp;'"></div></td>
           </tr>
         </tbody>
       </table>
@@ -547,6 +564,12 @@ function fmtSize(bytes: number): string {
 .fp-code .lc { padding: 0 14px 0 12px; white-space: pre-wrap; word-break: break-word; color: var(--term-fg); }
 .fp-code tr.target .lc { background: rgba(251, 191, 36, 0.12); }
 .fp-code tr.target .ln { color: var(--amber); }
+
+/* Preview width setting: the fixed char column lives on .lcw, an inner block
+   inside the cell — a td's own width is only a floor in auto table layout.
+   The constrained block overflows the panel → .fp-scroll scrolls sideways.
+   w-none keeps every real line on one visual line. */
+.fp-code.w-none .lc { white-space: pre; overflow-wrap: normal; word-break: normal; }
 
 /* syntax tokens — highlight.js theme (dark, VS Code-like) */
 :deep(.hljs) { color: var(--term-fg); }

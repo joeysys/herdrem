@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { ws } from '../api/ws'
+import { uid } from '../utils/id'
 import type { FileRead, FileList, FileEntry, FileContent } from '../api/types'
 
 export interface PreviewState {
@@ -111,7 +112,7 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   function newReqId(): string {
-    return crypto.randomUUID()
+    return uid()
   }
 
   function list(dirPath: string) {

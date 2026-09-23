@@ -6,7 +6,7 @@
 
 Monitor and approve [herdr](https://herdr.dev) agents from your phone or desktop browser — no SSH required.
 
-A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bridges your local herdr agents to any browser, on any device.
+A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bridges your local [herdr](https://github.com/herdrdev/herdr) agents to any browser, on any device.
 
 ## Quick Start
 
@@ -132,7 +132,12 @@ hygiene still matters; deleting the relay entry, changing its URL, or a 401
 rejection drops the stored token. The PWA does not put it in the WebSocket
 or `/session-auth` URL (it uses a WebSocket subprotocol and
 `Authorization: Bearer`). Query `?token=` is not accepted — paste the token
-into the relay switcher field instead. Same-origin login mints an HttpOnly
+into the relay settings or login field instead. Relay names/URLs and the
+selected relay are saved in `localStorage` without credentials; the server-side
+`HERDREM_TOKEN` comes from the relay process environment, not browser settings.
+A token saved in settings is reused for that relay on refresh in the same tab,
+and the login page offers relay switching when authentication fails.
+Same-origin login mints an HttpOnly
 **opaque session** cookie (not the raw token) so a reload can reconnect;
 `/session-logout` or clearing site data revokes it. Tokens entered on one
 page origin do not follow the PWA to another origin — a relay opened from
@@ -173,3 +178,7 @@ See [LICENSE](LICENSE) file for details.
 Install the relay on the host with the systemd user service. Docker is only
 supported for serving the static Web/PWA; it does not run the relay. See
 [deploy/README.md](deploy/README.md).
+
+## Acknowledgements
+
+Inspired by [herdr-remote](https://github.com/dcolinmorgan/herdr-remote).

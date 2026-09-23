@@ -11,6 +11,8 @@ import { setActivePinia, createPinia } from 'pinia';
 import { nextTick } from 'vue';
 import App from './App.vue';
 import { useConnectionStore } from './stores/connection';
+import { useRelaysStore } from './stores/relays';
+import { ws } from './api/ws';
 
 vi.mock('./api/ws', () => ({
   ws: {
@@ -84,5 +86,76 @@ describe('App boot splash', () => {
     // The prompt names the relay being authenticated — same-origin here.
     expect(wrapper.find('.relay-auth-url').text()).toContain(location.host);
     expect(localStorage.getItem('herdrem_session')).toBeNull();
+  });
+
+  it('can switch to another relay from the token page', async () => {
+    const relays = useRelaysStore();
+    const blocked = relays.add('blocked', 'wss://blocked.example');
+    const working = relays.add('working', 'wss://working.example', 'working-token');
+    relays.setCurrent(blocked.id);
+    const wrapper = mount(App);
+    await nextTick();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(true);
+    await wrapper.find(`[data-relay-id="${working.id}"]`).trigger('click');
+    expect(relays.currentId).toBe(working.id);
+    expect(ws.connect).toHaveBeenCalledWith(working.url, 'working-token');
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('does not carry a typed token to a different relay', async () => {
+    const relays = useRelaysStore();
+    const first = relays.add('first', 'wss://first.example');
+    const second = relays.add('second', 'wss://second.example');
+    relays.setCurrent(first.id);
+    const wrapper = mount(App);
+    await wrapper.find('#boot-relay-token').setValue('first-secret');
+    await wrapper.find(`[data-relay-id="${second.id}"]`).trigger('click');
+
+    expect((wrapper.find('#boot-relay-token').element as HTMLInputElement).value).toBe('');
+    expect(wrapper.find('.relay-auth-url').text()).toBe(second.url);
+    wrapper.unmount();
+  });
+
+  it('uses a token saved in settings without showing the token page', async () => {
+    const relays = useRelaysStore();
+    const saved = relays.add('saved', 'wss://saved.example', 'saved-token');
+    relays.setCurrent(saved.id);
+    setActivePinia(createPinia());
+    const wrapper = mount(App);
+    await nextTick();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+    expect(ws.connect).toHaveBeenCalledWith(saved.url, 'saved-token');
+    wrapper.unmount();
+  });
+
+  it('can reveal and hide the token on the authentication page', async () => {
+    const relays = useRelaysStore();
+    relays.setCurrent(relays.add('remote', 'wss://remote.example').id);
+    const wrapper = mount(App);
+    await nextTick();
+    expect(wrapper.find('#boot-relay-token').attributes('type')).toBe('password');
+    await wrapper.find('.relay-token-toggle').trigger('click');
+    expect(wrapper.find('#boot-relay-token').attributes('type')).toBe('text');
+    wrapper.unmount();
+  });
+
+  it('can save a token from settings while the token page is open', async () => {
+    const relays = useRelaysStore();
+    const remote = relays.add('remote', 'wss://remote.example');
+    relays.setCurrent(remote.id);
+    const wrapper = mount(App);
+    await wrapper.find('.boot-relay-list button:last-child').trigger('click');
+    expect(wrapper.find('.settings-panel').exists()).toBe(true);
+    const edit = wrapper.findAll('button[aria-label="Edit"]').at(-1)!;
+    await edit.trigger('click');
+    await wrapper.find('input[aria-label="Relay token"]').setValue('new-token');
+    await wrapper.find('.rm-form-actions .primary').trigger('click');
+
+    expect(ws.connect).toHaveBeenCalledWith(remote.url, 'new-token');
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+    wrapper.unmount();
   });
 });

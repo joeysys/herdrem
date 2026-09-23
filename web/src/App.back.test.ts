@@ -5,14 +5,16 @@
 // file browser (or worse) instead of climbing one directory level.
 //
 // Desired behavior from the directory screen:
-//   1. preview open → close the preview, keep the directory
+//   1. tapping a file → close the directory panel and show the preview
+//      (mobile: the panel is always an overlay, whatever state it was in)
 //   2. in a subdirectory → go up one level, keep the tree
 //   3. at sandbox root   → close the file browser (back to terminal)
 //   4. no overlays left  → keep closing terminal / layers, never exit the app
 //
 // A preview opened from a terminal path is independent of the directory:
 // one back closes the preview and returns directly to the terminal. A preview
-// opened from the directory returns to that directory instead.
+// opened from the directory also returns to the terminal — opening the file
+// already closed the panel.
 //
 // Back must never exit the app without the "press again to exit" toast:
 // every view-level back re-pushes a matching history entry so the next back
@@ -163,7 +165,7 @@ describe('system back from the directory tree (mobile browser)', () => {
 });
 
 describe('system back from the independent preview (mobile browser)', () => {
-  it('opened from the tree: closes preview and returns to the tree', async () => {
+  it('opened from the tree: panel closes, back closes preview and returns to the terminal', async () => {
     setActivePinia(createPinia());
     const wrapper = mount(App);
     await flush();
@@ -172,28 +174,30 @@ describe('system back from the independent preview (mobile browser)', () => {
     await openTreeAtSubdir(wrapper);
 
     const files = useFilesStore();
-    // tap a file in the tree — preview opens as the top mobile screen
-    files.openFile('/root/proj/sub/a.txt', null);
+    files.setListing('/root/proj/sub', [{ name: 'a.txt', type: 'file', size: 1 }]);
     await flush();
-    expect(files.preview).not.toBeNull();
-    expect(wrapper.find('.fp-path').exists()).toBe(true);
-    // directory breadcrumbs are always shown now (path bar is always visible)
-    expect(wrapper.find('.fb-crumbs').exists()).toBe(true);
 
-    // one back: preview closes, directory remains where it was
+    // tap a file in the tree — the directory panel closes and the preview
+    // opens as the top mobile screen, whatever state the panel was in
+    await wrapper.find('.fb-entry.file').trigger('click');
+    await flush();
+    expect(files.preview?.path).toBe('/root/proj/sub/a.txt');
+    expect(files.browserOpen).toBe(false);
+    expect(wrapper.find('.fp-path').exists()).toBe(true);
+    expect(wrapper.find('.fb-drawer').exists()).toBe(false);
+
+    // one back: preview closes, terminal is behind it (no directory screen)
     history.back();
     await flush();
     expect(files.preview).toBeNull();
-    expect(files.browserOpen).toBe(true);
-    expect(files.path).toBe('/root/proj/sub');
-    expect(wrapper.find('.fb-crumbs').exists()).toBe(true);
+    expect(files.browserOpen).toBe(false);
     expect(wrapper.find('.term-wrap').exists()).toBe(true);
 
-    // next back follows directory navigation, not terminal navigation
+    // next back closes the terminal
     history.back();
     await flush();
-    expect(files.path).toBe('/root/proj');
-    expect(wrapper.find('.term-wrap').exists()).toBe(true);
+    expect(wrapper.find('.term-wrap').exists()).toBe(false);
+    expect(wrapper.find('.agent-card').exists()).toBe(true);
 
     wrapper.unmount();
     await flush();
@@ -279,7 +283,7 @@ describe('system back from the independent preview (mobile browser)', () => {
     await flush();
   });
 
-  it('raises a newly opened file preview above the mobile directory', async () => {
+  it('closes the mobile directory when a file is opened from it', async () => {
     setActivePinia(createPinia());
     const wrapper = mount(App);
     await flush();
@@ -292,12 +296,14 @@ describe('system back from the independent preview (mobile browser)', () => {
     files.setListing('/root/proj', [{ name: 'b.txt', type: 'file', size: 1 }]);
     await flush();
 
+    // even when the directory was raised over an existing preview, picking a
+    // file dismisses the panel so the new preview is visible
     expect(wrapper.find('.main').classes()).toContain('directory-over-preview');
     await wrapper.find('.fb-entry.file').trigger('click');
     await flush();
 
     expect(files.preview?.path).toBe('/root/proj/b.txt');
-    expect(files.browserOpen).toBe(true);
+    expect(files.browserOpen).toBe(false);
     expect(wrapper.find('.main').classes()).not.toContain('directory-over-preview');
 
     wrapper.unmount();
@@ -479,6 +485,32 @@ describe('desktop file panel placement', () => {
     expect(files.browserDocked).toBe(false);
     expect(wrapper.find('.fb-drawer').classes()).not.toContain('docked');
     expect(files.preview?.path).toBe('/root/proj/sub/a.txt');
+
+    wrapper.unmount();
+    layout.setPreference('auto');
+    await flush();
+  });
+
+  it('keeps a docked directory open when a file is opened from it', async () => {
+    setActivePinia(createPinia());
+    const wrapper = mount(App);
+    await flush();
+    await enterTerminal(wrapper);
+
+    const layout = useLayoutMode();
+    layout.setPreference('desktop');
+    const files = useFilesStore();
+    files.browserDocked = true;
+    files.openBrowser('/root/proj', 'local');
+    files.setListing('/root/proj', [{ name: 'a.txt', type: 'file', size: 1 }]);
+    await flush();
+
+    await wrapper.find('.fb-entry.file').trigger('click');
+    await flush();
+
+    // docked shares the row with the preview — the panel stays
+    expect(files.preview?.path).toBe('/root/proj/a.txt');
+    expect(files.browserOpen).toBe(true);
 
     wrapper.unmount();
     layout.setPreference('auto');

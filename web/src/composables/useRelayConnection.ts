@@ -79,7 +79,10 @@ export function useRelayConnection() {
     const sameOrigin = `${proto}//${location.host}`
     if (cur) {
       const targetToken = token || cur.token || ''
-      if (!canConnect(cur.url, targetToken)) return
+      if (!canConnect(cur.url, targetToken)) {
+        conn.prepareAuth(cur.url)
+        return
+      }
       // Keep the token on the in-memory entry for this tab; persistRelays strips disk.
       if (token) relays.update(cur.id, { token })
       conn.connect(cur.url, targetToken)

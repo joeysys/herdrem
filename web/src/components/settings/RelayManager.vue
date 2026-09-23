@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRelaysStore, type RelayEntry } from '../../stores/relays'
+import { useConnectionStore } from '../../stores/connection'
 import { useRelayConnection } from '../../composables/useRelayConnection'
-import { relayHostLabel, relayNeedsToken } from '../../utils/relay'
+import { normalizeRelayUrl, relayHostLabel, relayNeedsToken, sessionTokenFor } from '../../utils/relay'
 
 const relays = useRelaysStore()
+const conn = useConnectionStore()
 const { switchTo, connectRelay } = useRelayConnection()
 
 const emit = defineEmits<{ switched: [] }>()
@@ -14,13 +16,18 @@ const editingId = ref<string | null>(null)
 const name = ref('')
 const url = ref('')
 const token = ref('')
-const missingToken = computed(() => Boolean(url.value.trim()) && relayNeedsToken(url.value) && !token.value.trim())
+const showToken = ref(false)
+const missingToken = computed(() =>
+  Boolean(url.value.trim()) && relayNeedsToken(url.value) &&
+  !token.value.trim() && !sessionTokenFor(normalizeRelayUrl(url.value))
+)
 
 function startAdd() {
   editingId.value = null
   name.value = ''
   url.value = ''
   token.value = ''
+  showToken.value = false
   showForm.value = true
 }
 
@@ -28,17 +35,43 @@ function startEdit(r: RelayEntry) {
   editingId.value = r.id
   name.value = r.name
   url.value = r.url
-  token.value = r.token || ''
+  token.value = r.token || sessionTokenFor(r.url)
+  showToken.value = false
   showForm.value = true
 }
+
+// The prefilled token belongs to the relay's stored address — once the URL
+// diverges it must not ride along to the new one. Clearing the field makes
+// save() treat it as no explicit input (update() then adopts the new URL's
+// own session credential, or none) and lets missingToken gate the save.
+watch(url, () => {
+  if (!editingId.value) return
+  const entry = relays.relays.find((r) => r.id === editingId.value)
+  if (entry && normalizeRelayUrl(url.value) !== entry.url) token.value = ''
+})
 
 function save() {
   if (!url.value.trim() || missingToken.value) return
   const displayName = name.value.trim() || relayHostLabel(url.value)
+  const enteredToken = token.value.trim()
   if (editingId.value) {
-    relays.update(editingId.value, { name: displayName, url: url.value, token: token.value || undefined })
+    const previous = relays.relays.find((relay) => relay.id === editingId.value)
+    // An empty token field keeps the stored credential — the same meaning the
+    // add path gives it via upsert's sessionTokenFor fallback. Writing
+    // `token: undefined` would erase only the in-memory copy (sessionStorage
+    // resurrects it on reload) and the token diff would force a reconnect.
+    const patch: { name: string; url: string; token?: string } = { name: displayName, url: url.value }
+    if (enteredToken) patch.token = enteredToken
+    relays.update(editingId.value, patch)
+    const updated = relays.relays.find((relay) => relay.id === editingId.value)
+    if (updated && updated.id === relays.currentId && (
+      conn.status !== 'connected' || previous?.url !== updated.url || previous?.token !== updated.token
+    )) {
+      connectRelay(updated)
+      emit('switched')
+    }
   } else {
-    const entry = relays.upsert({ name: displayName, url: url.value, token: token.value || undefined })
+    const entry = relays.upsert({ name: displayName, url: url.value, token: enteredToken || undefined })
     relays.setCurrent(entry.id)
     connectRelay(entry)
     emit('switched')
@@ -66,7 +99,16 @@ function onRemove(id: string) {
     <div v-if="showForm" class="rm-form">
       <input v-model="name" class="fld" placeholder="name (optional)" aria-label="Relay name" />
       <input v-model="url" class="fld mono" placeholder="wss://your-tunnel…" aria-label="Relay URL" />
-      <input v-model="token" class="fld mono" type="password" placeholder="token (required for non-local)" aria-label="Relay token" />
+      <div class="rm-token-row">
+        <input v-model="token" class="fld mono" :type="showToken ? 'text' : 'password'" placeholder="token (required for non-local)" aria-label="Relay token" autocomplete="off" />
+        <button
+          class="btn ghost"
+          type="button"
+          :aria-label="showToken ? 'Hide relay token' : 'Show relay token'"
+          :aria-pressed="showToken"
+          @click="showToken = !showToken"
+        >{{ showToken ? 'hide' : 'show' }}</button>
+      </div>
       <p v-if="missingToken" class="rm-hint">A token is required for this relay address.</p>
       <div class="rm-form-actions">
         <button class="btn ghost" @click="showForm = false">cancel</button>
@@ -125,6 +167,8 @@ function onRemove(id: string) {
   padding: 8px 10px; outline: none;
 }
 .fld.mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+.rm-token-row { display: flex; gap: 8px; }
+.rm-token-row .fld { flex: 1; min-width: 0; }
 .fld:focus { border-color: rgba(96,165,250,.5); }
 .rm-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
 .rm-hint { margin: -2px 0 0; color: var(--red); font-size: var(--text-xs); }

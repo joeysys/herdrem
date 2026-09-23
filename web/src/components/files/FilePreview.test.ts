@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import FilePreview from './FilePreview.vue'
 import { useFilesStore } from '../../stores/files'
+import { usePreviewWidth } from '../../composables/usePreviewWidth'
 
 vi.mock('../../api/ws', () => ({ ws: { send: vi.fn() } }))
 
@@ -248,6 +249,71 @@ describe('FilePreview copy button', () => {
     vi.advanceTimersByTime(2000)
     await nextTick()
     expect(wrapper.find('.copy-btn').text()).toBe('⧉ copy')
+
+    wrapper.unmount()
+  })
+})
+
+describe('FilePreview line width setting', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    usePreviewWidth().setPreviewWidth('screen')
+  })
+
+  function mountWithCode() {
+    const files = useFilesStore()
+    files.openPath('/workspace/code.ts', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/code.ts',
+      // the long line is the contract: at a fixed width it must wrap at Nch,
+      // not stretch the column to the unwrapped line length
+      content: 'const x = 1\nconst long = "' + 'a'.repeat(300) + '"\n',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      size: 320,
+    })
+    return mount(FilePreview, { props: { directoryOpen: false } })
+  }
+
+  it('wraps at the screen edge by default, switches to a fixed char column, and can disable wrapping', async () => {
+    const { previewWidth, setPreviewWidth } = usePreviewWidth()
+    const wrapper = mountWithCode()
+    const table = wrapper.find('.fp-code')
+
+    expect(previewWidth.value).toBe('screen')
+    expect(table.classes()).not.toContain('w-num')
+    expect(table.classes()).not.toContain('w-none')
+
+    // A numeric width pins the wrap boundary on an inner block inside each
+    // code cell — in auto table layout a td's own width is only a floor, so
+    // the constraint has to live on .lcw for a 300-char line to wrap at 120ch.
+    setPreviewWidth('120')
+    await nextTick()
+    expect(table.classes()).toContain('w-num')
+    const inners = wrapper.findAll('.fp-code .lc .lcw')
+    expect(inners.length).toBe(3) // trailing newline → third (empty) line
+    for (const inner of inners) {
+      expect(inner.attributes('style')).toContain('width: 120ch')
+    }
+
+    // 'none' keeps one real line on one visual line — no width constraint
+    setPreviewWidth('none')
+    await nextTick()
+    expect(table.classes()).toContain('w-none')
+    expect(table.classes()).not.toContain('w-num')
+    expect(wrapper.find('.fp-code .lc .lcw').attributes('style') ?? '').not.toContain('width')
+
+    // back to the default screen-edge wrapping
+    setPreviewWidth('screen')
+    await nextTick()
+    expect(table.classes()).not.toContain('w-num')
+    expect(table.classes()).not.toContain('w-none')
 
     wrapper.unmount()
   })

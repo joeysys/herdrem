@@ -12,32 +12,46 @@ log() {
 
 usage() {
     cat <<'EOF'
-Usage: deploy/install.sh [--dry-run] [--linger]
+Usage: deploy/install.sh [--source | --binary] [--dry-run] [--no-linger]
 
-Build and install herdrem for the current user, then enable its systemd user
-service. Herdr must already be installed for this user.
+Install herdrem for the current user, then enable its systemd user service.
+Herdr must already be installed for this user.
+
+By default, the installer builds when it is located in a complete source tree.
+Otherwise it installs the herdrem binary next to the deploy directory.
 
 Environment:
   HERDR_BIN             Herdr command or absolute path (default: herdr)
   HERDREM_INSTALL_DIR   herdrem install directory (default: ~/.local/bin)
 
 Options:
-  --dry-run             validate and print the plan without changing anything
-  --linger              keep the user service running after logout
+  --source     require a source tree and build herdrem before install
+  --binary     require and install the herdrem binary next to deploy/
+  --dry-run    validate and print the plan without changing anything
+  --no-linger  do not enable user lingering
 EOF
 }
 
 dry_run=0
-enable_linger=0
+enable_linger=1
+install_mode=auto
 for arg in "$@"; do
     case "$arg" in
+        --source)
+            [[ "$install_mode" == auto ]] || { usage >&2; exit 2; }
+            install_mode=source
+            ;;
+        --binary)
+            [[ "$install_mode" == auto ]] || { usage >&2; exit 2; }
+            install_mode=binary
+            ;;
         --dry-run)
             (( dry_run == 0 )) || { usage >&2; exit 2; }
             dry_run=1
             ;;
-        --linger)
-            (( enable_linger == 0 )) || { usage >&2; exit 2; }
-            enable_linger=1
+        --no-linger)
+            (( enable_linger == 1 )) || { usage >&2; exit 2; }
+            enable_linger=0
             ;;
         --help|-h)
             usage
@@ -52,15 +66,42 @@ done
 
 [[ -n "${HOME:-}" ]] || die 'HOME is not set'
 (( EUID != 0 )) || die 'run this as the user who runs herdr, not as root'
-command -v make >/dev/null 2>&1 || die 'make is required'
 command -v systemctl >/dev/null 2>&1 || die 'systemctl is required'
+linger_user="$(id -un)"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root_dir="$(cd -- "$script_dir/.." && pwd -P)"
-service_source="$root_dir/deploy/herdrem.service"
-env_source="$root_dir/deploy/herdrem.env.example"
-[[ -f "$service_source" ]] || die "missing $service_source"
-[[ -f "$env_source" ]] || die "missing $env_source"
+service_source="$script_dir/herdrem.service"
+env_source="$script_dir/herdrem.env.example"
+[[ -f "$service_source" ]] || die "missing deployment template $service_source"
+[[ -f "$env_source" ]] || die "missing deployment template $env_source"
+
+has_source_tree() {
+    [[ -f "$root_dir/Makefile" &&
+        -f "$root_dir/go.mod" &&
+        -d "$root_dir/cmd/herdrem" &&
+        -f "$root_dir/web/package.json" ]]
+}
+
+binary_source="$root_dir/herdrem"
+if [[ "$install_mode" == auto ]]; then
+    if has_source_tree; then
+        install_mode=source
+    elif [[ -f "$binary_source" ]]; then
+        install_mode=binary
+    else
+        die "no source tree found and no herdrem binary exists at $binary_source"
+    fi
+elif [[ "$install_mode" == source ]]; then
+    has_source_tree || die "--source requires a complete source tree at $root_dir"
+else
+    [[ -f "$binary_source" ]] || die "--binary requires $binary_source"
+fi
+
+if [[ "$install_mode" == source ]]; then
+    command -v make >/dev/null 2>&1 || die 'make is required when building from source'
+    binary_source="$root_dir/herdrem"
+fi
 
 resolve_executable() {
     local name="$1"
@@ -91,24 +132,42 @@ unit_file="$unit_dir/herdrem.service"
 
 if (( dry_run )); then
     printf 'Dry run: no files or services will be changed.\n\n'
-    printf 'Would build:   make -C %s build\n' "$root_dir"
+    if [[ "$install_mode" == source ]]; then
+        printf 'Input mode:    build from source\n'
+        printf 'Would build:   make -C %s build\n' "$root_dir"
+    else
+        printf 'Input mode:    existing binary\n'
+        printf 'Would use:     %s\n' "$binary_source"
+    fi
     printf 'Would install: %s\n' "$herdrem_path"
     printf 'Herdr:         %s\n' "$herdr_path"
     printf 'Environment:   %s (create if missing, preserve user values)\n' "$env_file"
     printf 'User unit:     %s (write absolute ExecStart, preserve custom units)\n' "$unit_file"
     printf 'Systemd:       daemon-reload, enable, restart herdrem.service\n'
     if (( enable_linger )); then
-        printf 'Linger:        enable for %s\n' "${USER:-$(id -un)}"
+        printf 'Linger:        enable for %s\n' "$linger_user"
+    else
+        printf 'Linger:        leave unchanged\n'
     fi
     exit 0
 fi
 
-log "building herdrem"
-make -C "$root_dir" build
+if [[ "$install_mode" == source ]]; then
+    log "building herdrem"
+    make -C "$root_dir" build
+    [[ -f "$binary_source" ]] || die "build completed without producing $binary_source"
+else
+    log "using existing binary at $binary_source"
+fi
 
 log "installing herdrem to $install_dir"
 mkdir -p "$install_dir"
-install -m 0755 "$root_dir/herdrem" "$herdrem_path"
+if [[ -e "$herdrem_path" && "$binary_source" -ef "$herdrem_path" ]]; then
+    chmod 0755 "$herdrem_path"
+    log "herdrem is already installed at $herdrem_path"
+else
+    install -m 0755 "$binary_source" "$herdrem_path"
+fi
 
 mkdir -p "$config_dir" "$unit_dir"
 
@@ -179,15 +238,18 @@ else
 fi
 rm -f -- "$temp_unit"
 
-if (( enable_linger )); then
-    command -v loginctl >/dev/null 2>&1 || die 'loginctl is required for --linger'
-    loginctl enable-linger "${USER:-$(id -un)}"
-fi
-
 log 'enabling and restarting herdrem.service'
 systemctl --user daemon-reload
 systemctl --user enable herdrem.service
 systemctl --user restart herdrem.service
+
+if (( enable_linger )); then
+    if ! command -v loginctl >/dev/null 2>&1; then
+        log "warning: loginctl not found; skipped user lingering for $linger_user"
+    elif ! loginctl enable-linger "$linger_user"; then
+        log "warning: failed to enable lingering for $linger_user; service is still enabled for this login"
+    fi
+fi
 
 printf '\n✓ herdrem is running as a systemd user service\n'
 printf '  status: systemctl --user status herdrem.service\n'

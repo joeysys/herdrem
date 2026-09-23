@@ -82,6 +82,7 @@ const todoScope = computed(() => {
 const settingsSection = ref<'shell_cmds' | 'skills' | 'agent_cmds' | null>(null);
 const showRelaySwitch = ref(false);
 const bootToken = ref('');
+const revealBootToken = ref(false);
 // Loopback is no longer an implicit credential when the relay has
 // HERDREM_TOKEN set: a same-origin local relay answers 401 on
 // /session-auth just like a remote one. Probe it once boot times out so the
@@ -94,8 +95,10 @@ watch(
   async (timedOut) => {
     serverNeedsToken.value = false;
     if (!timedOut) return;
+    const targetUrl = conn.url;
     try {
-      const res = await fetch(`${relayHttpBase(conn.url)}/session-auth`, { credentials: 'include' });
+      const res = await fetch(`${relayHttpBase(targetUrl)}/session-auth`, { credentials: 'include' });
+      if (conn.url !== targetUrl || !conn.bootTimedOut) return;
       serverNeedsToken.value = res.status === 401;
       // The server actively rejected auth (the relay itself only ever
       // answers 401; a 429 can still come from a tunnel gate or an edge
@@ -531,12 +534,18 @@ function splitNewShell() {
 function onSwitchRelay(id: string) {
   showRelaySwitch.value = false;
   view.value = 'list';
+  bootToken.value = '';
+  revealBootToken.value = false;
   switchTo(id);
 }
 
 function submitBootToken() {
   const token = bootToken.value.trim();
-  if (token) boot(token);
+  if (token) {
+    boot(token);
+    bootToken.value = '';
+    revealBootToken.value = false;
+  }
 }
 function onEditCommands(section: 'shell_cmds' | 'skills' | 'agent_cmds') {
   settingsSection.value = section;
@@ -544,6 +553,8 @@ function onEditCommands(section: 'shell_cmds' | 'skills' | 'agent_cmds') {
 }
 function onSettingsSwitched() {
   view.value = 'list';
+  bootToken.value = '';
+  revealBootToken.value = false;
 }
 
 // --- file open (M3 preview) ---
@@ -579,11 +590,13 @@ function onTogglePreviewDirectory(p: { path: string; root: string; host: string 
   onOpenPreviewDirectory(p);
 }
 
-// A float (non-docked) directory is a temporary picker: once a file is opened
-// from it, dismiss it so the preview is visible instead of hiding behind the
-// overlay. A docked directory stays (it shares the row with the preview).
+// The directory is a temporary picker next to the preview: once a file is
+// opened from it, dismiss it so the preview is visible instead of hiding
+// behind the overlay. Only a docked desktop directory stays (it shares the
+// row with the preview); on mobile the panel is always an overlay, so it
+// closes in every state.
 function onPreviewOpenedFromBrowser() {
-  if (isDesktop.value && !directoryDocked.value) {
+  if (!directoryDocked.value) {
     files.closeBrowser();
   }
   directoryOverPreview.value = false;
@@ -743,13 +756,29 @@ onUnmounted(() => {
           id="boot-relay-token"
           v-model="bootToken"
           class="relay-auth-input"
-          type="password"
+          :type="revealBootToken ? 'text' : 'password'"
           autocomplete="current-password"
           required
           autofocus
         />
+        <button
+          type="button"
+          class="relay-token-toggle"
+          :aria-pressed="revealBootToken"
+          @click="revealBootToken = !revealBootToken"
+        >{{ revealBootToken ? 'hide token' : 'show token' }}</button>
         <button class="relay-auth-button" type="submit">connect</button>
       </form>
+      <div class="boot-relay-list" aria-label="Other relays">
+        <button
+          v-for="r in relays.relays.filter((relay) => relay.id !== relays.currentId)"
+          :key="r.id"
+          :data-relay-id="r.id"
+          type="button"
+          @click="onSwitchRelay(r.id)"
+        >switch to {{ r.name || relayHostLabel(r.url) }}</button>
+        <button type="button" @click="showSettings = true">manage relays…</button>
+      </div>
     </div>
   </div>
   <!-- Boot splash: shown until the first WS hello arrives. The gate is
@@ -1058,15 +1087,6 @@ onUnmounted(() => {
       @action="onCtxAction"
       v-if="ctxPane"
     />
-    <SettingsPanel
-      v-if="showSettings"
-      :focus-section="settingsSection"
-      @close="
-        showSettings = false;
-        settingsSection = null;
-      "
-      @switched="onSettingsSwitched"
-    />
     <TunnelPanel v-if="tunnelsStore.showPanel" />
     <TodoManager v-if="showTodoManager" :initial-binding="todoScope" @close="showTodoManager = false" />
 
@@ -1077,6 +1097,15 @@ onUnmounted(() => {
       <div v-if="exitToast" class="toast exit-toast" @click="exitToast = false">press back again to exit</div>
     </div>
   </div>
+  <SettingsPanel
+    v-if="showSettings"
+    :focus-section="settingsSection"
+    @close="
+      showSettings = false;
+      settingsSection = null;
+    "
+    @switched="onSettingsSwitched"
+  />
 </template>
 
 <style scoped>
@@ -1532,7 +1561,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: var(--bg);
-  z-index: 9999;
+  z-index: 79;
 }
 .boot-splash-inner {
   display: flex;
@@ -1601,6 +1630,28 @@ onUnmounted(() => {
   outline: none;
 }
 .relay-auth-input:focus { border-color: rgba(96,165,250,.5); }
+.relay-token-toggle {
+  align-self: flex-end;
+  color: var(--blue);
+  background: transparent;
+  border: 0;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.boot-relay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(86vw, 360px);
+}
+.boot-relay-list button {
+  padding: 8px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
 .relay-auth-button {
   padding: 10px 12px;
   color: var(--bg);

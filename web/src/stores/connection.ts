@@ -2,9 +2,10 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { ws } from '../api/ws';
 import { useTodoStore } from './todo';
+import { useRelaysStore } from './relays';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
-import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials, sessionTokenFor, saveSessionToken, dropSessionToken } from '../utils/relay';
+import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
   const status = ref<'disconnected' | 'connecting' | 'connected'>('disconnected');
@@ -66,12 +67,13 @@ export const useConnectionStore = defineStore('connection', () => {
       credentials: 'include',
       headers: { Authorization: `Bearer ${token.value}` },
     }).then((res) => {
+      if (seq !== connectSeq) return;
       if (res.ok || res.status === 204) markSessionCookieHint();
       // A 401 means the token itself was rejected — fail fast to the auth
       // prompt instead of letting the WS retry loop cycle under the splash.
-      else if (res.status === 401 || res.status === 429) failBootToAuth(seq);
+      else if (res.status === 401 || res.status === 429) failBootToAuth(seq, res.status === 401);
     }).catch(() => {
-      /* ignore mint failures; WS query token still authenticates */
+      /* ignore mint failures; the WS subprotocol still authenticates */
     });
   }
 
@@ -79,12 +81,15 @@ export const useConnectionStore = defineStore('connection', () => {
   // prompt: drop the dead-session hint, flag the boot as timed out (App.vue's
   // watcher re-probes /session-auth for the local-relay case), and stop the
   // WS retry loop — retrying a rejected credential only flickers the splash.
-  // booted is left false so the splash stays up while that re-probe lands.
-  function failBootToAuth(seq: number) {
+  // On first boot, booted stays false while that re-probe lands.
+  function failBootToAuth(seq: number, invalidToken: boolean) {
     if (seq !== connectSeq) return;
     clearSessionCookieHint();
     // A rejected token must not be replayed on the next reload.
-    if (token.value) dropSessionToken(url.value);
+    if (invalidToken) {
+      useRelaysStore().forgetToken(url.value);
+      token.value = '';
+    }
     bootTimedOut.value = true;
     disconnect();
   }
@@ -99,7 +104,7 @@ export const useConnectionStore = defineStore('connection', () => {
     if (!httpBase) return;
     void fetch(`${httpBase}/session-auth`, { credentials: 'include' })
       .then((res) => {
-        if (res.status === 401 || res.status === 429) failBootToAuth(seq);
+        if (res.status === 401 || res.status === 429) failBootToAuth(seq, res.status === 401);
       })
       .catch(() => {
         /* relay unreachable — the WS retry loop keeps trying */
@@ -206,17 +211,15 @@ export const useConnectionStore = defineStore('connection', () => {
     // Arm the boot timeout so a missing hello doesn't permanently
     // trap the user behind the boot splash.
     if (bootTimer) clearTimeout(bootTimer);
-    if (!booted.value || bootTimedOut.value) {
-      bootTimedOut.value = false;
-      bootTimer = setTimeout(() => {
-        bootTimer = null;
-        booted.value = true;
-        bootTimedOut.value = true;
-        // Cookieless dial failed to hello: the session cookie is missing or
-        // stale, so the next reload should prompt instead of retrying blindly.
-        if (!token.value) clearSessionCookieHint();
-      }, 5000);
-    }
+    bootTimedOut.value = false;
+    bootTimer = setTimeout(() => {
+      bootTimer = null;
+      booted.value = true;
+      bootTimedOut.value = true;
+      // Cookieless dial failed to hello: the session cookie is missing or
+      // stale, so the next reload should prompt instead of retrying blindly.
+      if (!token.value) clearSessionCookieHint();
+    }, 5000);
     ws.connect(url.value, token.value);
     unsubStatus = ws.onStatus((s) => {
       status.value = s as typeof status.value;

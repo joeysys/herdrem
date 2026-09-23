@@ -3,7 +3,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { computed, ref } from 'vue'
 import { relTime, useAgentsStore, useConnectionStore } from './connection'
 import { useTodoStore } from './todo'
-import { clearSessionCookieHint, markSessionCookieHint } from '../utils/relay'
+import { useRelaysStore } from './relays'
+import { clearSessionCookieHint, markSessionCookieHint, sessionTokenFor } from '../utils/relay'
 import { ws } from '../api/ws'
 
 vi.mock('../api/ws', () => ({
@@ -342,6 +343,31 @@ describe('useConnectionStore session tokens', () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(conn.bootTimedOut).toBe(true)
     expect(JSON.parse(sessionStorage.getItem('herdrem_tokens') || '{}')).not.toHaveProperty(`ws://${location.host}`)
+    fetchMock.mockRestore()
+  })
+
+  it('times out a failed relay switch even after a previous hello', () => {
+    vi.useFakeTimers()
+    const conn = useConnectionStore()
+    conn.connect('wss://first.example', 'first-token')
+    conn.setHello('1', [])
+    conn.connect('wss://second.example', 'invalid-token')
+    vi.advanceTimersByTime(5000)
+    expect(conn.bootTimedOut).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('forgets a rejected settings token so switching back does not retry it', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 401 } as Response)
+    const relays = useRelaysStore()
+    const relay = relays.add('local', `ws://${location.host}`, 'bad-token')
+    relays.setCurrent(relay.id)
+    const conn = useConnectionStore()
+    conn.connect(relay.url, relay.token)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(relays.current()?.token).toBeUndefined()
+    expect(conn.token).toBe('')
+    expect(sessionTokenFor(relay.url)).toBe('')
     fetchMock.mockRestore()
   })
 

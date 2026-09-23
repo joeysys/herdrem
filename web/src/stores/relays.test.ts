@@ -44,6 +44,15 @@ describe('useRelaysStore credentials', () => {
     expect(prod).toBeTruthy()
     expect(prod!.token).toBeUndefined()
     expect(relays.relays.find((r) => r.name === 'prod')?.token).toBe('super-secret')
+    expect(sessionTokenFor('wss://relay.example')).toBe('super-secret')
+  })
+
+  it('restores a settings token from sessionStorage after a page reload', () => {
+    const relays = useRelaysStore()
+    const entry = relays.add('prod', 'wss://relay.example', 'saved-token')
+    setActivePinia(createPinia())
+    const restored = useRelaysStore()
+    expect(restored.relays.find((relay) => relay.id === entry.id)?.token).toBe('saved-token')
   })
 
   it('lifts a token query into memory and never persists it in the URL', () => {
@@ -75,6 +84,27 @@ describe('useRelaysStore credentials', () => {
     saveSessionToken('wss://old.example', 'sess-token')
     relays.update(relay.id, { url: 'wss://new.example' })
     expect(sessionTokenFor('wss://old.example')).toBe('')
+  })
+
+  it('adopts the new URL\'s own session credential instead of migrating the old token', () => {
+    const relays = useRelaysStore()
+    const relay = relays.add('prod', 'wss://old.example', 'old-token')
+    saveSessionToken('wss://new.example', 'new-token')
+    relays.update(relay.id, { url: 'wss://new.example' })
+    const updated = relays.relays.find((r) => r.id === relay.id)
+    // no token in the patch + URL changed → new URL's credential, never the old one
+    expect(updated?.token).toBe('new-token')
+    expect(sessionTokenFor('wss://new.example')).toBe('new-token')
+    expect(sessionTokenFor('wss://old.example')).toBe('')
+  })
+
+  it('drops the entry token when the new URL has no credential of its own', () => {
+    const relays = useRelaysStore()
+    const relay = relays.add('prod', 'wss://old.example', 'old-token')
+    relays.update(relay.id, { url: 'wss://new.example' })
+    const updated = relays.relays.find((r) => r.id === relay.id)
+    expect(updated?.token).toBeUndefined()
+    expect(sessionTokenFor('wss://new.example')).toBe('')
   })
 
   it('keeps the session token while another entry still uses the URL', () => {

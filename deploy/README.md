@@ -2,38 +2,53 @@
 
 ## systemd (recommended for Linux servers)
 
-### One-command install
+### Install
 
-Install `herdr` first for the user who will run the relay, then run this from
-the repository root:
+Install `herdr` first, then choose one of these distributions.
+
+From a source checkout:
 
 ```bash
 ./deploy/install.sh
 ```
 
-The installer builds `herdrem`, installs it, discovers the actual `herdr`
-executable from the current user's PATH, persists the selected executable and
-both directories for the systemd user manager, and enables `herdrem.service`.
-It renders the actual Herdrem path into `ExecStart`, preserves an existing
-customized user unit, and never starts or supervises `herdr server`.
+From a binary bundle, with `herdrem` next to `deploy/`:
 
-If `herdr` is not on PATH, provide its actual path without changing the unit:
-
-```bash
-HERDR_BIN=/path/to/herdr ./deploy/install.sh
+```text
+herdrem
+deploy/
+  install.sh
+  herdrem.service
+  herdrem.env.example
 ```
 
-Preview the resolved paths and planned actions without building, writing
-configuration, or touching systemd:
+```bash
+./deploy/install.sh --binary
+```
+
+The installer locates that binary from the script path, so the working
+directory does not have to be the bundle root.
+
+Without a mode option, the installer builds when source is available and
+otherwise uses the `herdrem` binary next to `deploy/`. Use `--source` or
+`--binary` to require one mode.
+It installs and enables a systemd user service while preserving existing
+environment settings and customized units. User lingering is enabled by
+default so the relay stays available after logout and reboot. If `loginctl`
+cannot enable lingering, installation continues and the service still runs
+in the current login.
+
+Common options:
 
 ```bash
+# Preview only
 ./deploy/install.sh --dry-run
-```
 
-Add `--linger` if the relay must keep running after logout:
+# Skip enabling user lingering
+./deploy/install.sh --no-linger
 
-```bash
-./deploy/install.sh --linger
+# Use herdr outside PATH
+HERDR_BIN=/path/to/herdr ./deploy/install.sh
 ```
 
 The remaining steps describe the equivalent manual installation.
@@ -45,8 +60,13 @@ for the same login user. Their locations are not hardcoded: both commands
 must be discoverable on the current shell's PATH during installation; the
 installer persists the resolved executable and PATH for the user manager.
 
+From a source checkout, build first. From a binary bundle, change to the
+directory that contains `herdrem` (next to `deploy/`) and skip `make build`.
+
 ```bash
+# Source checkout only:
 make build
+
 mkdir -p ~/.local/bin
 install -m 0755 herdrem ~/.local/bin/herdrem
 # Install Herdr separately: https://herdr.dev/docs/install/
@@ -109,7 +129,7 @@ systemctl --user enable --now herdrem.service
 To keep the relay running after logout, enable user lingering:
 
 ```bash
-loginctl enable-linger "$USER"
+loginctl enable-linger "$(id -un)"
 ```
 
 ### 4. Verify
