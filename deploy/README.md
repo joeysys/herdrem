@@ -2,6 +2,11 @@
 
 ## systemd (recommended for Linux servers)
 
+Not on systemd? The relay also runs in the foreground — see the main
+[README](../README.md#deployment) for `scripts/start.sh`. The binary loads
+`~/.config/herdrem/herdrem.env` itself (or `--env-file PATH`), so the env file
+below works the same way without a unit file.
+
 ### Install
 
 Install `herdr` first, then choose one of these distributions.

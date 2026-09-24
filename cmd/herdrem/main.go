@@ -42,10 +42,22 @@ func main() {
 	tunnel := flag.Bool("tunnel", false, "launch cloudflared quick tunnel")
 	requireHerdr := flag.Bool("require-herdr", false, "exit instead of falling back to fake client when herdr CLI is unavailable (production)")
 	staticDir := flag.String("static", "", "override embedded static dir (debug)")
+	envFile := flag.String("env-file", "", "load config env vars from this file (default "+config.DefaultEnvFilePath()+" when present)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	// Dotenv-style: the file fills only variables not already in the process
+	// environment, so real env (and systemd Environment=) always wins.
+	loadedEnv, err := config.LoadEnvFile(*envFile, *envFile != "")
+	if err != nil {
+		logger.Error("env file", "err", err)
+		os.Exit(1)
+	}
+	if loadedEnv != "" {
+		logger.Info("loaded env file", "path", loadedEnv)
+	}
 
 	cfg := config.FromEnv()
 	if *staticDir != "" {

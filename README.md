@@ -8,6 +8,27 @@ Monitor and approve [herdr](https://herdr.dev) agents from your phone or desktop
 
 A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bridges your local [herdr](https://github.com/herdrdev/herdr) agents to any browser, on any device.
 
+## Features
+
+- **Web PWA** — approve blocked agents with one tap; works as a mobile PWA and a desktop web app
+- **Live terminal** — stream agent output, send input over WebSocket
+- **File browser** — navigate, preview, and edit files remotely
+- **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
+- **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
+- **Token auth** — when `HERDREM_TOKEN` is unset (dev), only a same-origin page on `localhost` / `127.0.0.1` / `::1` may connect without a token. Once the token is set, **every** connection needs it, including localhost.
+- **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
+
+## Screenshots
+
+<!-- Screenshots pending — reserved slots:
+<p align="center">
+  <img src="assets/screenshots/desktop.png" alt="Desktop web" width="720">
+</p>
+<p align="center">
+  <img src="assets/screenshots/mobile.png" alt="Mobile PWA" width="300">
+</p>
+-->
+
 ## Quick Start
 
 ```bash
@@ -43,6 +64,103 @@ echo "Relay token: $HERDREM_TOKEN"
 ./herdrem serve --web --tunnel
 ```
 
+## Deployment
+
+On a Linux host, the installer script sets everything up in one step — it
+builds `herdrem` (or uses the bundled binary), writes the env file, and
+installs and enables a systemd user service with user lingering so the relay
+survives logout and reboot:
+
+```bash
+./deploy/install.sh            # from a source checkout
+./deploy/install.sh --binary   # from a binary bundle (herdrem next to deploy/)
+./deploy/install.sh --dry-run  # preview the actions without changing anything
+```
+
+**Without systemd**, the relay runs as a foreground process: `scripts/start.sh`
+builds web + Go and execs `herdrem serve --web`, and `scripts/dev.sh` does the
+same with a Vite watch. Configuration comes from the process environment plus
+`~/.config/herdrem/herdrem.env`, which the binary loads automatically — see
+[Configuration](#configuration). Keeping it running across logouts without
+systemd is up to you (`tmux`, `nohup`, a supervisor of choice, etc.).
+
+Docker is only supported for serving the static Web/PWA; it does not run the
+relay. See [deploy/README.md](deploy/README.md) for the remaining options
+(`--no-linger`, `HERDR_BIN`), the equivalent manual steps, and tunnel mode.
+
+## Configuration
+
+All config is environment-based (see `internal/config/config.go`). The binary
+reads `HERDREM_*`/`HERDR_*` variables from its process environment, and also
+loads `~/.config/herdrem/herdrem.env` itself when the file exists
+(dotenv-style: `KEY=VALUE`, `#` comments, quotes allowed). File values only
+fill in variables that aren't already set, so a real environment always wins —
+the same precedence systemd applies between `Environment=` and
+`EnvironmentFile=`, which is why the installed unit keeps working unchanged.
+
+```bash
+./herdrem serve --web                       # auto-loads ~/.config/herdrem/herdrem.env
+./herdrem serve --web --env-file /etc/herdrem.env  # explicit path (must exist)
+HERDREM_PORT=9000 ./herdrem serve --web     # env vars still override the file
+```
+
+| Env | Default | Description |
+|-----|---------|-------------|
+| `HERDREM_PORT` | `8766` | Listen port |
+| `HERDREM_BIND` | `127.0.0.1` | Listen address; non-loopback binds require a token |
+| `HERDREM_TOKEN` | _(empty = localhost same-origin only)_ | Shared secret. Empty is allowed only for loopback same-origin with no token configured; if this is set, localhost needs it too |
+| `HERDR_BIN` | `herdr` | Path to herdr binary |
+| `HERDR_REMOTES` | — | Comma-separated SSH remotes (optional) |
+| `HERDREM_KINDS` | — | Comma-separated agent kind filter (optional) |
+| `HERDREM_DATA_DIR` | `~/.config/herdrem` | Data directory |
+| `HERDREM_STATIC` | — | Override embedded static dir (debug) |
+| `HERDREM_TUNNEL_PORTS` | — | Extra allowed ports/ranges on top of `5173,3000,8080,4173` (e.g. `8000-8100,9000`). Privileged ports (`<1024`) and malformed tokens are ignored |
+| `HERDREM_ALLOW_DIRECT_TUNNEL` | off | Set to `1` to allow ungated (`direct`) port tunnels |
+| `HERDREM_TUNNEL_MAX` | `8` | Cap on concurrent starting+active port tunnels |
+
+### Relay authentication
+
+- **No token** (local dev): only a same-origin page on `localhost` /
+  `127.0.0.1` / `::1` may connect.
+- **Token set**: every connection needs it — including localhost. Non-loopback
+  binds and `--tunnel` refuse to start without one; generate it with
+  `openssl rand -hex 16` (short tokens trigger a startup warning).
+
+The PWA prompts for the token on first connect — enter it in the login field
+or relay settings; `?token=` URLs are not accepted. The token is stored
+per-relay in tab `sessionStorage` (never `localStorage`): it survives reloads
+but dies with the tab, and a 401 or deleting/changing the relay drops it.
+
+### Port forwarding (Cloudflare quick tunnels)
+
+From the PWA tunnel panel (or `tunnel_create` over the relay WebSocket), the
+relay can publish a local HTTP port as `https://*.trycloudflare.com`.
+
+| Rule | Default |
+|------|---------|
+| Allowed ports | `5173`, `3000`, `8080`, `4173` |
+| Extra ports | `HERDREM_TUNNEL_PORTS` — singles or ranges (`8000-8100,9000`). Malformed tokens are ignored. Privileged ports (`<1024`) are never forwarded |
+| `direct` (no PIN/Basic gate) | Off. Set `HERDREM_ALLOW_DIRECT_TUNNEL=1` to show/enable it. Anyone with the URL then has full access to that port |
+| Concurrent tunnels | 8 (`HERDREM_TUNNEL_MAX`) |
+
+`token_gate` (default) and `basic_auth` still sit in front of the published
+port. `--tunnel` on `herdrem serve` is the **relay itself**, not these
+per-port forwards; it still requires `HERDREM_TOKEN`.
+
+## Development
+
+```bash
+# Frontend
+cd web && npm install && npm run dev    # Vite dev server
+
+# Backend
+go build ./cmd/herdrem                  # Build binary
+go test ./...                           # Run tests
+
+# Full dev loop (Vite watch + Go binary serving webdist/)
+make dev
+```
+
 ## Architecture
 
 ```
@@ -63,121 +181,9 @@ scripts/                 dev.sh (hot reload), start.sh (one-shot)
 deploy/                  systemd unit, env template, deployment guide
 ```
 
-## Features
-
-- **Web PWA** — approve blocked agents with one tap; works as a mobile PWA and a desktop web app
-- **Live terminal** — stream agent output, send input over WebSocket
-- **File browser** — navigate, preview, and edit files remotely
-- **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
-- **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
-- **Token auth** — when `HERDREM_TOKEN` is unset (dev), only a same-origin page on `localhost` / `127.0.0.1` / `::1` may connect without a token. Once the token is set, **every** connection needs it, including localhost.
-- **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
-
-## Screenshots
-
-<!-- Screenshots pending — reserved slots:
-<p align="center">
-  <img src="assets/screenshots/desktop.png" alt="Desktop web" width="720">
-</p>
-<p align="center">
-  <img src="assets/screenshots/mobile.png" alt="Mobile PWA" width="300">
-</p>
--->
-
-## Development
-
-```bash
-# Frontend
-cd web && npm install && npm run dev    # Vite dev server
-
-# Backend
-go build ./cmd/herdrem                  # Build binary
-go test ./...                           # Run tests
-
-# Full dev loop (Vite watch + Go binary serving webdist/)
-make dev
-```
-
-## Configuration
-
-All config is environment-based (see `internal/config/config.go`):
-
-| Env | Default | Description |
-|-----|---------|-------------|
-| `HERDREM_PORT` | `8766` | Listen port |
-| `HERDREM_BIND` | `127.0.0.1` | Listen address; non-loopback binds require a token |
-| `HERDREM_TOKEN` | _(empty = localhost same-origin only)_ | Shared secret. Empty is allowed only for loopback same-origin with no token configured; if this is set, localhost needs it too |
-| `HERDR_BIN` | `herdr` | Path to herdr binary |
-| `HERDR_REMOTES` | — | Comma-separated SSH remotes (optional) |
-| `HERDREM_KINDS` | — | Comma-separated agent kind filter (optional) |
-| `HERDREM_DATA_DIR` | `~/.config/herdrem` | Data directory |
-| `HERDREM_STATIC` | — | Override embedded static dir (debug) |
-| `HERDREM_TUNNEL_PORTS` | — | Extra allowed ports/ranges on top of `5173,3000,8080,4173` (e.g. `8000-8100,9000`). Privileged ports (`<1024`) and malformed tokens are ignored |
-| `HERDREM_ALLOW_DIRECT_TUNNEL` | off | Set to `1` to allow ungated (`direct`) port tunnels |
-| `HERDREM_TUNNEL_MAX` | `8` | Cap on concurrent starting+active port tunnels |
-
-### Relay authentication
-
-- **No token configured** (local dev): a same-origin page opened at `localhost`,
-  `127.0.0.1`, or `::1` may connect without a token.
-- **Token configured** (LAN, `--tunnel`, or you set `HERDREM_TOKEN` even on
-  loopback): every connection must present it — including localhost. The PWA
-  prompts on first connect; a 401 from `/session-auth` also surfaces the prompt
-  after boot timeout.
-
-The token is kept in `sessionStorage` keyed by relay URL (never
-`localStorage`): it survives page reloads in the tab — including relay
-restarts — and dies with the tab. Same-origin JavaScript can read it, so XSS
-hygiene still matters; deleting the relay entry, changing its URL, or a 401
-rejection drops the stored token. The PWA does not put it in the WebSocket
-or `/session-auth` URL (it uses a WebSocket subprotocol and
-`Authorization: Bearer`). Query `?token=` is not accepted — paste the token
-into the relay settings or login field instead. Relay names/URLs and the
-selected relay are saved in `localStorage` without credentials; the server-side
-`HERDREM_TOKEN` comes from the relay process environment, not browser settings.
-A token saved in settings is reused for that relay on refresh in the same tab,
-and the login page offers relay switching when authentication fails.
-Same-origin login mints an HttpOnly
-**opaque session** cookie (not the raw token) so a reload can reconnect;
-`/session-logout` or clearing site data revokes it. Tokens entered on one
-page origin do not follow the PWA to another origin — a relay opened from
-its own origin needs the token entered there once. File downloads use a
-`POST` form field, which is also why a file/image preview across origins
-(no cookie, no header channel) requires opening the PWA from the relay's
-own origin.
-
-Relay auth failures always return HTTP 401 — relay endpoints never
-rate-limit or block client IPs (the token's entropy makes online brute force
-infeasible, and per-IP blocks wedge legitimate clients behind a shared
-egress). Use a high-entropy token (`openssl rand -hex 16`); a startup
-warning fires for short ones. HTTP 429 is still emitted by the tunnel gate's
-PIN/Basic-Auth limiter, which guards short user-chosen credentials.
-
-### Port forwarding (Cloudflare quick tunnels)
-
-From the PWA tunnel panel (or `tunnel_create` over the relay WebSocket), the
-relay can publish a local HTTP port as `https://*.trycloudflare.com`.
-
-| Rule | Default |
-|------|---------|
-| Allowed ports | `5173`, `3000`, `8080`, `4173` |
-| Extra ports | `HERDREM_TUNNEL_PORTS` — singles or ranges (`8000-8100,9000`). Malformed tokens are ignored. Privileged ports (`<1024`) are never forwarded |
-| `direct` (no PIN/Basic gate) | Off. Set `HERDREM_ALLOW_DIRECT_TUNNEL=1` to show/enable it. Anyone with the URL then has full access to that port |
-| Concurrent tunnels | 8 (`HERDREM_TUNNEL_MAX`) |
-
-`token_gate` (default) and `basic_auth` still sit in front of the published
-port. `--tunnel` on `herdrem serve` is the **relay itself**, not these
-per-port forwards; it still requires `HERDREM_TOKEN`.
-
 ## License
 
 See [LICENSE](LICENSE) file for details.
-
-## Deployment
-
-Install the relay on the host with the systemd user service. Docker is only
-supported for serving the static Web/PWA; it does not run the relay. See
-[deploy/README.md](deploy/README.md).
 
 ## Acknowledgements
 
