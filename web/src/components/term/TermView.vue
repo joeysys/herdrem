@@ -566,7 +566,7 @@ onUnmounted(() => {
           @click="showHistory ? closeHistory() : openHistory()"
         >⏱</button>
         <button
-          class="icon-btn"
+          class="icon-btn wide-only"
           :class="{ active: term.fullscreen }"
           aria-label="Toggle fullscreen"
           title="Fullscreen"
@@ -586,7 +586,6 @@ onUnmounted(() => {
           <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false">⌕ Search</button>
           <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false">⏱ History</button>
           <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false">⤢ Zoom</button>
-          <button type="button" role="menuitem" aria-label="Toggle fullscreen" :class="{ active: term.fullscreen }" @click="term.toggleFullscreen(); showMenu = false">⛶ Fullscreen</button>
           <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false">⟳ Refresh</button>
           <button type="button" role="menuitem" aria-label="Open settings" @click="emit('openSettings'); showMenu = false">⚙ Settings</button>
         </div>
@@ -606,6 +605,7 @@ onUnmounted(() => {
             :raw="renderContent"
             :valid-paths="pane?.valid_paths"
             :highlight="searchOpen ? appliedQuery : ''"
+            :zoom="zoom.zoom.value"
             @open-file="onOpenFile"
             @hits="onHits"
           >
@@ -845,11 +845,11 @@ onUnmounted(() => {
     var(--term-bg);
   padding: 14px 16px 20px;
 }
-.term-body { font-size: 12.5px; }
+.term-body { font-size: calc(12.5px * var(--term-zoom, 1)); }
 
 /* Wide screens: bump terminal font for readability */
 @media (min-width: 1800px) {
-  .term-body { font-size: 14.5px; }
+  .term-body { font-size: calc(14.5px * var(--term-zoom, 1)); }
 }
 
 /* Shell inline input — rendered inline after terminal content on same line */
@@ -890,11 +890,11 @@ onUnmounted(() => {
   color: transparent;
   caret-color: transparent;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--term-zoom, 1));
   z-index: 10;
 }
 @media (min-width: 1800px) {
-  .inline-input { font-size: 14.5px; }
+  .inline-input { font-size: calc(14.5px * var(--term-zoom, 1)); }
 }
 
 .term-loading { display: flex; flex-direction: column; gap: 9px; padding-top: 6px; }
@@ -913,7 +913,13 @@ onUnmounted(() => {
 
 /* Desktop: larger terminal text (12.5px is tuned for mobile) */
 @media (min-width: 900px) {
-  .term-body { font-size: 14px; }
-  .inline-input { font-size: 14px; }
+  .term-body { font-size: calc(14px * var(--term-zoom, 1)); }
+  .inline-input { font-size: calc(14px * var(--term-zoom, 1)); }
+}
+
+/* Below 900px the app header is already hidden in the terminal view, so the
+   terminal fills the screen and "fullscreen" would change nothing. */
+@media (max-width: 899px) {
+  .wide-only { display: none; }
 }
 </style>

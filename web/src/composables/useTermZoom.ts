@@ -19,9 +19,12 @@ export function useTermZoom(scrollEl: Ref<HTMLElement | null>) {
     apply()
   }
 
+  // The zoom is a factor the terminal's own font sizes multiply (TermView:
+  // calc(<size> * var(--term-zoom))). Setting font-size on the scroll box did
+  // nothing: .term-body pins its own size, so the change never reached the text.
   function apply() {
     const el = scrollEl.value
-    if (el) el.style.fontSize = `${(zoom.value * 12.5).toFixed(1)}px`
+    if (el) el.style.setProperty('--term-zoom', zoom.value.toFixed(3))
   }
 
   // --- pinch zoom (touch) ---

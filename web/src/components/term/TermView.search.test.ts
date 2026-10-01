@@ -39,6 +39,7 @@ async function flush() {
 }
 
 beforeEach(() => {
+  safeStorage.removeItem('herdrem_term_zoom')
   safeStorage.removeItem('herdrem_cmd_history')
   setActivePinia(createPinia())
   vi.mocked(ws.send).mockClear()
@@ -368,5 +369,29 @@ describe('TermView git status shortcut', () => {
     const w2 = mountView('agent')
     await w2.get('.head-actions button[aria-label="Git status"]').trigger('click')
     expect(useDiffStore().state).toMatchObject({ cwd: '/tmp', host: 'local', mode: 'status' })
+  })
+})
+
+describe('TermView header menu', () => {
+  it('the phone menu has no fullscreen (the terminal already fills the screen there) but keeps zoom', async () => {
+    const w = mountView('agent')
+    await w.get('.mobile-only button[aria-label="More actions"]').trigger('click')
+    const items = w.findAll('.head-menu [role="menuitem"]').map((b) => b.attributes('aria-label'))
+    expect(items).not.toContain('Toggle fullscreen')
+    expect(items).toContain('Toggle zoom')
+  })
+
+  it('the desktop fullscreen button is marked to hide below 900px', () => {
+    const w = mountView('agent')
+    expect(w.get('.desktop-only button[aria-label="Toggle fullscreen"]').classes()).toContain('wide-only')
+  })
+
+  it('zoom from the menu enlarges the terminal text', async () => {
+    const w = mountView('agent')
+    const scroll = w.get('.term-scroll').element as HTMLElement
+    expect(scroll.style.getPropertyValue('--term-zoom')).toBe('1.000')
+    await w.get('.mobile-only button[aria-label="More actions"]').trigger('click')
+    await w.get('.head-menu [aria-label="Toggle zoom"]').trigger('click')
+    expect(scroll.style.getPropertyValue('--term-zoom')).toBe('1.500')
   })
 })

@@ -4,8 +4,17 @@ import { ws } from '../api/ws';
 import { uid } from '../utils/id';
 import type {
   GitDiff, GitLog, GitDiffMode, CommitEntry, GitDiffContent, GitLogResult,
-  GitStatusData, GitStatusResultMsg, GitCommitResultMsg,
+  GitStatusData, GitStatusResultMsg, GitCommitResultMsg, GitStageReq, GitCommitReq,
 } from '../api/types';
+
+// The relay drops WebSocket frames over 32 KiB (its read limit) — an oversized
+// stage list or commit message kills the whole connection, not just the call.
+// Keep client messages comfortably under it.
+const MAX_MSG_BYTES = 24 * 1024;
+// Mirrors maxCommitMessage in internal/service/gitwrite.go — the frame limit
+// would hit before the server could reject a longer message.
+const MAX_COMMIT_MESSAGE_BYTES = 16 * 1024;
+const utf8Len = (s: string) => new TextEncoder().encode(s).length;
 
 /** The panel's tabs: the three diffs plus git status (stage / commit). */
 export type DiffViewMode = GitDiffMode | 'status';
@@ -249,27 +258,40 @@ export const useDiffStore = defineStore('diff', () => {
   function sendStage(extra: { paths?: string[]; all?: boolean; unstage: boolean }) {
     const s = state.value!;
     const reqId = newReqId();
+    const msg: GitStageReq = { type: 'git_stage', cwd: s.cwd, host: s.host, req_id: reqId, ...extra };
+    if (utf8Len(JSON.stringify(msg)) > MAX_MSG_BYTES) {
+      statusError.value = 'selection too large — stage fewer files at once';
+      return;
+    }
     statusReqId.value = reqId; // the reply is a fresh status
     staging.value = true;
     statusError.value = '';
-    ws.send({ type: 'git_stage', cwd: s.cwd, host: s.host, req_id: reqId, ...extra });
+    if (!ws.send(msg)) {
+      staging.value = false;
+      statusError.value = 'not connected';
+    }
   }
 
   /** Commit the index with a message, or (useCommand) run the configured command. */
   function commit(opts: { message?: string; useCommand?: boolean }) {
     const s = state.value;
     if (!s || committing.value) return;
+    if (!opts.useCommand && utf8Len(opts.message ?? '') > MAX_COMMIT_MESSAGE_BYTES) {
+      commitOutcome.value = { ok: false, error: 'commit message too long (max 16 KiB)' };
+      return;
+    }
     const reqId = newReqId();
     commitReqId.value = reqId;
     committing.value = true;
     commitOutcome.value = null;
-    const sent = ws.send({
+    const msg: GitCommitReq = {
       type: 'git_commit',
       cwd: s.cwd,
       host: s.host,
       req_id: reqId,
       ...(opts.useCommand ? { use_command: true } : { message: opts.message ?? '' }),
-    });
+    };
+    const sent = ws.send(msg);
     if (!sent) {
       committing.value = false;
       commitOutcome.value = { ok: false, error: 'not connected' };

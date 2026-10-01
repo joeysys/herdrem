@@ -57,7 +57,10 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 	// --no-ext-diff/--no-textconv pin the diff to builtin text diffing: repo
 	// or user config could otherwise name a diff.external command or a
 	// diff.<driver>.textconv helper, which git would execute.
-	args := []string{"--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv"}
+	// --relative keeps patch paths relative to cwd — parseStatusV2 strips the
+	// same prefix, so GitStatusView/DiffPreview paths line up when the pane's
+	// cwd is a subdirectory of the repo.
+	args := []string{"--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--relative"}
 	switch mode {
 	case GitDiffCached:
 		args = append(args, "--cached")
@@ -70,7 +73,7 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 		}
 		// `git show` includes the commit header + diff; use --format= to keep
 		// the subject line so the user sees what they picked, then the patch.
-		args = []string{"--no-pager", "show", "--no-color", "--format=fuller", "--no-ext-diff", "--no-textconv", commit}
+		args = []string{"--no-pager", "show", "--no-color", "--format=fuller", "--no-ext-diff", "--no-textconv", "--relative", commit}
 	case GitDiffUnstaged, "":
 		// plain diff
 	default:

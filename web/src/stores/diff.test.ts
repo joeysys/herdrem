@@ -123,3 +123,45 @@ describe('useDiffStore', () => {
     expect(diff.state).toBeNull()
   })
 })
+
+describe('git stage/commit send guards', () => {
+  it('clears the staging flag when the socket cannot take the message', () => {
+    const diff = useDiffStore()
+    diff.openDiff('/repo', 'local', 'status')
+    vi.mocked(ws.send).mockReturnValue(false)
+    diff.stage(['a.txt'])
+    expect(diff.staging).toBe(false)
+    expect(diff.statusError).toBe('not connected')
+
+    // the flag being cleared is what lets a retry go through at all
+    vi.mocked(ws.send).mockReturnValue(true)
+    diff.stage(['a.txt'])
+    expect(diff.staging).toBe(true)
+    expect(vi.mocked(ws.send)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'git_stage', paths: ['a.txt'] }),
+    )
+  })
+
+  it('rejects a stage selection whose frame would exceed the relay read limit', () => {
+    const diff = useDiffStore()
+    diff.openDiff('/repo', 'local', 'status')
+    vi.mocked(ws.send).mockClear()
+    // ~700 paths of ~45 bytes each overflow the relay's 32 KiB read limit —
+    // without the guard the frame kills the whole connection
+    const paths = Array.from({ length: 700 }, (_, i) => `src/some/long/path/file-number-${i}.vue`)
+    diff.stage(paths)
+    expect(ws.send).not.toHaveBeenCalled()
+    expect(diff.staging).toBe(false)
+    expect(diff.statusError).toContain('too large')
+  })
+
+  it('rejects a commit message that would overflow the frame before the server sees it', () => {
+    const diff = useDiffStore()
+    diff.openDiff('/repo', 'local', 'status')
+    vi.mocked(ws.send).mockClear()
+    diff.commit({ message: 'x'.repeat(17 * 1024) })
+    expect(ws.send).not.toHaveBeenCalled()
+    expect(diff.committing).toBe(false)
+    expect(diff.commitOutcome).toMatchObject({ ok: false, error: expect.stringContaining('too long') })
+  })
+})

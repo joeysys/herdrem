@@ -24,6 +24,9 @@ const RECORD_AGENTS_KEY = 'herdrem_history_agents'
 const MAX_RELAYS = 20
 // The relay rejects WebSocket messages over 32 KiB; stay well under that.
 const IMPORT_CHUNK_BYTES = 20000
+// The relay's read limit counts bytes, not characters — a CJK entry is ~3
+// bytes per UTF-16 unit, so chunk by encoded length, not .length.
+const utf8Len = (s: string) => new TextEncoder().encode(s).length
 
 type PerRelay = Record<string, HistoryEntry[]>
 
@@ -59,7 +62,7 @@ export function chunkForImport(entries: readonly HistoryEntry[], maxBytes = IMPO
   let cur: HistoryEntry[] = []
   let size = 0
   for (const e of entries) {
-    const len = JSON.stringify(e).length + 1
+    const len = utf8Len(JSON.stringify(e)) + 1
     if (cur.length && size + len > maxBytes) {
       chunks.push(cur)
       cur = []
@@ -191,16 +194,27 @@ export const useCmdHistoryStore = defineStore('cmdHistory', () => {
     // before the relay kept history (once per relay), plus entries made while
     // disconnected.
     let upload = pending.value[key.value] ?? []
-    if (!seeded.value[key.value]) {
+    const firstSync = !seeded.value[key.value]
+    if (firstSync) {
       upload = mergeEntries(upload, all.value[key.value] ?? [])
-      seeded.value = { ...seeded.value, [key.value]: true }
-      safeStorage.setItem(SEEDED_KEY, JSON.stringify(seeded.value))
     }
-    if (upload.length) {
-      for (const chunk of chunkForImport(upload)) ws.send({ type: 'history_import', entries: chunk })
+    // ws.send only means the frame left this tab — it is not a delivery ack.
+    // Only mark seeded / drop the pending queue once every chunk was actually
+    // handed to an open socket; on failure the whole batch stays queued and
+    // the next snapshot retries it (the relay's import merge is idempotent),
+    // instead of the snapshot overwriting local entries that never arrived.
+    const delivered =
+      !upload.length || chunkForImport(upload).every((chunk) => ws.send({ type: 'history_import', entries: chunk }))
+    if (delivered) {
+      if (firstSync) {
+        seeded.value = { ...seeded.value, [key.value]: true }
+        safeStorage.setItem(SEEDED_KEY, JSON.stringify(seeded.value))
+      }
       const rest = { ...pending.value }
       delete rest[key.value]
       pending.value = rest
+    } else {
+      pending.value = { ...pending.value, [key.value]: upload }
     }
     setList(upload.length ? mergeEntries(snap, upload) : snap)
     persist()

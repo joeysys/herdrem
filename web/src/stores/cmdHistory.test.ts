@@ -296,6 +296,31 @@ describe('cmdHistory store — shared through the relay', () => {
     expect(sent('history_import')).toEqual([])
   })
 
+  it('keeps the batch queued and unseeded when the socket drops the import', () => {
+    safeStorage.setItem('herdrem_cmd_history', JSON.stringify({ [RELAY]: [{ c: 'local only', t: 1, n: 1 }] }))
+    const { h } = shared()
+    vi.mocked(ws.send).mockReturnValue(false)
+    h.applySnapshot([{ c: 'on relay', t: 2, n: 1 }])
+    // nothing was handed to the socket: local view keeps both entries and
+    // seeded was not marked, so the next snapshot retries instead of
+    // replacing local history with the relay's older list
+    expect(h.entries.map((e) => e.c).sort()).toEqual(['local only', 'on relay'])
+
+    vi.mocked(ws.send).mockReturnValue(true)
+    vi.mocked(ws.send).mockClear() // drop the failed attempts from the mock history
+    h.applySnapshot([{ c: 'on relay', t: 2, n: 1 }])
+    const imports = sent('history_import')
+    expect(imports).toHaveLength(1)
+    // the locally-cached entry is retried; 'on relay' may ride along again
+    // since it entered the local list — the relay's import merge is idempotent
+    expect((imports[0].entries as Array<{ c: string }>).map((e) => e.c)).toContain('local only')
+
+    // after a successful sync nothing is re-sent
+    vi.mocked(ws.send).mockClear()
+    h.applySnapshot([{ c: 'on relay', t: 2, n: 1 }, { c: 'local only', t: 1, n: 1 }])
+    expect(sent('history_import')).toEqual([])
+  })
+
   it('keeps the pending queue across a reload', () => {
     const { h } = shared()
     h.applySnapshot([])
@@ -353,6 +378,19 @@ describe('chunkForImport', () => {
     expect(chunks.length).toBeGreaterThan(1)
     for (const c of chunks) expect(JSON.stringify({ type: 'history_import', entries: c }).length).toBeLessThan(5200)
     expect(chunks.flat()).toHaveLength(200)
+  })
+
+  it('chunks by UTF-8 bytes — CJK entries stay under the relay read limit', () => {
+    // A CJK char is 1 UTF-16 unit but ~3 bytes on the wire; counting .length
+    // instead of bytes let a 'full' chunk exceed the relay's 32 KiB read limit.
+    const entries = Array.from({ length: 120 }, (_, i) => ({ c: `にほんごコマンド${i}${'あ'.repeat(40)}`, t: i, n: 1 }))
+    const chunks = chunkForImport(entries, 5000)
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const c of chunks) {
+      const bytes = new TextEncoder().encode(JSON.stringify({ type: 'history_import', entries: c })).length
+      expect(bytes).toBeLessThan(32768)
+    }
+    expect(chunks.flat()).toHaveLength(120)
   })
 
   it('puts an oversized single entry in a chunk of its own', () => {

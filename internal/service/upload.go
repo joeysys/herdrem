@@ -226,7 +226,12 @@ func remoteUploadScript(dir string, roots []string, name string, size int64, ove
 	}
 	b.WriteString(fmt.Sprintf(` tmp=$(mktemp "$r/.herdrem-upload.XXXXXX") || exit %d; trap 'rm -f "$tmp"' EXIT; cat > "$tmp" || exit %d;`,
 		remoteUploadWriteFail, remoteUploadWriteFail))
-	b.WriteString(fmt.Sprintf(` n=$(wc -c < "$tmp" | tr -d ' '); [ "$n" = %s ] || exit %d; chmod 644 "$tmp" 2>/dev/null;`,
+	// tr -dc '0-9' keeps only digits — some wc implementations emit tabs or
+	// other whitespace that tr -d ' ' would leave behind. The final chmod
+	// mirrors the local path's open(0644)-masked-by-umask semantics: an
+	// absolute chmod would ignore the remote umask and leave e.g. credentials
+	// world-readable on a umask-077 host.
+	b.WriteString(fmt.Sprintf(` n=$(wc -c < "$tmp" | tr -dc '0-9'); [ "$n" = %s ] || exit %d; m=$(printf '%%o' "$((0644 & ~0$(umask)))" 2>/dev/null); chmod "${m:-644}" "$tmp" 2>/dev/null;`,
 		strconv.FormatInt(size, 10), remoteUploadSize))
 	if overwrite {
 		b.WriteString(fmt.Sprintf(` mv -f -- "$tmp" "$dst" || exit %d;`, remoteUploadWriteFail))

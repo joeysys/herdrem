@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ansiToHtmlWith } from '../../utils/ansi'
 import { linkifyFilePaths } from '../../utils/linkify'
 import { truncateSeparators } from '../../utils/truncLines'
@@ -7,7 +7,9 @@ import { applyHighlights, clearHighlights, setActiveGroup } from '../../utils/do
 
 // `highlight` wraps matches of a search query in <mark>; `hits` reports how
 // many there are (capped at domHighlight's MAX_HITS) and setActiveHit() moves the emphasis.
-const props = defineProps<{ raw: string; validPaths?: string[]; highlight?: string }>()
+// `zoom` only signals a font-size change, so the character width (used to fit
+// separator lines to the screen) is measured again.
+const props = defineProps<{ raw: string; validPaths?: string[]; highlight?: string; zoom?: number }>()
 const emit = defineEmits<{
   openFile: [payload: { path: string; line: number | null }]
   hits: [count: number]
@@ -42,7 +44,10 @@ function measureContainer() {
 let resizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
-  measureCharWidth()
+  // Defer to a microtask: the parent applies --term-zoom in its own mounted
+  // hook, which runs after this child's — measuring now would read the 1x
+  // font size when a saved zoom factor is restored.
+  nextTick(measureCharWidth)
   measureContainer()
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
@@ -60,6 +65,8 @@ onUnmounted(() => {
 watch(() => props.raw, () => {
   if (charWidth.value === 0) measureCharWidth()
 })
+// …and after a zoom, once the new font size has been applied.
+watch(() => props.zoom, () => nextTick(measureCharWidth))
 
 const maxChars = computed(() => {
   if (charWidth.value === 0 || containerWidth.value === 0) return 9999
