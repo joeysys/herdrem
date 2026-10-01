@@ -106,6 +106,11 @@ func main() {
 	if err != nil {
 		logger.Error("prefs store init", "err", err)
 	}
+	historyStore, err := store.NewHistoryStore(cfg.DataDir + "/history.json")
+	if err != nil {
+		logger.Error("history store init", "err", err)
+		historyStore = nil // clients fall back to browser-local history
+	}
 
 	// Hub
 	h := hub.New(logger)
@@ -206,6 +211,9 @@ func main() {
 
 	// Service (command dispatch; poller routes commands to the right host)
 	svc := service.New(client, poller, todoStore, prefsStore, fileSvc, h, logger)
+	if historyStore != nil {
+		svc.SetHistory(historyStore)
+	}
 	svc.SetContentSubscriber(poller)
 	svc.SetAllowedHosts(cfg.Hosts())
 

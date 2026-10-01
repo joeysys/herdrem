@@ -351,7 +351,44 @@ export interface PaneCreated {
   host?: string
 }
 
+// --- shared input history (feature "input-history") ---
+// Entry shape is the wire/disk format of internal/store/history.go.
+export interface HistoryWireEntry {
+  c: string
+  t: number
+  n: number
+  p?: string
+  k?: 'sh' | 'ag'
+  a?: string
+  w?: string
+  h?: string
+  s?: string
+  l?: string
+}
+export interface HistorySnapshotMsg { type: 'history'; entries: HistoryWireEntry[] }
+export interface HistoryAddedMsg { type: 'history_added'; entry: HistoryWireEntry }
+export interface HistoryRemovedMsg { type: 'history_removed'; kind: 'sh' | 'ag'; text: string }
+export interface HistoryClearedMsg { type: 'history_cleared'; kind: 'all' | 'sh' | 'ag'; host?: string; workspace_id?: string }
+export interface HistoryRecord {
+  type: 'history_record'
+  text: string
+  kind: 'sh' | 'ag'
+  pane_id?: string
+  host?: string
+  workspace_id?: string
+  workspace_label?: string
+  agent?: string
+  title?: string
+}
+export interface HistoryRemove { type: 'history_remove'; kind: 'sh' | 'ag'; text: string }
+export interface HistoryClear { type: 'history_clear'; kind: 'all' | 'sh' | 'ag'; host?: string; workspace_id?: string }
+export interface HistoryImport { type: 'history_import'; entries: HistoryWireEntry[] }
+
 export type ServerMessage =
+  | HistorySnapshotMsg
+  | HistoryAddedMsg
+  | HistoryRemovedMsg
+  | HistoryClearedMsg
   | Hello
   | AgentsSnapshot
   | BlockedNotify
@@ -369,6 +406,10 @@ export type ServerMessage =
   | PaneCreated
 
 export type ClientMessage =
+  | HistoryRecord
+  | HistoryRemove
+  | HistoryClear
+  | HistoryImport
   | Respond
   | SendText
   | SendKeys

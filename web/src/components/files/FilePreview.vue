@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
@@ -8,6 +8,8 @@ import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { renderMarkdown } from '../../utils/markdown'
 import { highlight, langForPath } from '../../utils/highlight'
 import { relayFileUrl, relayHttpBase } from '../../utils/relay'
+import { applyHighlights, clearHighlights, matchesQuery, setActiveGroup, MAX_HITS } from '../../utils/domHighlight'
+import FindBar from '../common/FindBar.vue'
 
 const files = useFilesStore()
 const conn = useConnectionStore()
@@ -101,7 +103,10 @@ async function copyContent() {
 
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer)
+  if (findDebounce) clearTimeout(findDebounce)
+  document.removeEventListener('keydown', onGlobalKeydown)
 })
+onMounted(() => document.addEventListener('keydown', onGlobalKeydown))
 
 const fileName = computed(() => {
   const full = preview.value?.path || ''
@@ -343,6 +348,133 @@ watch(
   { immediate: true },
 )
 
+// --- find in file ---
+// Searches what is on screen: the syntax-highlighted source, or the rendered
+// markdown. A rendered HTML preview lives in a sandboxed iframe we cannot look
+// into, so searching it switches to the source view (and back on close).
+// Only the loaded text is searched — file_read stops at 1 MiB.
+const findOpen = ref(false)
+const findQuery = ref('')
+const appliedFind = ref('')
+const findHits = ref(0)
+const findIndex = ref(0)
+const findRef = ref<InstanceType<typeof FindBar> | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
+let findGroups: HTMLElement[][] = []
+let findDebounce: ReturnType<typeof setTimeout> | null = null
+let pendingJump = false
+let htmlSwitched = false
+
+const searchable = computed(() => {
+  const p = preview.value
+  return !!p && !p.error && !!p.content && !p.isImage
+})
+const showsMarkdown = computed(() => searchable.value && isMd.value && mdRendered.value)
+const showsCode = computed(() => searchable.value && !showsMarkdown.value && !(isHtml.value && htmlRendered.value))
+
+watch(findQuery, (q) => {
+  if (findDebounce) clearTimeout(findDebounce)
+  if (!q) {
+    appliedFind.value = ''
+    findHits.value = 0
+    return
+  }
+  findDebounce = setTimeout(() => {
+    pendingJump = true
+    appliedFind.value = q
+  }, 120)
+})
+
+function runFind() {
+  const root = scroller.value
+  if (!root) return
+  clearHighlights(root)
+  findGroups = []
+  const q = findOpen.value ? appliedFind.value : ''
+  if (q) {
+    if (showsMarkdown.value) {
+      const md = root.querySelector<HTMLElement>('.fp-markdown')
+      if (md) findGroups = applyHighlights(md, q)
+    } else if (showsCode.value) {
+      // Only touch the lines that contain the query; the line-number gutter is
+      // outside .lcw so it can never match.
+      let budget = MAX_HITS
+      for (const cell of root.querySelectorAll<HTMLElement>('.lcw')) {
+        if (budget <= 0) break
+        if (!matchesQuery(cell.textContent ?? '', q)) continue
+        const g = applyHighlights(cell, q, budget)
+        findGroups.push(...g)
+        budget -= g.length
+      }
+    }
+  }
+  findHits.value = findGroups.length
+  if (!findGroups.length) {
+    findIndex.value = 0
+    return
+  }
+  const jump = pendingJump
+  pendingJump = false
+  findIndex.value = jump ? 0 : Math.min(findIndex.value, findGroups.length - 1)
+  const mark = setActiveGroup(findGroups, findIndex.value)
+  if (jump) mark?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
+}
+watch(
+  [appliedFind, findOpen, () => preview.value?.content, mdRendered, htmlRendered, lines],
+  runFind,
+  { flush: 'post' },
+)
+
+function openFind() {
+  if (!searchable.value) return
+  if (findOpen.value) {
+    findRef.value?.focus()
+    return
+  }
+  if (isHtml.value && htmlRendered.value) {
+    htmlRendered.value = false
+    htmlSwitched = true
+  }
+  findOpen.value = true
+  pendingJump = true
+  nextTick(() => findRef.value?.focus())
+}
+
+function closeFind(restoreHtml = true) {
+  if (findDebounce) clearTimeout(findDebounce)
+  findOpen.value = false
+  findQuery.value = ''
+  appliedFind.value = ''
+  findHits.value = 0
+  findIndex.value = 0
+  pendingJump = false
+  if (htmlSwitched && restoreHtml) htmlRendered.value = true
+  htmlSwitched = false
+}
+
+function stepFind(delta: number) {
+  const n = findHits.value
+  if (!n) return
+  findIndex.value = (findIndex.value + delta + n) % n
+  setActiveGroup(findGroups, findIndex.value)?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
+}
+
+// Showing the rendered HTML again while searching leaves nothing to search.
+watch(htmlRendered, (v) => { if (v && findOpen.value) closeFind(false) })
+// A different file starts a fresh search.
+watch(() => preview.value?.path, () => closeFind(false))
+
+// Ctrl/Cmd+F opens this find instead of the browser's, but only while a
+// searchable preview is up and focus is inside it (or nowhere).
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return
+  if (!preview.value || !searchable.value) return
+  const active = document.activeElement
+  if (active && active !== document.body && !rootEl.value?.contains(active)) return
+  e.preventDefault()
+  openFind()
+}
+
 function fmtSize(bytes: number): string {
   if (!bytes) return ''
   if (bytes < 1024) return `${bytes}B`
@@ -352,7 +484,7 @@ function fmtSize(bytes: number): string {
 </script>
 
 <template>
-  <section v-if="preview" class="file-preview" aria-label="File preview">
+  <section v-if="preview" ref="rootEl" class="file-preview" aria-label="File preview">
     <header class="fp-head">
       <button class="fp-btn fp-close" aria-label="Close preview" title="Close preview" @click="emit('close')">×</button>
       <nav ref="pathNav" class="fp-path" aria-label="Preview path">
@@ -380,6 +512,16 @@ function fmtSize(bytes: number): string {
         :disabled="!canCopy"
         @click="copyContent"
       >{{ copyLabel }}</button>
+
+      <button
+        v-if="searchable"
+        class="fp-btn"
+        :class="{ active: findOpen }"
+        aria-label="Search file"
+        title="Search file (Ctrl+F)"
+        :aria-pressed="findOpen"
+        @click="findOpen ? closeFind() : openFind()"
+      >⌕</button>
 
       <!-- Viewport controls for HTML preview -->
       <template v-if="isHtml && htmlRendered">
@@ -434,6 +576,7 @@ function fmtSize(bytes: number): string {
 
     </header>
 
+    <div class="fp-main">
     <div ref="scroller" class="fp-scroll" :class="{ 'fp-html-wrap': isHtml && htmlRendered }">
       <div v-if="preview.error" class="fp-error">
         <span class="fp-error-icon">⚠</span>
@@ -481,6 +624,20 @@ function fmtSize(bytes: number): string {
           </tr>
         </tbody>
       </table>
+    </div>
+    <FindBar
+      v-if="findOpen"
+      ref="findRef"
+      v-model="findQuery"
+      label="file"
+      :current="findHits ? findIndex + 1 : 0"
+      :total="findHits"
+      :capped="findHits >= MAX_HITS"
+      :note="preview.truncated ? 'File truncated: only the loaded part is searched' : ''"
+      @next="stepFind(1)"
+      @prev="stepFind(-1)"
+      @close="closeFind()"
+    />
     </div>
   </section>
 </template>
@@ -536,6 +693,8 @@ function fmtSize(bytes: number): string {
   background: var(--orange-soft);
 }
 
+.fp-main { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.fp-btn.active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .fp-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--term-bg); }
 .fp-scroll.fp-html-wrap { display: flex; flex-direction: column; overflow: hidden; background: #1e1e1e; }
 .fp-iframe-container { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; justify-content: center; background: #121212; }

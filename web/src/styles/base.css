@@ -479,3 +479,16 @@ code, pre { font-family: var(--font-mono); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* Search hits (terminal output, file preview) — injected by utils/domHighlight
+   into v-html content, so this has to be global rather than scoped. */
+mark.term-hit {
+  background: color-mix(in srgb, var(--orange) 45%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+mark.term-hit.active {
+  background: var(--orange);
+  color: var(--bg);
+  outline: 1px solid var(--orange);
+}

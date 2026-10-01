@@ -13,6 +13,8 @@ A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bri
 - **Web PWA** — approve blocked agents with one tap; works as a mobile PWA and a desktop web app
 - **Live terminal** — stream agent output, send input over WebSocket
 - **File browser** — navigate, preview, and edit files remotely
+- **Input history** — every shell command and agent prompt sent through the app is remembered on the relay (`history.json` in the data directory), so it follows you across devices. Search it (`⏱` or Ctrl/Cmd+R) by pane, workspace (default) or the whole relay, and reuse an entry in any pane; suggestions appear as you type. Text that looks like a password or token is never saved, and a line starting with a space is skipped. Clear it from Settings.
+- **Search** — find text in a pane's output or in a previewed file (`⌕` or Ctrl/Cmd+F)
 - **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
 - **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
 - **Token auth** — when `HERDREM_TOKEN` is unset (dev), only a same-origin page on `localhost` / `127.0.0.1` / `::1` may connect without a token. Once the token is set, **every** connection needs it, including localhost.

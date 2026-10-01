@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
+import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { useHaptic } from '../../composables/useHaptic'
 import { useKeyRepeat } from '../../composables/useKeyRepeat'
 import { useQuickPopover } from '../../composables/useQuickPopover'
@@ -8,13 +9,23 @@ import {
   detectMenu, isStickyChoice, menuLabel,
 } from '../../utils/menu'
 import { safeStorage } from '../../utils/storage'
+import { whereOf } from '../../utils/cmdHistory'
 import type { Pane } from '../../api/types'
 import ArrowPad from './ArrowPad.vue'
 
 const props = defineProps<{ pane: Pane | null; modelValue?: string }>()
-const emit = defineEmits<{ 'update:modelValue': [value: string]; fill: [text: string]; edit: [] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  fill: [text: string]
+  edit: []
+  // The optional input box reports key/focus events so TermView can drive
+  // command suggestions for it exactly as for the inline prompt.
+  inputKeydown: [e: KeyboardEvent]
+  inputFocus: [focused: boolean]
+}>()
 
 const term = useTerminalStore()
+const history = useCmdHistoryStore()
 const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
 
@@ -160,6 +171,7 @@ function submitInput() {
   const t = text.value
   if (!t) return
   term.sendText(t, true)
+  history.record(t, { kind: 'sh', ...whereOf(props.pane) })
   text.value = ''
 }
 
@@ -287,6 +299,9 @@ function onArrowKey(key: string) {
         spellcheck="false"
         enterkeyhint="send"
         aria-label="Command to send to shell"
+        @keydown="emit('inputKeydown', $event)"
+        @focus="emit('inputFocus', true)"
+        @blur="emit('inputFocus', false)"
       />
       <button type="submit" class="send-btn" :disabled="!text.length" aria-label="Send command to shell">send</button>
     </form>

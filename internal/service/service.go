@@ -22,6 +22,7 @@ type Service struct {
 	router       herdr.PaneRouter
 	todoStore    *store.Store
 	prefsStore   *store.PrefsStore
+	historyStore *store.HistoryStore
 	files        *FileService
 	tunnels      *TunnelService
 	hub          *hub.Hub
@@ -154,6 +155,16 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleSendKeys(ctx, conn, data)
 	case "respond":
 		s.handleRespond(ctx, conn, data)
+	case "history_get":
+		s.handleHistoryGet(ctx, conn)
+	case "history_record":
+		s.handleHistoryRecord(ctx, conn, data)
+	case "history_remove":
+		s.handleHistoryRemove(ctx, conn, data)
+	case "history_clear":
+		s.handleHistoryClear(ctx, conn, data)
+	case "history_import":
+		s.handleHistoryImport(ctx, conn, data)
 	case "todo_get":
 		s.handleTodoGet(ctx, conn)
 	case "todo_set":

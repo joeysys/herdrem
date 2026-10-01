@@ -7,12 +7,19 @@ import { useFilesStore } from '../../stores/files'
 import { useDiffStore } from '../../stores/diff'
 import { useTodoStore } from '../../stores/todo'
 import { usePrefsStore } from '../../stores/prefs'
+import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { useTermZoom } from '../../composables/useTermZoom'
 import { useDoneAutoMark } from '../../composables/useDoneAutoMark'
 import { ws } from '../../api/ws'
 import TermInput from './TermInput.vue'
 import ShellKeys from './ShellKeys.vue'
 import AnsiStream from './AnsiStream.vue'
+import FindBar from '../common/FindBar.vue'
+import HistorySuggest from './HistorySuggest.vue'
+import HistoryPanel from './HistoryPanel.vue'
+import { MAX_HITS } from '../../utils/domHighlight'
+import { useHistorySuggest } from '../../composables/useHistorySuggest'
+import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow, computeTailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import TodoPanel from '../todo/TodoPanel.vue'
@@ -33,6 +40,9 @@ const files = useFilesStore()
 const diff = useDiffStore()
 const todo = useTodoStore()
 const prefs = usePrefsStore()
+const history = useCmdHistoryStore()
+
+const rootEl = ref<HTMLElement | null>(null)
 
 const showTodo = ref(false)
 const showMenu = ref(false)
@@ -81,7 +91,8 @@ const renderContent = computed(() => {
   // When the user scrolls up to read history, render the full content so the
   // scroll-back window stays intact; windowing only applies when pinned to the
   // bottom (the streaming case that dominates cost during agent output).
-  if (!term.stickBottom) return raw
+  // Searching needs every retained line, not just the tail window.
+  if (!term.stickBottom || searchOpen.value) return raw
   return tailWindow(raw, RENDER_WINDOW_LINES)
 })
 
@@ -166,6 +177,7 @@ function shellSubmit() {
   const t = shellText.value
   if (!t) return
   term.sendText(t, true)
+  history.record(t, { kind: 'sh', ...whereOf(pane.value) })
   shellText.value = ''
 }
 
@@ -201,12 +213,157 @@ watch(
   () => term.fillSignal,
   (sig) => {
     if (!sig || !isShell.value) return
-    fillShellInput(sig.text, sig.kind)
+    if (sig.kind === 'replace') setShellText(sig.text)
+    else fillShellInput(sig.text, sig.kind)
   },
 )
 
 function focusShellInput() {
   activeShellInput()?.focus()
+}
+
+// --- input history (per-relay): suggestions + panel ---
+const boxFocused = ref(false)
+const showHistory = ref(false)
+
+// Replace the whole shell input with `cmd`, caret at the end.
+function setShellText(cmd: string) {
+  const el = activeShellInput()
+  shellText.value = cmd
+  nextTick(() => {
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(cmd.length, cmd.length)
+  })
+}
+
+function openHistory() {
+  showTodo.value = false
+  showHistory.value = true
+}
+function closeHistory() {
+  showHistory.value = false
+  if (isShell.value) nextTick(() => focusShellInput())
+}
+// Picking never runs anything: it only fills the current pane's input, so an
+// agent prompt can be reused in a shell and vice versa.
+function pickHistory(text: string) {
+  showHistory.value = false
+  if (isShell.value) setShellText(text)
+  else term.requestFill(text, 'replace')
+}
+
+// Shell prompt suggestions (the agent input has its own, in TermInput). Shown
+// while typing in either shell input, hidden while the history panel is open.
+const shellSuggest = useHistorySuggest({
+  text: shellText,
+  kind: 'sh',
+  where: () => whereOf(pane.value),
+  enabled: () => isShell.value && (shellFocused.value || boxFocused.value) && !showHistory.value,
+  accept: setShellText,
+  openHistory,
+})
+const suggestions = shellSuggest.suggestions
+const activeSuggest = shellSuggest.active
+const onShellKeydown = shellSuggest.onKeydown
+
+// --- output search ---
+// Searches every line the view retains. Opening it asks the relay once for a
+// deeper scrollback (SEARCH_LINES) so older output is findable too.
+const SEARCH_LINES = 3000
+const searchOpen = ref(false)
+const searchQuery = ref('')
+const appliedQuery = ref('')
+const hitCount = ref(0)
+const hitIndex = ref(0)
+const searchRef = ref<InstanceType<typeof FindBar> | null>(null)
+const ansiRef = ref<InstanceType<typeof AnsiStream> | null>(null)
+let deepLoadedFor = ''
+let pendingJump = false
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+
+// Debounced so typing does not re-highlight a large DOM on every keystroke.
+watch(searchQuery, (q) => {
+  if (searchDebounce) clearTimeout(searchDebounce)
+  if (!q) {
+    appliedQuery.value = ''
+    hitCount.value = 0
+    return
+  }
+  searchDebounce = setTimeout(() => {
+    pendingJump = true
+    appliedQuery.value = q
+  }, 120)
+})
+
+function openSearch() {
+  if (searchOpen.value) {
+    searchRef.value?.focus()
+    return
+  }
+  searchOpen.value = true
+  pendingJump = true
+  if (deepLoadedFor !== props.paneId) {
+    deepLoadedFor = props.paneId
+    term.requestRead(SEARCH_LINES, true)
+  }
+  nextTick(() => {
+    // Windowed → full render keeps the scroll offset, which would land in the
+    // middle of the history; stay pinned to the bottom until a hit is chosen.
+    const el = scrollEl.value
+    if (el && term.stickBottom) el.scrollTop = el.scrollHeight
+    searchRef.value?.focus()
+  })
+}
+
+function closeSearch() {
+  if (searchDebounce) clearTimeout(searchDebounce)
+  searchOpen.value = false
+  searchQuery.value = ''
+  appliedQuery.value = ''
+  hitCount.value = 0
+  hitIndex.value = 0
+  pendingJump = false
+  nextTick(() => {
+    const el = scrollEl.value
+    if (el && term.stickBottom) el.scrollTop = el.scrollHeight
+    if (isShell.value) focusShellInput()
+  })
+}
+
+// Newest match first: terminal output grows downwards, so the hit closest to
+// the prompt is the one you usually want.
+function onHits(n: number) {
+  hitCount.value = n
+  if (!n) {
+    hitIndex.value = 0
+    return
+  }
+  if (pendingJump) {
+    pendingJump = false
+    hitIndex.value = n - 1
+    ansiRef.value?.setActiveHit(hitIndex.value, true)
+  } else {
+    hitIndex.value = Math.min(hitIndex.value, n - 1)
+  }
+}
+
+function stepHit(delta: number) {
+  const n = hitCount.value
+  if (!n) return
+  hitIndex.value = (hitIndex.value + delta + n) % n
+  ansiRef.value?.setActiveHit(hitIndex.value, true)
+}
+
+// Ctrl/Cmd+F opens the search instead of the browser's find, but only while
+// focus is on this view (or nowhere), so other panels keep their own find.
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return
+  if (files.preview) return // the file preview has its own find
+  const active = document.activeElement
+  if (active && active !== document.body && !rootEl.value?.contains(active)) return
+  e.preventDefault()
+  openSearch()
 }
 
 // Auto-focus shell input when entering a shell pane or when pane data loads
@@ -318,6 +475,7 @@ onMounted(() => {
   if (scrollEl.value) zoom.bind(scrollEl.value)
   if (!document.hidden) startPoll()
   document.addEventListener('visibilitychange', onVisibility)
+  document.addEventListener('keydown', onGlobalKeydown)
   // Focus shell input on mount if this is a shell pane
   if (isShell.value) nextTick(() => focusShellInput())
   // Close mobile menu on outside click
@@ -335,6 +493,9 @@ watch(
   () => props.paneId,
   (id) => {
     term.openPane(id)
+    deepLoadedFor = ''
+    closeSearch()
+    showHistory.value = false
     if (isShell.value) nextTick(() => focusShellInput())
   },
 )
@@ -344,6 +505,8 @@ onUnmounted(() => {
   if (scrollEl.value) zoom.unbind(scrollEl.value)
   document.removeEventListener('click', closeMenu)
   document.removeEventListener('visibilitychange', onVisibility)
+  document.removeEventListener('keydown', onGlobalKeydown)
+  if (searchDebounce) clearTimeout(searchDebounce)
   term.closePane()
 })
 </script>
@@ -351,7 +514,7 @@ onUnmounted(() => {
 <template>
   <!-- No view-enter here: the fade-in would reveal the page background image
        through the translucent section on every pane switch (jarring flash). -->
-  <section class="term-view" :class="{ fullscreen: term.fullscreen }" aria-label="Terminal" :aria-busy="term.loading">
+  <section ref="rootEl" class="term-view" :class="{ fullscreen: term.fullscreen }" aria-label="Terminal" :aria-busy="term.loading">
     <header class="term-head">
       <button class="icon-btn" aria-label="Back to agent list" title="Back" @click="emit('back')">‹</button>
       <div class="term-title">
@@ -382,6 +545,22 @@ onUnmounted(() => {
         >✎</button>
         <button
           class="icon-btn"
+          :class="{ active: searchOpen }"
+          aria-label="Search output"
+          title="Search output (Ctrl+F)"
+          :aria-pressed="searchOpen"
+          @click="searchOpen ? closeSearch() : openSearch()"
+        >⌕</button>
+        <button
+          class="icon-btn"
+          :class="{ active: showHistory }"
+          aria-label="Input history"
+          title="Input history (Ctrl+R)"
+          :aria-pressed="showHistory"
+          @click="showHistory ? closeHistory() : openHistory()"
+        >⏱</button>
+        <button
+          class="icon-btn"
           :class="{ active: term.fullscreen }"
           aria-label="Toggle fullscreen"
           title="Fullscreen"
@@ -397,6 +576,8 @@ onUnmounted(() => {
           <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false">🗂 Files</button>
           <button v-if="conn.hasFeature('git-diff')" type="button" role="menuitem" aria-label="Git diff" @click.stop="openDiff(); showMenu = false">⎇ Diff</button>
           <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false">✎ Todo</button>
+          <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false">⌕ Search</button>
+          <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false">⏱ History</button>
           <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false">⤢ Zoom</button>
           <button type="button" role="menuitem" aria-label="Toggle fullscreen" :class="{ active: term.fullscreen }" @click="term.toggleFullscreen(); showMenu = false">⛶ Fullscreen</button>
           <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false">⟳ Refresh</button>
@@ -405,40 +586,71 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div ref="scrollEl" class="term-scroll" @scroll.passive="onScroll" @click="isShell && focusShellInput()">
-      <div v-if="term.loading && !term.content" class="term-loading" aria-live="polite">
-        <span class="bar"></span>
-        <span class="bar"></span>
-        <span class="bar"></span>
+    <div class="term-main">
+      <div ref="scrollEl" class="term-scroll" @scroll.passive="onScroll" @click="isShell && focusShellInput()">
+        <div v-if="term.loading && !term.content" class="term-loading" aria-live="polite">
+          <span class="bar"></span>
+          <span class="bar"></span>
+          <span class="bar"></span>
+        </div>
+        <div class="term-body" :class="{ shell: isShell }">
+          <AnsiStream
+            ref="ansiRef"
+            :raw="renderContent"
+            :valid-paths="pane?.valid_paths"
+            :highlight="searchOpen ? appliedQuery : ''"
+            @open-file="onOpenFile"
+            @hits="onHits"
+          >
+            <!-- Shell: inline input inside <pre>, directly after content on same line -->
+            <span v-if="isShell" class="inline-input-wrap" :class="{ focused: shellFocused }" @click.stop="focusShellInput">
+              <span class="inline-text">{{ shellText }}<span class="inline-cursor" aria-hidden="true"></span></span>
+              <input
+                ref="shellInputEl"
+                v-model="shellText"
+                class="inline-input"
+                type="text"
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="send"
+                aria-label="Command input"
+                @focus="shellFocused = true"
+                @blur="shellFocused = false"
+                @keydown.enter.prevent="shellSubmit"
+                @keydown="onShellKeydown"
+              />
+            </span>
+          </AnsiStream>
+        </div>
       </div>
-      <div class="term-body" :class="{ shell: isShell }">
-        <AnsiStream :raw="renderContent" :valid-paths="pane?.valid_paths" @open-file="onOpenFile">
-          <!-- Shell: inline input inside <pre>, directly after content on same line -->
-          <span v-if="isShell" class="inline-input-wrap" :class="{ focused: shellFocused }" @click.stop="focusShellInput">
-            <span class="inline-text">{{ shellText }}<span class="inline-cursor" aria-hidden="true"></span></span>
-            <input
-              ref="shellInputEl"
-              v-model="shellText"
-              class="inline-input"
-              type="text"
-              autocomplete="off"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck="false"
-              enterkeyhint="send"
-              aria-label="Command input"
-              @focus="shellFocused = true"
-              @blur="shellFocused = false"
-              @keydown.enter.prevent="shellSubmit"
-            />
-          </span>
-        </AnsiStream>
-      </div>
+      <!-- Floating (absolute) so showing/hiding never shifts the layout. -->
+      <FindBar
+        v-if="searchOpen"
+        ref="searchRef"
+        v-model="searchQuery"
+        label="output"
+        :current="hitCount ? hitIndex + 1 : 0"
+        :total="hitCount"
+        :capped="hitCount >= MAX_HITS"
+        @next="stepHit(1)"
+        @prev="stepHit(-1)"
+        @close="closeSearch"
+      />
+      <HistorySuggest
+        v-if="isShell"
+        class="suggest-float"
+        :items="suggestions"
+        :typed="shellText"
+        :active="activeSuggest"
+        @pick="setShellText"
+      />
     </div>
 
     <!-- Shell: special keys + quick chips; the ❯ toggle reveals an optional
          input box that shares the inline prompt's draft (v-model). -->
-    <TermInput v-if="!isShell" :pane="pane" @edit="emit('editCommands', 'skills')" />
+    <TermInput v-if="!isShell" :pane="pane" @edit="emit('editCommands', 'skills')" @history="openHistory" />
     <ShellKeys
       v-else
       ref="shellKeysEl"
@@ -446,6 +658,15 @@ onUnmounted(() => {
       :pane="pane"
       @fill="onShellFill"
       @edit="emit('editCommands', 'shell_cmds')"
+      @input-keydown="onShellKeydown"
+      @input-focus="boxFocused = $event"
+    />
+    <HistoryPanel
+      v-if="showHistory"
+      :where="whereOf(pane)"
+      :default-kind="isShell ? 'sh' : 'ag'"
+      @pick="pickHistory"
+      @close="closeHistory"
     />
     <TodoPanel
       v-if="showTodo"
@@ -589,6 +810,23 @@ onUnmounted(() => {
 .status-badge.done .dot { background: var(--green); }
 .status-badge.clickable { cursor: pointer; transition: filter 0.15s; }
 .status-badge.clickable:hover { filter: brightness(1.15); }
+
+.term-main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Sits just above the prompt line (term-scroll bottom padding + one line), so
+   it never covers what is being typed. */
+.suggest-float {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 40px;
+  z-index: 15;
+}
 
 .term-scroll {
   flex: 1;

@@ -66,7 +66,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   const stickBottom = ref(true)
   const lastReadAt = ref(0)
   const fullscreen = ref(false)
-  const fillSignal = ref<{ text: string; ts: number; kind: 'append' | 'prepend' } | null>(null)
+  const fillSignal = ref<{ text: string; ts: number; kind: 'append' | 'prepend' | 'replace' } | null>(null)
   const inputDrafts = ref<Record<string, string>>({})
 
   // Local content cache: paneId → { text, ts }
@@ -105,8 +105,9 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   // requestFill asks the terminal input to insert text (from todo/quick chips).
   // kind 'append' inserts at the cursor with space padding; 'prepend' puts the
-  // text at the front followed by a space (command-style chips).
-  function requestFill(text: string, kind: 'append' | 'prepend' = 'append') {
+  // text at the front followed by a space (command-style chips); 'replace'
+  // swaps the whole input (picking an entry from the history panel).
+  function requestFill(text: string, kind: 'append' | 'prepend' | 'replace' = 'append') {
     fillSignal.value = { text, ts: Date.now(), kind }
   }
 

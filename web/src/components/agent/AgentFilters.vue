@@ -86,7 +86,7 @@ const STATUSES = [
   border-radius: var(--radius);
   padding: 8px 4px;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 .stat:hover { border-color: var(--border-strong); }
 .stat .n {
@@ -108,12 +108,12 @@ const STATUSES = [
 .stat.working .n { color: var(--orange); }
 .stat.done .n { color: var(--green); }
 .stat.todo .n { color: var(--blue); }
-/* Active state */
-.stat.on { border-width: 2px; }
-.stat.blocked.on { border-color: var(--red); background: var(--red-soft); }
-.stat.working.on { border-color: var(--orange); background: var(--orange-soft); }
-.stat.done.on { border-color: var(--green); background: var(--green-soft); }
-.stat.todo.on { border-color: var(--blue); background: var(--blue-soft); }
+/* Active state — the heavier outline is an inset shadow, not a wider border,
+   so selecting a filter never changes the button's box (no layout shift). */
+.stat.blocked.on { border-color: var(--red); background: var(--red-soft); box-shadow: inset 0 0 0 1px var(--red); }
+.stat.working.on { border-color: var(--orange); background: var(--orange-soft); box-shadow: inset 0 0 0 1px var(--orange); }
+.stat.done.on { border-color: var(--green); background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green); }
+.stat.todo.on { border-color: var(--blue); background: var(--blue-soft); box-shadow: inset 0 0 0 1px var(--blue); }
 
 /* Search */
 .search-row { margin-bottom: 9px; }

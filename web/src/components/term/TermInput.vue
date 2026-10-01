@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
+import { useCmdHistoryStore } from '../../stores/cmdHistory'
+import { agentTypeName, paneTitle } from '../../stores/connection'
+import { useHistorySuggest } from '../../composables/useHistorySuggest'
+import { whereOf } from '../../utils/cmdHistory'
 import { useTunnelsStore } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
 import { useKeyRepeat } from '../../composables/useKeyRepeat'
@@ -11,10 +15,12 @@ import {
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import type { Pane } from '../../api/types'
 import ArrowPad from './ArrowPad.vue'
+import HistorySuggest from './HistorySuggest.vue'
 
 const props = defineProps<{ pane: Pane | null }>()
-const emit = defineEmits<{ edit: [] }>()
+const emit = defineEmits<{ edit: []; history: [] }>()
 const term = useTerminalStore()
+const history = useCmdHistoryStore()
 const tunnelsStore = useTunnelsStore()
 const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
@@ -192,9 +198,24 @@ const SPECIAL_KEYS = computed(() => AGENT_KEYS)
 const filledText = ref('')
 const isArmed = computed(() => filledText.value !== '')
 
+// Remember a prompt once it is actually submitted (Enter), not when it is
+// merely filled into the agent's input.
+function recordPrompt(sent: string) {
+  const p = props.pane
+  history.record(sent, {
+    kind: 'ag',
+    ...whereOf(p),
+    agent: p ? agentTypeName(p) : undefined,
+    label: p ? paneTitle(p) : undefined,
+  })
+}
+
 function sendKey(key: string) {
   haptic(8)
-  term.sendKey(consumeCtrl(key))
+  const k = consumeCtrl(key)
+  // The Enter key button also submits whatever was filled in.
+  if (k === 'Enter' && filledText.value) recordPrompt(filledText.value)
+  term.sendKey(k)
   filledText.value = '' // any key press disarms
 }
 
@@ -228,6 +249,7 @@ function submit() {
 
   if (isArmed.value) {
     // Second click: send Enter to execute
+    recordPrompt(filledText.value)
     term.sendKey('Enter')
     text.value = ''
     filledText.value = ''
@@ -252,6 +274,7 @@ function quickSend() {
   const t = text.value
   if (!t) return
   term.sendText(t, true)
+  recordPrompt(t)
   text.value = ''
   filledText.value = ''
 }
@@ -264,13 +287,16 @@ function onFill(t: string) {
 
 // Merge fill text into the input: 'append' inserts at the cursor (end when
 // the input isn't focused) with space padding; 'prepend' puts it at the front
-// with a trailing space. Focus lands after the inserted text.
-function insertIntoInput(snippet: string, kind: 'append' | 'prepend') {
+// with a trailing space; 'replace' swaps the whole input (history picks).
+// Focus lands after the inserted text.
+function insertIntoInput(snippet: string, kind: 'append' | 'prepend' | 'replace') {
   const el = cmdInputEl.value
   const r =
-    kind === 'prepend'
-      ? prependSnippet(text.value, snippet)
-      : insertSnippet(text.value, el ? el.selectionStart : null, snippet)
+    kind === 'replace'
+      ? { text: snippet, cursor: snippet.length }
+      : kind === 'prepend'
+        ? prependSnippet(text.value, snippet)
+        : insertSnippet(text.value, el ? el.selectionStart : null, snippet)
   text.value = r.text
   nextTick(() => {
     if (!el) return
@@ -287,6 +313,21 @@ watch(
     if (sig) insertIntoInput(sig.text, sig.kind)
   },
 )
+
+// --- prompt history: inline suggestions + Ctrl/Cmd+R ---
+const inputFocused = ref(false)
+function acceptSuggestion(t: string) {
+  filledText.value = '' // a different text than what was filled: disarm
+  insertIntoInput(t, 'replace')
+}
+const suggest = useHistorySuggest({
+  text,
+  kind: 'ag',
+  where: () => whereOf(props.pane),
+  enabled: () => inputFocused.value,
+  accept: acceptSuggestion,
+  openHistory: () => emit('history'),
+})
 </script>
 
 <template>
@@ -333,6 +374,14 @@ watch(
           @mouseenter="hoverCmds"
         >▶</button>
       </div>
+      <button
+        type="button"
+        class="key"
+        aria-label="Input history"
+        title="Input history (Ctrl+R)"
+        @click="emit('history')"
+        @pointerdown.prevent
+      >⏱</button>
       <button
         ref="arrowBtnEl"
         type="button"
@@ -391,6 +440,15 @@ watch(
       </div>
     </Teleport>
 
+    <!-- Floats above the input (absolute): showing it never shifts the layout. -->
+    <HistorySuggest
+      class="suggest-float"
+      :items="suggest.suggestions.value"
+      :typed="text"
+      :active="suggest.active.value"
+      @pick="acceptSuggestion"
+    />
+
     <form class="input-row" @submit.prevent="submit">
       <span class="prompt" aria-hidden="true">❯</span>
       <input
@@ -406,7 +464,10 @@ watch(
         enterkeyhint="send"
         aria-label="Command to send to pane"
         @input="onInput"
+        @focus="inputFocused = true"
+        @blur="inputFocused = false"
         @keydown.ctrl.enter.prevent="quickSend"
+        @keydown="suggest.onKeydown"
       />
       <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed" :aria-label="isArmed ? 'Send command to pane' : 'Fill command into terminal'">
         {{ isArmed ? 'send' : 'fill' }}
@@ -432,6 +493,15 @@ watch(
   border-top: 1px solid var(--border);
   background: var(--term-input-bg);
   padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Above the input row, over the terminal output — never in the layout flow. */
+.suggest-float {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 15;
 }
 
 .approve-bar {

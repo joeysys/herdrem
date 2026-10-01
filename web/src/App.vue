@@ -21,6 +21,7 @@ import { usePreviewsStore } from './stores/preview';
 import { useFilesStore } from './stores/files';
 import { useDiffStore } from './stores/diff';
 import { usePrefsStore } from './stores/prefs';
+import { useCmdHistoryStore } from './stores/cmdHistory';
 import { useTunnelsStore } from './stores/tunnels';
 import { useRelayConnection } from './composables/useRelayConnection';
 import { useNotify } from './composables/useNotify';
@@ -51,6 +52,7 @@ const previews = usePreviewsStore();
 const files = useFilesStore();
 const diff = useDiffStore();
 const prefs = usePrefsStore();
+const cmdHistory = useCmdHistoryStore();
 const tunnelsStore = useTunnelsStore();
 const { boot, switchTo } = useRelayConnection();
 const notify = useNotify();
@@ -612,6 +614,10 @@ onMounted(() => {
     handleMessage(msg);
     if (msg.type === 'todos') todo.setAll(msg.todos);
     if (msg.type === 'todo_updated') todo.updateItem(msg.todo, msg.deleted);
+    if (msg.type === 'history') cmdHistory.applySnapshot(msg.entries);
+    if (msg.type === 'history_added') cmdHistory.applyAdded(msg.entry);
+    if (msg.type === 'history_removed') cmdHistory.applyRemoved(msg.kind, msg.text);
+    if (msg.type === 'history_cleared') cmdHistory.applyCleared(msg.kind, msg.host, msg.workspace_id);
     if (msg.type === 'tunnels') tunnelsStore.setTunnels(msg.tunnels || []);
     if (msg.type === 'tunnel_updated') tunnelsStore.updateTunnel(msg.tunnel);
     if (msg.type === 'pane_content') {

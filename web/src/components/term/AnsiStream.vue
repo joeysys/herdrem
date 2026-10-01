@@ -3,9 +3,15 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ansiToHtmlWith } from '../../utils/ansi'
 import { linkifyFilePaths } from '../../utils/linkify'
 import { truncateSeparators } from '../../utils/truncLines'
+import { applyHighlights, clearHighlights, setActiveGroup } from '../../utils/domHighlight'
 
-const props = defineProps<{ raw: string; validPaths?: string[] }>()
-const emit = defineEmits<{ openFile: [payload: { path: string; line: number | null }] }>()
+// `highlight` wraps matches of a search query in <mark>; `hits` reports how
+// many there are (capped at domHighlight's MAX_HITS) and setActiveHit() moves the emphasis.
+const props = defineProps<{ raw: string; validPaths?: string[]; highlight?: string }>()
+const emit = defineEmits<{
+  openFile: [payload: { path: string; line: number | null }]
+  hits: [count: number]
+}>()
 
 const el = ref<HTMLElement | null>(null)
 const charWidth = ref(0)
@@ -71,6 +77,39 @@ const html = computed(() => {
   return ansiToHtmlWith(truncatedRaw.value, (s) => linkifyFilePaths(s, validSet))
 })
 
+// --- search highlighting ---
+// Marks are injected into the v-html output after each render. Vue rewrites
+// that subtree whenever `html` changes, so highlights are re-applied (post
+// flush) on every html / query change.
+const htmlEl = ref<HTMLElement | null>(null)
+let groups: HTMLElement[][] = []
+let activeIdx = -1
+
+function refreshHighlights() {
+  const root = htmlEl.value
+  if (!root) return
+  const had = groups.length > 0
+  if (had) clearHighlights(root)
+  groups = props.highlight ? applyHighlights(root, props.highlight) : []
+  if (activeIdx >= groups.length) activeIdx = groups.length - 1
+  if (groups.length && activeIdx < 0) activeIdx = 0
+  setActiveGroup(groups, activeIdx)
+  if (props.highlight || had) emit('hits', groups.length)
+}
+
+watch([html, () => props.highlight], refreshHighlights, { flush: 'post' })
+onMounted(() => { if (props.highlight) refreshHighlights() })
+
+/** Emphasise hit `index` (0-based); `scroll` brings it into view. */
+function setActiveHit(index: number, scroll = true) {
+  if (!groups.length) return
+  activeIdx = Math.min(Math.max(index, 0), groups.length - 1)
+  const mark = setActiveGroup(groups, activeIdx)
+  if (scroll) mark?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
+}
+
+defineExpose({ setActiveHit })
+
 function onClick(e: MouseEvent) {
   const link = (e.target as HTMLElement).closest('a.term-file-link') as HTMLAnchorElement | null
   if (!link) return
@@ -87,7 +126,7 @@ function onClick(e: MouseEvent) {
 
 <template>
   <!-- eslint-disable-next-line vue/no-v-html -->
-  <pre ref="el" class="ansi-stream" @click="onClick"><span v-html="html"></span><slot></slot></pre>
+  <pre ref="el" class="ansi-stream" @click="onClick"><span ref="htmlEl" v-html="html"></span><slot></slot></pre>
 </template>
 
 <style>

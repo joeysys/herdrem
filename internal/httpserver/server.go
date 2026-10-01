@@ -823,6 +823,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if s.tunnels != nil && s.tunnels.DirectAllowed() {
 		hello.Features = append(hello.Features, "tunnel-direct")
 	}
+	if s.svc != nil && s.svc.HasHistory() {
+		hello.Features = append(hello.Features, "input-history")
+	}
 	if data, err := json.Marshal(hello); err == nil {
 		_ = conn.Write(ctx, websocket.MessageText, data)
 	}
@@ -831,6 +834,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.sendTodoSnapshot(ctx, conn)
 	if s.svc != nil {
 		s.svc.SendPrefsSnapshot(ctx, conn)
+		s.svc.SendHistorySnapshot(ctx, conn)
 	}
 	s.sendAgentsSnapshot(ctx, conn)
 

@@ -334,3 +334,73 @@ type TunnelUpdated struct {
 func IntPtr(v int) *int {
 	return &v
 }
+
+// --- input history (shared across devices) ---
+
+// HistoryGet requests the full input history (also pushed on connect).
+type HistoryGet struct {
+	Type string `json:"type"`
+}
+
+// HistoryRecord remembers one submitted input. Kind is "sh" (shell command) or
+// "ag" (prompt to an agent). Workspace identifies where it was entered.
+type HistoryRecord struct {
+	Type           string `json:"type"`
+	Text           string `json:"text"`
+	Kind           string `json:"kind"`
+	PaneID         string `json:"pane_id,omitempty"`
+	Host           string `json:"host,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	WorkspaceLabel string `json:"workspace_label,omitempty"`
+	Agent          string `json:"agent,omitempty"`
+	Title          string `json:"title,omitempty"`
+}
+
+// HistoryRemove forgets an input (every workspace's copy).
+type HistoryRemove struct {
+	Type string `json:"type"`
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+// HistoryClear forgets a kind ("all" | "sh" | "ag"). With host+workspace_id
+// only that workspace's entries are removed.
+type HistoryClear struct {
+	Type        string `json:"type"`
+	Kind        string `json:"kind,omitempty"`
+	Host        string `json:"host,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+// HistoryImport merges history a browser cached before the relay kept it.
+type HistoryImport struct {
+	Type    string               `json:"type"`
+	Entries []store.HistoryEntry `json:"entries"`
+}
+
+// HistorySnapshot carries the whole history (type "history").
+type HistorySnapshot struct {
+	Type    string               `json:"type"`
+	Entries []store.HistoryEntry `json:"entries"`
+}
+
+// HistoryAdded announces one recorded (or re-used) entry to the other clients.
+type HistoryAdded struct {
+	Type  string             `json:"type"`
+	Entry store.HistoryEntry `json:"entry"`
+}
+
+// HistoryRemoved announces a removal to the other clients.
+type HistoryRemoved struct {
+	Type string `json:"type"`
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+// HistoryCleared announces a clear to the other clients.
+type HistoryCleared struct {
+	Type        string `json:"type"`
+	Kind        string `json:"kind"`
+	Host        string `json:"host,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
