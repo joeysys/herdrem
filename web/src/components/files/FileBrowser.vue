@@ -4,6 +4,7 @@ import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
+import { useUploadsStore, type UploadItem } from '../../stores/uploads'
 import { safeStorage } from '../../utils/storage'
 import { relayFileUrl } from '../../utils/relay'
 import type { FileEntry } from '../../api/types'
@@ -11,6 +12,7 @@ import type { FileEntry } from '../../api/types'
 const files = useFilesStore()
 const conn = useConnectionStore()
 const term = useTerminalStore()
+const uploads = useUploadsStore()
 const { haptic } = useHaptic()
 defineProps<{ docked: boolean }>()
 const emit = defineEmits<{ close: []; previewOpened: []; dock: [] }>()
@@ -223,6 +225,81 @@ function downloadEntry(e: FileEntry) {
   closeEntryMenu()
 }
 
+// --- upload ---
+const fileInput = ref<HTMLInputElement | null>(null)
+const dragDepth = ref(0) // dragenter/leave fire per child element; count them
+const dragging = computed(() => dragDepth.value > 0)
+
+const uploadTitle = computed(() => {
+  if (!uploads.canUpload) return 'Upload from another address needs the relay token — enter it in relay settings'
+  return `Upload files to ${currentDirRelPath.value}`
+})
+
+function pickFiles() {
+  haptic()
+  fileInput.value?.click()
+}
+
+function queue(list: FileList | null | undefined) {
+  if (!list || !list.length || !uploads.canUpload) return
+  uploads.add(Array.from(list), { host: files.host, dir: files.path, root: files.root })
+}
+
+function onPicked(e: Event) {
+  const input = e.target as HTMLInputElement
+  queue(input.files)
+  input.value = '' // picking the same file again must fire change
+}
+
+const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+function onDragEnter(e: DragEvent) {
+  if (!uploads.canUpload || !hasFiles(e)) return
+  dragDepth.value++
+}
+function onDragOver(e: DragEvent) {
+  if (!uploads.canUpload || !hasFiles(e)) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+function onDragLeave(e: DragEvent) {
+  if (!uploads.canUpload || !hasFiles(e)) return
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+function onDrop(e: DragEvent) {
+  if (!uploads.canUpload || !hasFiles(e)) return
+  e.preventDefault()
+  dragDepth.value = 0
+  queue(e.dataTransfer?.files)
+}
+
+function pct(it: UploadItem): number {
+  if (it.status === 'done') return 100
+  return it.total ? Math.min(100, Math.round((it.loaded / it.total) * 100)) : 0
+}
+
+// Path of an uploaded file relative to the sandbox root, like "fill path".
+function uploadedRelPath(it: UploadItem): string {
+  const full = it.path || `${it.dir.replace(/\/+$/, '')}/${it.name}`
+  const root = it.root.replace(/\/+$/, '')
+  return full.startsWith(root + '/') ? full.slice(root.length + 1) : full
+}
+
+function fillUploaded(it: UploadItem) {
+  haptic()
+  term.fillPath(uploadedRelPath(it))
+}
+
+function statusText(it: UploadItem): string {
+  switch (it.status) {
+    case 'queued': return 'waiting'
+    case 'uploading': return `${pct(it)}%`
+    case 'done': return it.replaced ? 'replaced' : 'uploaded'
+    case 'conflict': return 'already exists'
+    case 'cancelled': return 'skipped'
+    default: return it.error || 'failed'
+  }
+}
+
 // Scroll to the target file in the tree when scrollToFile is set
 watch(() => files.scrollToFile, async (target) => {
   if (!target || !listEl.value) return
@@ -269,6 +346,15 @@ watch(() => files.entries, async () => {
         @click="fillCurrentDir"
       >↙</button>
       <button
+        v-if="uploads.supported"
+        class="fb-btn fb-upload"
+        aria-label="Upload files"
+        :title="uploadTitle"
+        :disabled="!uploads.canUpload"
+        @click="pickFiles"
+      >⤒</button>
+      <input ref="fileInput" class="fb-file-input" type="file" multiple tabindex="-1" aria-hidden="true" @change="onPicked" />
+      <button
         class="fb-btn fb-dock"
         :aria-label="docked ? 'Float file browser' : 'Dock file browser'"
         :title="docked ? 'Float panel' : 'Dock to terminal'"
@@ -277,7 +363,14 @@ watch(() => files.entries, async () => {
     </header>
 
     <div class="fb-body">
-      <div ref="listEl" class="fb-list">
+      <div
+        ref="listEl"
+        class="fb-list"
+        @dragenter="onDragEnter"
+        @dragover="onDragOver"
+        @dragleave="onDragLeave"
+        @drop="onDrop"
+      >
         <!-- Sort / filter toolbar (inside the tree) -->
         <div class="fb-toolbar">
           <input
@@ -345,6 +438,49 @@ watch(() => files.entries, async () => {
         </template>
       </div>
 
+      <!-- Absolute: appearing while dragging never moves the list. -->
+      <div v-if="dragging" class="fb-drop" aria-hidden="true">
+        <span>drop to upload into<br /><b>{{ currentDirRelPath }}</b></span>
+      </div>
+
+      <section v-if="uploads.items.length" class="fb-uploads" aria-label="Uploads">
+        <header class="fu-head">
+          <span>uploads<template v-if="uploads.active"> · {{ uploads.active }} left</template></span>
+          <button v-if="uploads.finished" type="button" class="fu-clear" @click="uploads.clearFinished()">clear</button>
+        </header>
+        <ul class="fu-list">
+          <li v-for="it in uploads.items" :key="it.id" class="fu-item" :class="it.status">
+            <div class="fu-row">
+              <span class="fu-name" :title="`${it.dir}/${it.name}`">{{ it.name }}</span>
+              <span class="fu-status" role="status">{{ statusText(it) }}</span>
+            </div>
+            <div
+              v-if="it.status === 'uploading' || it.status === 'queued'"
+              class="fu-bar"
+              role="progressbar"
+              :aria-label="`Uploading ${it.name}`"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              :aria-valuenow="pct(it)"
+            ><span :style="{ width: pct(it) + '%' }"></span></div>
+            <div class="fu-actions">
+              <template v-if="it.status === 'conflict'">
+                <button type="button" class="fu-btn" @click="uploads.replace(it.id)">replace</button>
+                <button type="button" class="fu-btn" @click="uploads.keepBoth(it.id)">keep both</button>
+                <button type="button" class="fu-btn" @click="uploads.cancel(it.id)">skip</button>
+              </template>
+              <button v-else-if="it.status === 'uploading' || it.status === 'queued'" type="button" class="fu-btn" :aria-label="`Cancel ${it.name}`" @click="uploads.cancel(it.id)">cancel</button>
+              <template v-else-if="it.status === 'done'">
+                <button type="button" class="fu-btn" :aria-label="`Fill ${it.name} path into terminal`" :title="`Fill ${uploadedRelPath(it)} into terminal input`" @click="fillUploaded(it)">↙ fill path</button>
+              </template>
+              <template v-else-if="it.status === 'error'">
+                <button v-if="it.error !== 'too large (max 100 MB)'" type="button" class="fu-btn" @click="uploads.retry(it.id)">retry</button>
+                <button type="button" class="fu-btn" :aria-label="`Dismiss ${it.name}`" @click="uploads.dismiss(it.id)">dismiss</button>
+              </template>
+            </div>
+          </li>
+        </ul>
+      </section>
     </div>
   </aside>
 
@@ -431,7 +567,46 @@ watch(() => files.entries, async () => {
 .crumb.root { color: var(--muted); }
 .sep { color: var(--faint); display: inline-flex; align-items: center; padding: 0 1px; line-height: 1; flex-shrink: 0; }
 
-.fb-body { flex: 1; min-height: 0; display: flex; }
+.fb-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.fb-file-input { display: none; }
+
+/* drop target */
+.fb-drop {
+  position: absolute; inset: 6px; z-index: 5; pointer-events: none;
+  display: grid; place-items: center; text-align: center;
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 70%, var(--bg));
+  border: 2px dashed var(--blue); border-radius: var(--radius-lg);
+}
+.fb-drop b { color: var(--text); }
+
+/* upload queue */
+.fb-uploads { flex-shrink: 0; max-height: 40%; display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--surface); }
+.fu-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
+  font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+}
+.fu-clear { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted); background: none; border: none; padding: 2px 4px; }
+.fu-clear:hover { color: var(--text); }
+.fu-list { list-style: none; margin: 0; padding: 0 8px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.fu-item { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; }
+.fu-item.error { border-color: rgba(248, 113, 113, 0.45); }
+.fu-item.conflict { border-color: rgba(251, 146, 60, 0.5); }
+.fu-row { display: flex; align-items: baseline; gap: 8px; }
+.fu-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text); }
+.fu-status { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted); }
+.fu-item.done .fu-status { color: var(--green); }
+.fu-item.error .fu-status { color: var(--red); }
+.fu-item.conflict .fu-status { color: var(--orange); }
+.fu-bar { height: 3px; margin-top: 5px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.fu-bar span { display: block; height: 100%; background: var(--blue); transition: width 0.15s; }
+.fu-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.fu-actions:empty { display: none; }
+.fu-btn {
+  font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-dim);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 9px;
+}
+.fu-btn:hover { color: var(--text); border-color: var(--border-strong); }
 
 /* Sort / filter toolbar — sticky inside the scrollable tree */
 .fb-toolbar {
@@ -462,6 +637,7 @@ watch(() => files.entries, async () => {
 .fb-list {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding: 8px;
   background: var(--bg);

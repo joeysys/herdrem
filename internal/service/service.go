@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -23,6 +24,8 @@ type Service struct {
 	todoStore    *store.Store
 	prefsStore   *store.PrefsStore
 	historyStore *store.HistoryStore
+	commitMu     sync.Mutex
+	committing   map[string]bool // host\x00cwd → a commit is running
 	files        *FileService
 	tunnels      *TunnelService
 	hub          *hub.Hub
@@ -177,6 +180,12 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleGitDiff(ctx, conn, data)
 	case "git_log":
 		s.handleGitLog(ctx, conn, data)
+	case "git_status":
+		s.handleGitStatus(ctx, conn, data)
+	case "git_stage":
+		s.handleGitStage(ctx, conn, data)
+	case "git_commit":
+		s.handleGitCommit(ctx, conn, data)
 	case "prefs_get":
 		s.handlePrefsGet(ctx, conn)
 	case "prefs_set":

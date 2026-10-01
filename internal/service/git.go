@@ -229,7 +229,13 @@ var remoteGitCommand = func(ctx context.Context, host, cwd string, args ...strin
 }
 
 func (fs *FileService) runGit(ctx context.Context, host, cwd string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	return fs.runGitT(ctx, 15*time.Second, host, cwd, args...)
+}
+
+// runGitT is runGit with an explicit timeout (staging a large tree can take
+// longer than a read).
+func (fs *FileService) runGitT(ctx context.Context, timeout time.Duration, host, cwd string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := remoteGitCommand(ctx, host, cwd, args...)
 

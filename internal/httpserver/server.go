@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -197,6 +198,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/push", s.handlePush)
 	mux.HandleFunc("/file", s.handleFile)
+	mux.HandleFunc("/upload", s.handleUpload)
 	mux.HandleFunc("/preview/", s.handleFilePreview)
 	mux.HandleFunc("/preview-auth", s.handlePreviewAuth)
 	mux.HandleFunc("/session-auth", s.handleSessionAuth)
@@ -277,6 +279,143 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+}
+
+// uploadHeader must accompany every upload. A custom header cannot be set by
+// a cross-site form or simple request, so a request carrying it was made by
+// script — on this origin, or on another origin that passed the CORS preflight.
+const uploadHeader = "X-Herdrem-Upload"
+
+// bearerOK reports whether the request carries the relay token in the
+// Authorization header. Unlike auth.Check it ignores cookies: a cookie is sent
+// by the browser on its own (ambient), so it can never authorize a
+// cross-origin request; a header has to be set by code that knows the token.
+func (s *Server) bearerOK(r *http.Request) bool {
+	a := r.Header.Get("Authorization")
+	if s.cfg.Token == "" || !strings.HasPrefix(a, "Bearer ") {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(a, "Bearer ")), []byte(s.cfg.Token)) == 1
+}
+
+// uploadCORS lets an app served from another origin (a Pages/web-only
+// deployment, a relay switcher) upload with the relay token. Same policy as
+// the WebSocket, where a valid token authorizes any origin: the token is the
+// CSRF defense. Credentials (cookies) are never allowed cross-origin, so a
+// site that does not know the token gets nothing, and a token-less relay
+// (local dev, loopback same-origin only) does not take cross-origin uploads.
+func (s *Server) uploadCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || s.cfg.Token == "" {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Add("Vary", "Origin")
+}
+
+// handleUpload stores one file in a workspace directory.
+// POST /upload?host=<host>&dir=<abs dir>&name=<file name>&size=<bytes>[&overwrite=1]
+// with the raw file bytes as the body. The token is never accepted from a
+// form field or the URL.
+//
+//   - same origin: session cookie or Bearer, like every other relay endpoint;
+//   - any other origin (or no Origin, e.g. curl): Bearer token only.
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	sameOrigin := isSameOrigin(r)
+	if !sameOrigin {
+		s.uploadCORS(w, r)
+	}
+	if r.Method == http.MethodOptions {
+		// CORS preflight. It carries no credentials, so it cannot be
+		// authenticated; it only tells the browser the real request may carry
+		// our headers. That request is then authenticated on its own.
+		if sameOrigin || s.cfg.Token == "" || r.Header.Get("Origin") == "" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Methods", http.MethodPost)
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+uploadHeader)
+		w.Header().Set("Access-Control-Max-Age", "600")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.files == nil {
+		http.Error(w, "files not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Header.Get(uploadHeader) != "1" {
+		http.Error(w, "missing "+uploadHeader+" header", http.StatusForbidden)
+		return
+	}
+	if sameOrigin {
+		if !s.relayAuthGate(w, r) {
+			return
+		}
+	} else {
+		if s.cfg.Token == "" {
+			http.Error(w, "cross-origin upload needs a relay token (HERDREM_TOKEN)", http.StatusForbidden)
+			return
+		}
+		if !s.authGate(w, r, func() bool { return s.bearerOK(r) }) {
+			return
+		}
+	}
+	q := r.URL.Query()
+	size, err := strconv.ParseInt(q.Get("size"), 10, 64)
+	if err != nil || size < 0 {
+		http.Error(w, "invalid size", http.StatusBadRequest)
+		return
+	}
+	if size > service.MaxUploadBytes {
+		http.Error(w, service.ErrUploadTooLarge.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	if r.ContentLength >= 0 && r.ContentLength != size {
+		http.Error(w, "body length does not match size", http.StatusBadRequest)
+		return
+	}
+	// Read at most one byte more than announced: enough to detect a lie.
+	r.Body = http.MaxBytesReader(w, r.Body, size+1)
+	overwrite := q.Get("overwrite") == "1" || q.Get("overwrite") == "true"
+	res, err := s.files.Upload(r.Context(), service.UploadRequest{
+		Host:      q.Get("host"),
+		Dir:       q.Get("dir"),
+		Name:      q.Get("name"),
+		Size:      size,
+		Overwrite: overwrite,
+	}, r.Body)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, service.ErrUploadInvalid):
+			status = http.StatusBadRequest
+		case errors.Is(err, service.ErrUploadForbidden):
+			status = http.StatusForbidden
+		case errors.Is(err, service.ErrUploadNoDir):
+			status = http.StatusNotFound
+		case errors.Is(err, service.ErrUploadExists):
+			status = http.StatusConflict
+		case errors.Is(err, service.ErrUploadTooLarge):
+			status = http.StatusRequestEntityTooLarge
+		case errors.Is(err, service.ErrUploadIncomplete):
+			status = http.StatusBadRequest
+		}
+		if status == http.StatusInternalServerError {
+			s.logger.Warn("upload failed", "host", q.Get("host"), "dir", q.Get("dir"), "err", err)
+			http.Error(w, "upload failed", status)
+			return
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 func (s *Server) fileFormAuthOK(w http.ResponseWriter, r *http.Request) bool {
@@ -817,11 +956,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Features: []string{
 			"agents", "terminal", "todo", "blocked", "multi-host",
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
-			"pane-create", "incremental-terminal", "git-diff",
+			"pane-create", "incremental-terminal", "git-diff", "git-commit",
 		},
 	}
 	if s.tunnels != nil && s.tunnels.DirectAllowed() {
 		hello.Features = append(hello.Features, "tunnel-direct")
+	}
+	if s.files != nil {
+		hello.Features = append(hello.Features, "file-upload")
 	}
 	if s.svc != nil && s.svc.HasHistory() {
 		hello.Features = append(hello.Features, "input-history")

@@ -14,6 +14,7 @@ const ACTIONS = [
   { id: 'open', label: 'open terminal', icon: '❯' },
   { id: 'refresh', label: 'read output', icon: '⟳' },
   { id: 'diff', label: 'git diff', icon: '⎇' },
+  { id: 'status', label: 'git status', icon: '±' },
   { id: 'interrupt', label: 'interrupt (^C)', icon: '⊘' },
   { id: 'mark-read', label: 'mark as read', icon: '✓' },
   { id: 'mark-agent', label: 'mark as agent', icon: '★', shellOnly: true },

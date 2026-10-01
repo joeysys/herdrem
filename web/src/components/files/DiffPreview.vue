@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
-import { useDiffStore } from '../../stores/diff';
+import { computed, nextTick, ref, watch } from 'vue';
+import { useDiffStore, type DiffViewMode } from '../../stores/diff';
 import { useFilesStore } from '../../stores/files';
+import { useConnectionStore } from '../../stores/connection';
+import GitStatusView from './GitStatusView.vue';
 import { useHaptic } from '../../composables/useHaptic';
 import { highlight } from '../../utils/highlight';
 
 const diff = useDiffStore();
 const files = useFilesStore();
+const conn = useConnectionStore();
 const { haptic } = useHaptic();
+const scrollEl = ref<HTMLElement | null>(null);
 
 const state = computed(() => diff.state);
 const showCommitList = ref(false);
@@ -145,7 +149,7 @@ const selectedCommitTitle = computed(() => {
   return s.commit.slice(0, 7);
 });
 
-function pickMode(mode: 'unstaged' | 'cached' | 'commit') {
+function pickMode(mode: DiffViewMode) {
   haptic();
   showCommitList.value = false;
   diff.setMode(mode);
@@ -185,6 +189,23 @@ function openFilePath(path: string) {
   files.openPath(full, s.cwd || '/', s.host || 'local', null);
 }
 
+// Opened from the status list: bring that file's section into view once the
+// diff has rendered.
+watch(
+  () => [diff.focusPath, state.value?.content, state.value?.loading] as const,
+  async ([path, content, loading]) => {
+    if (!path || loading || !content) return;
+    await nextTick();
+    const el = scrollEl.value?.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`);
+    if (el) {
+      el.scrollIntoView?.({ block: 'start' });
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1500);
+    }
+    diff.clearFocus();
+  },
+);
+
 // Close the commit dropdown on outside click.
 watch(showCommitList, (open) => {
   if (!open) return;
@@ -203,6 +224,16 @@ watch(showCommitList, (open) => {
       <span class="dp-cwd mono" :title="state.cwd">⎇ {{ cwdLabel }}</span>
 
       <div class="dp-modes" role="group" aria-label="Diff mode">
+        <button
+          v-if="conn.hasFeature('git-commit')"
+          class="dp-mode"
+          :class="{ active: state.mode === 'status' }"
+          :aria-pressed="state.mode === 'status'"
+          title="Status: stage files and commit (git status)"
+          @click="pickMode('status')"
+        >
+          status
+        </button>
         <button
           class="dp-mode"
           :class="{ active: state.mode === 'unstaged' }"
@@ -275,8 +306,10 @@ watch(showCommitList, (open) => {
       <button class="dp-btn" aria-label="Refresh diff" title="Refresh" @click="refresh">⟳</button>
     </header>
 
-    <div class="dp-scroll">
-      <div v-if="state.error" class="dp-error">
+    <div ref="scrollEl" class="dp-scroll">
+      <GitStatusView v-if="state.mode === 'status'" />
+
+      <div v-else-if="state.error" class="dp-error">
         <span class="dp-error-icon">⚠</span>
         <span class="dp-error-text">{{ state.error }}</span>
         <span class="dp-error-cwd mono">{{ state.cwd }}</span>
@@ -290,7 +323,7 @@ watch(showCommitList, (open) => {
       </div>
 
       <div v-else class="dp-files">
-        <div v-for="(sec, si) in sections" :key="si" class="dp-file">
+        <div v-for="(sec, si) in sections" :key="si" class="dp-file" :data-path="sec.isHeader ? undefined : sec.path">
           <button v-if="!sec.isHeader" class="dp-file-head" :title="`Open ${sec.path}`" @click="openFilePath(sec.path)">
             <span class="dp-file-icon" aria-hidden="true">📄</span>
             <span class="dp-file-path mono">{{ sec.path }}</span>
@@ -535,6 +568,7 @@ watch(showCommitList, (open) => {
    container and break the sticky header (it would stick within the file
    block instead of the outer .dp-scroll). The rounded corners are applied
    to the header instead. */
+.dp-file.flash { box-shadow: inset 3px 0 0 var(--blue); transition: box-shadow 0.3s; }
 .dp-files {
   min-width: 100%;
   padding: 8px;

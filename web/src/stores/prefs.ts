@@ -30,6 +30,8 @@ export const usePrefsStore = defineStore('prefs', () => {
   const reconnectDelayMs = ref(DEFAULT_RECONNECT_DELAY_MS)
   const gridPreviewMs = ref(DEFAULT_GRID_PREVIEW_MS)
   const autoMarkReadMs = ref(DEFAULT_AUTO_MARK_READ_MS)
+  /** custom commit command (relay prefs, shared by all devices); '' = ask for a message */
+  const gitCommitCmd = ref('')
 
   function setPrefs(p: Prefs) {
     if (p.skills) skills.value = p.skills
@@ -44,6 +46,7 @@ export const usePrefsStore = defineStore('prefs', () => {
     reconnectDelayMs.value = p.timing?.reconnect_delay_ms || DEFAULT_RECONNECT_DELAY_MS
     gridPreviewMs.value = p.timing?.grid_preview_ms || DEFAULT_GRID_PREVIEW_MS
     autoMarkReadMs.value = p.timing?.auto_mark_read_ms || DEFAULT_AUTO_MARK_READ_MS
+    gitCommitCmd.value = p.git?.commit_cmd || ''
     ws.setReconnectDelay(reconnectDelayMs.value)
   }
 
@@ -61,7 +64,7 @@ export const usePrefsStore = defineStore('prefs', () => {
     pendingSaves.value = new Set(Array.from(pendingByReq.values()).flat())
   }
 
-  function setSection(section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing', data: unknown) {
+  function setSection(section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing' | 'git', data: unknown) {
     const reqId = `save-${Date.now().toString(36)}-${++saveSeq}`
     const msg: PrefsSet = { type: 'prefs_set', section, data, req_id: reqId }
     if (!ws.send(msg)) return false
@@ -130,6 +133,12 @@ export const usePrefsStore = defineStore('prefs', () => {
     return setSection('timing', merged)
   }
 
+  /** Set (or with '' clear) the custom commit command. */
+  function setGitCommitCmd(cmd: string) {
+    gitCommitCmd.value = cmd.trim()
+    return setSection('git', { commit_cmd: gitCommitCmd.value })
+  }
+
   /** resolve the prefix for a given agent name from prefix_by_agent config */
   function prefixForAgent(agentName: string): string {
     const a = (agentName || '').toLowerCase().trim()
@@ -155,6 +164,7 @@ export const usePrefsStore = defineStore('prefs', () => {
 
   return {
     skills, agentCmds, shellCmds, kindOverrides, prefixByAgent, termPollMs,
+    gitCommitCmd, setGitCommitCmd,
     snapshotPollMs, enrichGraceMs, hostRetryMs, reconnectDelayMs, gridPreviewMs, autoMarkReadMs,
     pendingSaves, saveError, confirmSaves, failSaves,
     setPrefs, setSection, setShellCmds, setAgentCmds, setSkills, setPrefixByAgent, setTermPollMs, setTiming,

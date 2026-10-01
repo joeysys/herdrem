@@ -59,6 +59,7 @@ export default defineConfig({
       '/healthz': 'http://localhost:8766',
       '/push': 'http://localhost:8766',
       '/file': 'http://localhost:8766',
+      '/upload': 'http://localhost:8766',
       '/api': 'http://localhost:8766',
       '/preview': 'http://localhost:8766',
       '/preview-auth': 'http://localhost:8766',

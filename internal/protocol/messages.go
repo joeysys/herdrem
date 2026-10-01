@@ -404,3 +404,50 @@ type HistoryCleared struct {
 	Host        string `json:"host,omitempty"`
 	WorkspaceID string `json:"workspace_id,omitempty"`
 }
+
+// --- git status / stage / commit (feature "git-commit") ---
+
+// GitStatus requests the status of cwd's subtree.
+type GitStatus struct {
+	Type  string `json:"type"`
+	Cwd   string `json:"cwd"`
+	Host  string `json:"host,omitempty"`
+	ReqID string `json:"req_id,omitempty"`
+}
+
+// GitStage stages (git add) or, with Unstage, unstages paths relative to cwd;
+// All covers everything under cwd. Replies with a fresh git_status_result.
+type GitStage struct {
+	Type    string   `json:"type"`
+	Cwd     string   `json:"cwd"`
+	Host    string   `json:"host,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+	All     bool     `json:"all,omitempty"`
+	Unstage bool     `json:"unstage,omitempty"`
+	ReqID   string   `json:"req_id,omitempty"`
+}
+
+// GitCommit commits the index with Message, or — with UseCommand — runs the
+// commit command configured in prefs (git.commit_cmd). The command is never
+// taken from this message.
+type GitCommit struct {
+	Type       string `json:"type"`
+	Cwd        string `json:"cwd"`
+	Host       string `json:"host,omitempty"`
+	Message    string `json:"message,omitempty"`
+	UseCommand bool   `json:"use_command,omitempty"`
+	ReqID      string `json:"req_id,omitempty"`
+}
+
+// GitCommitResult reports a commit attempt (type "git_commit_result").
+type GitCommitResult struct {
+	Type    string `json:"type"`
+	Cwd     string `json:"cwd"`
+	ReqID   string `json:"req_id,omitempty"`
+	OK      bool   `json:"ok"`
+	Hash    string `json:"hash,omitempty"`
+	Subject string `json:"subject,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Command string `json:"command,omitempty"` // the command that ran, when UseCommand
+}

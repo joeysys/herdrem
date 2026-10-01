@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -120,7 +121,18 @@ type Prefs struct {
 	PrefixByAgent map[string]string       `json:"prefix_by_agent,omitempty"`
 	Terminal      TerminalPrefs           `json:"terminal,omitempty"`
 	Timing        TimingPrefs             `json:"timing,omitempty"`
+	Git           GitPrefs                `json:"git,omitempty"`
 }
+
+// GitPrefs holds the git status panel's settings.
+type GitPrefs struct {
+	// CommitCmd, when set, is what the commit button runs (with sh, in the
+	// repository directory, by the relay) instead of asking for a message.
+	CommitCmd string `json:"commit_cmd,omitempty"`
+}
+
+// MaxGitCommitCmd bounds GitPrefs.CommitCmd.
+const MaxGitCommitCmd = 2000
 
 // PrefsStore is a JSON file-backed Prefs store.
 type PrefsStore struct {
@@ -290,6 +302,16 @@ func (s *PrefsStore) setSectionLocked(section string, data json.RawMessage) erro
 			return err
 		}
 		s.data.Timing = v
+	case "git":
+		var v GitPrefs
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		v.CommitCmd = strings.TrimSpace(v.CommitCmd)
+		if len(v.CommitCmd) > MaxGitCommitCmd || strings.ContainsRune(v.CommitCmd, 0) {
+			return fmt.Errorf("git.commit_cmd must be at most %d bytes", MaxGitCommitCmd)
+		}
+		s.data.Git = v
 	default:
 		return &InvalidSectionError{Section: section}
 	}

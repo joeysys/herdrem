@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -216,5 +217,24 @@ func TestPrefsStore_GetReturnsCopy(t *testing.T) {
 	got.KindOverrides["k"] = KindOverride{DisplayAgent: "MUTATED"}
 	if s.Get().KindOverrides["k"].DisplayAgent == "MUTATED" {
 		t.Error("Get returned shared map")
+	}
+}
+
+func TestPrefsGitSection(t *testing.T) {
+	s, err := NewPrefsStore(filepath.Join(t.TempDir(), "prefs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSection("git", json.RawMessage(`{"commit_cmd":"  git commit -s -m \"$(aicommit)\"  "}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get().Git.CommitCmd; got != `git commit -s -m "$(aicommit)"` {
+		t.Fatalf("commit_cmd = %q (should be trimmed)", got)
+	}
+	if err := s.SetSection("git", json.RawMessage(`{"commit_cmd":"`+strings.Repeat("x", MaxGitCommitCmd+1)+`"}`)); err == nil {
+		t.Fatal("over-long command accepted")
+	}
+	if err := s.SetSection("git", json.RawMessage(`{}`)); err != nil || s.Get().Git.CommitCmd != "" {
+		t.Fatalf("clearing: %v %q", err, s.Get().Git.CommitCmd)
 	}
 }

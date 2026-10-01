@@ -355,3 +355,18 @@ describe('TermView history scope and workspace', () => {
     expect(w.findAll('[role="option"]').map((o) => o.text())).toEqual(['git status', 'git rebase main'])
   })
 })
+
+describe('TermView git status shortcut', () => {
+  it('shows ± only when the relay supports git status, and opens it for the pane folder', async () => {
+    const w = mountView('agent')
+    expect(w.find('.head-actions button[aria-label="Git status"]').exists()).toBe(false)
+    w.unmount()
+    wrapper = null
+    const { useConnectionStore } = await import('../../stores/connection')
+    const { useDiffStore } = await import('../../stores/diff')
+    useConnectionStore().setHello('t', ['git-diff', 'git-commit'])
+    const w2 = mountView('agent')
+    await w2.get('.head-actions button[aria-label="Git status"]').trigger('click')
+    expect(useDiffStore().state).toMatchObject({ cwd: '/tmp', host: 'local', mode: 'status' })
+  })
+})

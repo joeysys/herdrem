@@ -180,6 +180,12 @@ export interface Prefs {
   prefix_by_agent?: Record<string, string>
   terminal?: TerminalPrefs
   timing?: TimingPrefs
+  git?: GitPrefs
+}
+
+export interface GitPrefs {
+  /** run by the relay (sh, in the repo dir) when committing, instead of asking for a message */
+  commit_cmd?: string
 }
 
 export interface PrefsSnapshot {
@@ -262,6 +268,66 @@ export interface FileList {
 
 export type GitDiffMode = 'unstaged' | 'cached' | 'commit'
 
+// --- git status / stage / commit (feature "git-commit") ---
+export interface GitStatusEntry {
+  /** relative to the requested cwd */
+  path: string
+  /** M A D R C T U ? (two letters for conflicts, e.g. UU) */
+  status: string
+  /** rename / copy source */
+  orig?: string
+}
+export interface GitStatusData {
+  branch: string
+  detached?: boolean
+  /** no commit yet */
+  initial?: boolean
+  upstream?: string
+  ahead: number
+  behind: number
+  staged: GitStatusEntry[]
+  unstaged: GitStatusEntry[]
+  untracked: GitStatusEntry[]
+  conflicted: GitStatusEntry[]
+  /** staged files outside cwd that a commit would also record */
+  staged_outside: number
+  truncated?: boolean
+}
+export interface GitStatusResultMsg extends GitStatusData {
+  type: 'git_status_result'
+  cwd: string
+  req_id?: string
+}
+export interface GitCommitResultMsg {
+  type: 'git_commit_result'
+  cwd: string
+  req_id?: string
+  ok: boolean
+  hash?: string
+  subject?: string
+  output?: string
+  error?: string
+  command?: string
+}
+export interface GitStatusReq { type: 'git_status'; cwd: string; host?: string; req_id?: string }
+export interface GitStageReq {
+  type: 'git_stage'
+  cwd: string
+  host?: string
+  paths?: string[]
+  all?: boolean
+  unstage?: boolean
+  req_id?: string
+}
+export interface GitCommitReq {
+  type: 'git_commit'
+  cwd: string
+  host?: string
+  message?: string
+  use_command?: boolean
+  req_id?: string
+}
+
 export interface GitDiff {
   type: 'git_diff'
   cwd: string
@@ -284,7 +350,7 @@ export interface PrefsGet {
 
 export interface PrefsSet {
   type: 'prefs_set'
-  section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing'
+  section: 'skills' | 'agent_cmds' | 'shell_cmds' | 'kind_overrides' | 'prefix_by_agent' | 'terminal' | 'timing' | 'git'
   data: unknown
   req_id?: string // client-generated; echoed in prefs_updated / error
 }
@@ -385,6 +451,8 @@ export interface HistoryClear { type: 'history_clear'; kind: 'all' | 'sh' | 'ag'
 export interface HistoryImport { type: 'history_import'; entries: HistoryWireEntry[] }
 
 export type ServerMessage =
+  | GitStatusResultMsg
+  | GitCommitResultMsg
   | HistorySnapshotMsg
   | HistoryAddedMsg
   | HistoryRemovedMsg
@@ -406,6 +474,9 @@ export type ServerMessage =
   | PaneCreated
 
 export type ClientMessage =
+  | GitStatusReq
+  | GitStageReq
+  | GitCommitReq
   | HistoryRecord
   | HistoryRemove
   | HistoryClear

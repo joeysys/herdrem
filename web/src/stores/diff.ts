@@ -2,12 +2,27 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { ws } from '../api/ws';
 import { uid } from '../utils/id';
-import type { GitDiff, GitLog, GitDiffMode, CommitEntry, GitDiffContent, GitLogResult } from '../api/types';
+import type {
+  GitDiff, GitLog, GitDiffMode, CommitEntry, GitDiffContent, GitLogResult,
+  GitStatusData, GitStatusResultMsg, GitCommitResultMsg,
+} from '../api/types';
+
+/** The panel's tabs: the three diffs plus git status (stage / commit). */
+export type DiffViewMode = GitDiffMode | 'status';
+
+export interface CommitOutcome {
+  ok: boolean;
+  hash?: string;
+  subject?: string;
+  output?: string;
+  error?: string;
+  command?: string;
+}
 
 export interface DiffState {
   cwd: string;
   host: string;
-  mode: GitDiffMode;
+  mode: DiffViewMode;
   commit: string;
   content: string;
   commits: CommitEntry[];
@@ -26,12 +41,25 @@ export const useDiffStore = defineStore('diff', () => {
   const diffReqId = ref('');
   const logReqId = ref('');
 
+  // --- git status ---
+  const status = ref<GitStatusData | null>(null);
+  const statusLoading = ref(false);
+  const statusError = ref('');
+  /** a stage / unstage request is in flight */
+  const staging = ref(false);
+  const committing = ref(false);
+  const commitOutcome = ref<CommitOutcome | null>(null);
+  /** file to scroll to once a diff loads (opened from the status list) */
+  const focusPath = ref('');
+  const statusReqId = ref('');
+  const commitReqId = ref('');
+
   function newReqId(): string {
     return uid();
   }
 
   /** Open the diff preview for a working directory. Defaults to unstaged. */
-  function openDiff(cwd: string, host: string, mode: GitDiffMode = 'unstaged', commit = '') {
+  function openDiff(cwd: string, host: string, mode: DiffViewMode = 'unstaged', commit = '') {
     if (!cwd) return;
     state.value = {
       cwd,
@@ -44,6 +72,12 @@ export const useDiffStore = defineStore('diff', () => {
       loadingCommits: false,
     };
     open.value = true;
+    resetStatus();
+    if (mode === 'status') {
+      state.value.loading = false;
+      requestStatus();
+      return;
+    }
     requestDiff();
     // commit mode needs the commit list to pick from; fetch it lazily so the
     // default unstaged view isn't delayed by a log call.
@@ -56,6 +90,19 @@ export const useDiffStore = defineStore('diff', () => {
     state.value = null;
     diffReqId.value = '';
     logReqId.value = '';
+    resetStatus();
+  }
+
+  function resetStatus() {
+    status.value = null;
+    statusLoading.value = false;
+    statusError.value = '';
+    staging.value = false;
+    committing.value = false;
+    commitOutcome.value = null;
+    focusPath.value = '';
+    statusReqId.value = '';
+    commitReqId.value = '';
   }
 
   /** Drop all state — used when switching relays. */
@@ -68,9 +115,14 @@ export const useDiffStore = defineStore('diff', () => {
     halfScreen.value = !halfScreen.value;
   }
 
-  function setMode(mode: GitDiffMode) {
+  function setMode(mode: DiffViewMode) {
     if (!state.value) return;
     if (state.value.mode === mode && (mode !== 'commit' || state.value.commit)) return;
+    if (mode === 'status') {
+      state.value = { ...state.value, mode, loading: false, error: undefined };
+      requestStatus();
+      return;
+    }
     state.value = { ...state.value, mode, content: '', loading: true, error: undefined };
     if (mode === 'commit') {
       // Need a commit to show; if none selected, fetch the log so the user can
@@ -92,6 +144,10 @@ export const useDiffStore = defineStore('diff', () => {
 
   function refresh() {
     if (!state.value) return;
+    if (state.value.mode === 'status') {
+      requestStatus();
+      return;
+    }
     if (state.value.mode === 'commit' && !state.value.commit) {
       requestLog();
       return;
@@ -101,7 +157,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   function requestDiff() {
     const s = state.value;
-    if (!s) return;
+    if (!s || s.mode === 'status') return;
     const reqId = newReqId();
     diffReqId.value = reqId;
     const msg: GitDiff = {
@@ -164,6 +220,105 @@ export const useDiffStore = defineStore('diff', () => {
     };
   }
 
+  // ---- status / stage / commit ----
+
+  function requestStatus() {
+    const s = state.value;
+    if (!s) return;
+    const reqId = newReqId();
+    statusReqId.value = reqId;
+    statusLoading.value = true;
+    statusError.value = '';
+    ws.send({ type: 'git_status', cwd: s.cwd, host: s.host, req_id: reqId });
+  }
+
+  /** git add (or with unstage, remove from the index) these paths. */
+  function stage(paths: string[], unstage = false) {
+    const s = state.value;
+    if (!s || !paths.length || staging.value) return;
+    sendStage({ paths, unstage });
+  }
+
+  /** git add -A . (or unstage everything) under the folder. */
+  function stageAll(unstage = false) {
+    const s = state.value;
+    if (!s || staging.value) return;
+    sendStage({ all: true, unstage });
+  }
+
+  function sendStage(extra: { paths?: string[]; all?: boolean; unstage: boolean }) {
+    const s = state.value!;
+    const reqId = newReqId();
+    statusReqId.value = reqId; // the reply is a fresh status
+    staging.value = true;
+    statusError.value = '';
+    ws.send({ type: 'git_stage', cwd: s.cwd, host: s.host, req_id: reqId, ...extra });
+  }
+
+  /** Commit the index with a message, or (useCommand) run the configured command. */
+  function commit(opts: { message?: string; useCommand?: boolean }) {
+    const s = state.value;
+    if (!s || committing.value) return;
+    const reqId = newReqId();
+    commitReqId.value = reqId;
+    committing.value = true;
+    commitOutcome.value = null;
+    const sent = ws.send({
+      type: 'git_commit',
+      cwd: s.cwd,
+      host: s.host,
+      req_id: reqId,
+      ...(opts.useCommand ? { use_command: true } : { message: opts.message ?? '' }),
+    });
+    if (!sent) {
+      committing.value = false;
+      commitOutcome.value = { ok: false, error: 'not connected' };
+    }
+  }
+
+  function setStatusResult(msg: GitStatusResultMsg) {
+    const s = state.value;
+    if (!s || msg.cwd !== s.cwd) return;
+    if (msg.req_id && statusReqId.value && msg.req_id !== statusReqId.value) return;
+    const { type: _t, cwd: _c, req_id: _r, ...data } = msg;
+    status.value = data;
+    statusLoading.value = false;
+    staging.value = false;
+    statusError.value = '';
+  }
+
+  function setStatusError(reqId: string | undefined, message: string) {
+    if (!state.value) return;
+    if (reqId && statusReqId.value && reqId !== statusReqId.value) return;
+    statusLoading.value = false;
+    staging.value = false;
+    statusError.value = message || 'git status failed';
+  }
+
+  function setCommitResult(msg: GitCommitResultMsg) {
+    const s = state.value;
+    if (!s || msg.cwd !== s.cwd) return;
+    if (msg.req_id && commitReqId.value && msg.req_id !== commitReqId.value) return;
+    committing.value = false;
+    commitOutcome.value = {
+      ok: msg.ok, hash: msg.hash, subject: msg.subject, output: msg.output, error: msg.error, command: msg.command,
+    };
+    // Whatever happened (a hook may have changed files, a command may have
+    // staged more), show the current state.
+    requestStatus();
+  }
+
+  /** Jump from the status list to a file's diff (staged → cached view). */
+  function showFileDiff(path: string, staged: boolean) {
+    if (!state.value) return;
+    focusPath.value = path;
+    setMode(staged ? 'cached' : 'unstaged');
+  }
+
+  function clearFocus() {
+    focusPath.value = '';
+  }
+
   function setLogError(reqId?: string) {
     const s = state.value;
     if (!s) return;
@@ -186,5 +341,21 @@ export const useDiffStore = defineStore('diff', () => {
     setLogResult,
     setDiffError,
     setLogError,
+    status,
+    statusLoading,
+    statusError,
+    staging,
+    committing,
+    commitOutcome,
+    focusPath,
+    requestStatus,
+    stage,
+    stageAll,
+    commit,
+    setStatusResult,
+    setStatusError,
+    setCommitResult,
+    showFileDiff,
+    clearFocus,
   };
 });

@@ -107,3 +107,19 @@ describe('usePrefsStore save tracking', () => {
     send.mockRestore()
   })
 })
+
+describe('git commit command pref', () => {
+  it('reads it from the relay prefs and saves it to the git section', () => {
+    const send = sendSpy()
+    const prefs = usePrefsStore()
+    expect(prefs.gitCommitCmd).toBe('')
+    prefs.setPrefs({ git: { commit_cmd: 'npm run commit' } })
+    expect(prefs.gitCommitCmd).toBe('npm run commit')
+    prefs.setPrefs({})
+    expect(prefs.gitCommitCmd).toBe('') // cleared on the relay → cleared here
+    prefs.setGitCommitCmd('  git commit -s  ')
+    expect(prefs.gitCommitCmd).toBe('git commit -s')
+    const sentMsg = send.mock.lastCall?.[0] as unknown as Record<string, unknown>
+    expect(sentMsg).toMatchObject({ type: 'prefs_set', section: 'git', data: { commit_cmd: 'git commit -s' } })
+  })
+})

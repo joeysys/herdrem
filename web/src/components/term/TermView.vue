@@ -412,6 +412,11 @@ function openDiff() {
   diff.openDiff(cwd, h)
 }
 
+function openStatus() {
+  if (!conn.hasFeature('git-commit')) return
+  diff.openDiff(pane.value?.cwd || '/', pane.value?.host || 'local', 'status')
+}
+
 function toggleZoom() {
   if (zoom.zoom.value > 1.05) zoom.setZoom(1)
   else zoom.setZoom(1.5)
@@ -536,6 +541,7 @@ onUnmounted(() => {
       <div class="head-actions desktop-only">
         <button class="icon-btn" aria-label="Browse files" title="Files" @click.stop="openFiles">🗂</button>
         <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" title="Diff" @click.stop="openDiff">⎇</button>
+        <button v-if="conn.hasFeature('git-commit')" class="icon-btn" aria-label="Git status" title="Git status: stage and commit" @click.stop="openStatus">±</button>
         <button
           class="icon-btn"
           :class="{ active: hasTodo }"
@@ -575,6 +581,7 @@ onUnmounted(() => {
         <div v-if="showMenu" class="head-menu" role="menu" aria-label="Terminal actions" @click.stop>
           <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false">🗂 Files</button>
           <button v-if="conn.hasFeature('git-diff')" type="button" role="menuitem" aria-label="Git diff" @click.stop="openDiff(); showMenu = false">⎇ Diff</button>
+          <button v-if="conn.hasFeature('git-commit')" type="button" role="menuitem" aria-label="Git status" @click.stop="openStatus(); showMenu = false">± Status</button>
           <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false">✎ Todo</button>
           <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false">⌕ Search</button>
           <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false">⏱ History</button>
