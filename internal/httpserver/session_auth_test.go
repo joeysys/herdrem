@@ -40,6 +40,11 @@ func TestSessionAuthSetsHttpOnlyCookie(t *testing.T) {
 	}
 	// The cookie must be persistent, not session-scoped: some PWA containers
 	// drop session cookies on close, which would re-prompt for the token.
+	// Seven idle days is the product bound — a daily PWA open must not expire
+	// overnight, and a week without a successful connect still must.
+	if sessionTTL != 7*24*time.Hour {
+		t.Fatalf("sessionTTL = %s, want 7 days idle", sessionTTL)
+	}
 	if found.MaxAge != int(sessionTTL.Seconds()) {
 		t.Fatalf("cookie MaxAge = %d, want %d", found.MaxAge, int(sessionTTL.Seconds()))
 	}

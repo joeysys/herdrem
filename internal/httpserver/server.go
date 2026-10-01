@@ -42,9 +42,12 @@ const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-
 // sessionTTL bounds a minted session's lifetime. The cookie carries
 // Max-Age=sessionTTL so it survives PWA container restarts — session-scope
 // cookies are dropped by some Android WebAPK/standalone containers when the
-// window closes, which re-prompts for the token on every cold start. The
-// server-side TTL still bounds an idle session even if a client holds onto it.
-const sessionTTL = 24 * time.Hour
+// window closes, which re-prompts for the token on every cold start.
+// Seven idle days covers a phone that opens the installed app once a day
+// and is then frozen or killed; the SPA re-mints on connect (and every 30
+// minutes while the socket stays up) so an active device rolls this window
+// forward. A client that stays idle still expires on this bound.
+const sessionTTL = 7 * 24 * time.Hour
 
 // maxSessions/maxPreviewCaps bound the server-side credential maps so an
 // authenticated client cannot grow them without limit.

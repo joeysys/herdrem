@@ -130,6 +130,10 @@ The PWA prompts for the token on first connect — enter it in the login field
 or relay settings; `?token=` URLs are not accepted. The token is stored
 per-relay in tab `sessionStorage` (never `localStorage`): it survives reloads
 but dies with the tab, and a 401 or deleting/changing the relay drops it.
+Same-origin login also mints an HttpOnly session cookie (not the token) with a
+7-day idle limit. The PWA renews that cookie on each connect and every 30
+minutes while the socket stays up, so a phone that opens the installed app
+daily does not re-prompt; a week without a successful connect does.
 
 ### Port forwarding (Cloudflare quick tunnels)
 

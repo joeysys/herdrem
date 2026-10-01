@@ -384,8 +384,10 @@ describe('useConnectionStore session tokens', () => {
     fetchMock.mockClear()
 
     statusCb('connected')
+    expect(fetchMock).not.toHaveBeenCalled()
+
     vi.advanceTimersByTime(30 * 60 * 1000)
-    expect(fetchMock).toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0][0])).toContain('/session-auth')
     expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe('include')
 

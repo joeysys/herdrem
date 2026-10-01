@@ -113,25 +113,28 @@ export const useConnectionStore = defineStore('connection', () => {
 
   // slideTimer re-mints the session cookie while the WS stays connected.
   // The signed server cookie has a fixed expiry (no server-side slide), so
-  // without this an open app's session would lapse mid-use; each slide is a
-  // fresh mint, giving the connected client a rolling sessionTTL window.
+  // each mint rolls a fresh sessionTTL window. Connect-time renewal is
+  // already handled by mintSessionCookie / probeSessionAuth in connect();
+  // this interval timer renews long-running active connections.
   let slideTimer: ReturnType<typeof setInterval> | null = null;
+
+  function slideSession() {
+    const httpBase = sessionHttpBase();
+    if (!httpBase || status.value !== 'connected') return;
+    void fetch(`${httpBase}/session-auth`, { credentials: 'include' }).then((res) => {
+      if (res.ok || res.status === 204) markSessionCookieHint();
+      // A dead session mid-connection only matters for the NEXT reload —
+      // the live WS stays open, so drop the stale hint without kicking.
+      else if (res.status === 401) clearSessionCookieHint();
+    }).catch(() => {
+      /* retry on the next interval, or the next connect */
+    });
+  }
 
   function startSessionSlide() {
     // Same-origin only — a remote relay never carries the session cookie.
     if (slideTimer || typeof window === 'undefined' || !sessionHttpBase()) return;
-    slideTimer = setInterval(() => {
-      const httpBase = sessionHttpBase();
-      if (!httpBase || status.value !== 'connected') return;
-      void fetch(`${httpBase}/session-auth`, { credentials: 'include' }).then((res) => {
-        if (res.ok || res.status === 204) markSessionCookieHint();
-        // A dead session mid-connection only matters for the NEXT reload —
-        // the live WS stays open, so drop the stale hint without kicking.
-        else if (res.status === 401) clearSessionCookieHint();
-      }).catch(() => {
-        /* retry next interval */
-      });
-    }, 30 * 60 * 1000); // comfortably under the signed sessionTTL
+    slideTimer = setInterval(slideSession, 30 * 60 * 1000); // comfortably under the signed sessionTTL
   }
 
   function stopSessionSlide() {
