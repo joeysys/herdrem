@@ -318,9 +318,19 @@ func (fs *FileService) headSummary(ctx context.Context, host, cwd string) GitCom
 	return GitCommitResult{Hash: hash, Subject: subject}
 }
 
+// commitWaitDelay bounds the wait for output after a commit's context ends.
+// A process that escaped the kill (e.g. one that started its own session)
+// would otherwise hold the output pipe — and cmd.Run, and the repo's commit
+// guard — open for as long as it lives.
+const commitWaitDelay = 5 * time.Second
+
 // runCaptured runs cmd with stdout and stderr interleaved into one capped
 // buffer (hook and command output reads best in the order it was written).
+// On timeout the whole process group goes, not just the direct child: hooks
+// and whatever a commit command starts are its descendants.
 func runCaptured(cmd *exec.Cmd) (string, error) {
+	killGroupOnCancel(cmd)
+	cmd.WaitDelay = commitWaitDelay
 	out := &boundedWriter{limit: maxCommitOutput}
 	cmd.Stdout = out
 	cmd.Stderr = out // same writer: exec serialises the two streams

@@ -62,6 +62,11 @@ export const useDiffStore = defineStore('diff', () => {
   const focusPath = ref('');
   const statusReqId = ref('');
   const commitReqId = ref('');
+  // The last commit result shown on this page; it survives closing the panel
+  // so the relay's copy (last_commit in the status) is not shown twice.
+  let seenCommitReq = '';
+  let commitPollTimer: ReturnType<typeof setTimeout> | null = null;
+  const COMMIT_POLL_MS = 3000;
 
   function newReqId(): string {
     return uid();
@@ -112,6 +117,8 @@ export const useDiffStore = defineStore('diff', () => {
     focusPath.value = '';
     statusReqId.value = '';
     commitReqId.value = '';
+    if (commitPollTimer) clearTimeout(commitPollTimer);
+    commitPollTimer = null;
   }
 
   /** Drop all state — used when switching relays. */
@@ -302,11 +309,41 @@ export const useDiffStore = defineStore('diff', () => {
     const s = state.value;
     if (!s || msg.cwd !== s.cwd) return;
     if (msg.req_id && statusReqId.value && msg.req_id !== statusReqId.value) return;
-    const { type: _t, cwd: _c, req_id: _r, ...data } = msg;
+    const { type: _t, cwd: _c, req_id: _r, commit_running, last_commit, ...data } = msg;
     status.value = data;
     statusLoading.value = false;
     staging.value = false;
     statusError.value = '';
+    syncCommitState(!!commit_running, last_commit);
+  }
+
+  // The commit reply only reaches the connection that asked for it, and
+  // closing the panel forgets the request. The status therefore carries the
+  // repo's commit state: a commit still running (from a closed page, or before
+  // this panel reopened) keeps the button busy and is polled until it ends,
+  // and its result is then taken from last_commit.
+  function syncCommitState(running: boolean, last?: GitCommitResultMsg) {
+    if (commitReqId.value && committing.value) return; // our own reply is on its way
+    if (running) {
+      committing.value = true;
+      if (!commitPollTimer) {
+        commitPollTimer = setTimeout(() => {
+          commitPollTimer = null;
+          if (state.value?.mode === 'status') requestStatus();
+        }, COMMIT_POLL_MS);
+      }
+      return;
+    }
+    committing.value = false;
+    if (last?.req_id && last.req_id !== seenCommitReq) showCommitResult(last);
+  }
+
+  function showCommitResult(msg: GitCommitResultMsg) {
+    committing.value = false;
+    if (msg.req_id) seenCommitReq = msg.req_id;
+    commitOutcome.value = {
+      ok: msg.ok, hash: msg.hash, subject: msg.subject, output: msg.output, error: msg.error, command: msg.command,
+    };
   }
 
   function setStatusError(reqId: string | undefined, message: string) {
@@ -321,10 +358,7 @@ export const useDiffStore = defineStore('diff', () => {
     const s = state.value;
     if (!s || msg.cwd !== s.cwd) return;
     if (msg.req_id && commitReqId.value && msg.req_id !== commitReqId.value) return;
-    committing.value = false;
-    commitOutcome.value = {
-      ok: msg.ok, hash: msg.hash, subject: msg.subject, output: msg.output, error: msg.error, command: msg.command,
-    };
+    showCommitResult(msg);
     // Whatever happened (a hook may have changed files, a command may have
     // staged more), show the current state.
     requestStatus();

@@ -5,18 +5,70 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"time"
 
 	"github.com/coder/websocket"
 	"herdrem/internal/protocol"
 )
 
 // gitStatusMsg is the git_status_result message: the service result's fields
-// are promoted to the top level next to type / cwd / req_id.
+// are promoted to the top level next to type / cwd / req_id. CommitRunning and
+// LastCommit carry the repo's commit state, so a page that was closed or
+// reopened while a commit ran still sees it and its result (the commit reply
+// itself only goes to the connection that asked for it).
 type gitStatusMsg struct {
 	Type  string `json:"type"`
 	Cwd   string `json:"cwd"`
 	ReqID string `json:"req_id,omitempty"`
 	GitStatusResult
+	CommitRunning bool                      `json:"commit_running,omitempty"`
+	LastCommit    *protocol.GitCommitResult `json:"last_commit,omitempty"`
+}
+
+// lastCommitTTL bounds how long a finished commit's result is reported with
+// the status: long enough to come back to a closed page, short enough that an
+// old result does not read as news.
+const lastCommitTTL = 10 * time.Minute
+
+type commitRecord struct {
+	result protocol.GitCommitResult
+	at     time.Time
+}
+
+// commitKey identifies a repository directory. "" and "local" both mean this
+// machine: one key, or a second commit could slip past the guard by spelling
+// the host differently.
+func commitKey(host, cwd string) string {
+	if isLocal(host) {
+		host = "local"
+	}
+	return host + "\x00" + filepath.Clean(cwd)
+}
+
+// commitState reports whether a commit is running in the repo and the result
+// of the last one, if it finished within lastCommitTTL.
+func (s *Service) commitState(host, cwd string) (bool, *protocol.GitCommitResult) {
+	key := commitKey(host, cwd)
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	var last *protocol.GitCommitResult
+	if rec, ok := s.lastCommit[key]; ok && time.Since(rec.at) < lastCommitTTL {
+		r := rec.result
+		last = &r
+	}
+	return s.committing[key], last
+}
+
+// finishCommit records the result and releases the repo in one step, so a
+// status taken in between never shows the commit as neither running nor done.
+func (s *Service) finishCommit(key string, result protocol.GitCommitResult) {
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	if s.lastCommit == nil {
+		s.lastCommit = map[string]commitRecord{}
+	}
+	s.lastCommit[key] = commitRecord{result: result, at: time.Now()}
+	delete(s.committing, key)
 }
 
 func gitErrCode(err error) string {
@@ -35,7 +87,9 @@ func (s *Service) sendGitStatus(ctx context.Context, conn *websocket.Conn, host,
 		s.sendErrorKeyReq(ctx, conn, op, err.Error(), gitErrCode(err), reqID)
 		return
 	}
-	s.sendJSON(ctx, conn, gitStatusMsg{Type: "git_status_result", Cwd: cwd, ReqID: reqID, GitStatusResult: res})
+	msg := gitStatusMsg{Type: "git_status_result", Cwd: cwd, ReqID: reqID, GitStatusResult: res}
+	msg.CommitRunning, msg.LastCommit = s.commitState(host, cwd)
+	s.sendJSON(ctx, conn, msg)
 }
 
 func (s *Service) handleGitStatus(ctx context.Context, conn *websocket.Conn, data []byte) {
@@ -101,13 +155,7 @@ func (s *Service) handleGitCommit(ctx context.Context, conn *websocket.Conn, dat
 		}
 		reply.Command = command
 	}
-	// "" and "local" both mean this machine: one key, or a second commit could
-	// slip past the guard by spelling the host differently.
-	host := msg.Host
-	if isLocal(host) {
-		host = "local"
-	}
-	key := host + "\x00" + filepath.Clean(msg.Cwd)
+	key := commitKey(msg.Host, msg.Cwd)
 	s.commitMu.Lock()
 	if s.committing == nil {
 		s.committing = map[string]bool{}
@@ -123,11 +171,6 @@ func (s *Service) handleGitCommit(ctx context.Context, conn *websocket.Conn, dat
 
 	go func() {
 		ctx := context.WithoutCancel(ctx) // see handleGitStage; commits have their own timeouts
-		defer func() {
-			s.commitMu.Lock()
-			delete(s.committing, key)
-			s.commitMu.Unlock()
-		}()
 		var res GitCommitResult
 		var err error
 		if msg.UseCommand {
@@ -144,6 +187,7 @@ func (s *Service) handleGitCommit(ctx context.Context, conn *websocket.Conn, dat
 		} else {
 			reply.OK = true
 		}
+		s.finishCommit(key, reply)
 		s.sendJSON(ctx, conn, reply)
 	}()
 }

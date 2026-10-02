@@ -159,6 +159,50 @@ func TestGitCommitOneAtATimePerRepo(t *testing.T) {
 	}
 }
 
+// A page that closed or reopened mid-commit learns about it from the status:
+// the commit reply itself only goes to the connection that asked.
+func TestGitStatusCarriesTheCommitState(t *testing.T) {
+	r := newGitRig(t)
+	m := r.ask(map[string]any{"type": "git_status", "cwd": r.dir})
+	if _, ok := m["commit_running"]; ok {
+		t.Fatalf("idle repo reports a running commit: %v", m)
+	}
+	if _, ok := m["last_commit"]; ok {
+		t.Fatalf("no commit yet, but last_commit = %v", m["last_commit"])
+	}
+
+	r.svc.commitMu.Lock()
+	r.svc.committing = map[string]bool{commitKey("", r.dir): true}
+	r.svc.commitMu.Unlock()
+	m = r.ask(map[string]any{"type": "git_status", "cwd": r.dir + "/", "host": "local"})
+	if m["commit_running"] != true {
+		t.Fatalf("running commit not reported: %v", m)
+	}
+	r.svc.commitMu.Lock()
+	r.svc.committing = nil
+	r.svc.commitMu.Unlock()
+
+	os.WriteFile(filepath.Join(r.dir, "tracked.txt"), []byte("v2\n"), 0o644)
+	r.ask(map[string]any{"type": "git_stage", "cwd": r.dir, "all": true})
+	r.ask(map[string]any{"type": "git_commit", "cwd": r.dir, "message": "kept for later", "req_id": "c9"})
+	m = r.ask(map[string]any{"type": "git_status", "cwd": r.dir})
+	last, _ := m["last_commit"].(map[string]any)
+	if m["commit_running"] != nil || last["req_id"] != "c9" || last["ok"] != true || last["subject"] != "kept for later" {
+		t.Fatalf("got %v", m)
+	}
+
+	// an old result is not news
+	r.svc.commitMu.Lock()
+	rec := r.svc.lastCommit[commitKey("", r.dir)]
+	rec.at = time.Now().Add(-lastCommitTTL)
+	r.svc.lastCommit[commitKey("", r.dir)] = rec
+	r.svc.commitMu.Unlock()
+	m = r.ask(map[string]any{"type": "git_status", "cwd": r.dir})
+	if _, ok := m["last_commit"]; ok {
+		t.Fatalf("expired result still reported: %v", m["last_commit"])
+	}
+}
+
 func TestGitStatusErrorsAreKeyed(t *testing.T) {
 	r := newGitRig(t)
 	m := r.ask(map[string]any{"type": "git_status", "cwd": t.TempDir(), "req_id": "e"})

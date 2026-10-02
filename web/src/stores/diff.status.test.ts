@@ -139,6 +139,58 @@ describe('diff store — git status', () => {
     expect(sent().map((m) => m.type)).toEqual(['git_status'])
   })
 
+  it('picks up a commit still running after the panel reopened, and its result', () => {
+    vi.useFakeTimers()
+    try {
+      const d = useDiffStore()
+      d.openDiff('/repo', 'local', 'status')
+      d.setStatusResult(statusMsg(last().req_id as string, { commit_running: true }))
+      expect(d.committing).toBe(true) // the button stays busy
+      d.commit({ message: 'x' })
+      expect(sent().filter((m) => m.type === 'git_commit')).toHaveLength(0)
+
+      vi.mocked(ws.send).mockClear()
+      vi.advanceTimersByTime(3000)
+      expect(sent().map((m) => m.type)).toEqual(['git_status']) // polled
+      d.setStatusResult(statusMsg(last().req_id as string, {
+        last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'other-page', ok: true, hash: 'def', subject: 'from a closed page', command: 'make commit' },
+      }))
+      expect(d.committing).toBe(false)
+      expect(d.commitOutcome).toMatchObject({ ok: true, hash: 'def', command: 'make commit' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not show a result this page already showed again after reopening', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.commit({ message: 'fix it' })
+    const id = last().req_id as string
+    const reply = { type: 'git_commit_result' as const, cwd: '/repo', req_id: id, ok: true, hash: 'abc', subject: 'fix it' }
+    d.setCommitResult(reply)
+    d.close()
+
+    d.openDiff('/repo', 'local', 'status')
+    d.setStatusResult(statusMsg(last().req_id as string, { last_commit: reply }))
+    expect(d.commitOutcome).toBeNull()
+    expect(d.committing).toBe(false)
+  })
+
+  it('takes its own commit reply even if the panel was reopened meanwhile', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.commit({ useCommand: true })
+    const id = last().req_id as string
+    d.close()
+    d.openDiff('/repo', 'local', 'status')
+    d.setStatusResult(statusMsg(last().req_id as string, { commit_running: true }))
+    d.setCommitResult({ type: 'git_commit_result', cwd: '/repo', req_id: id, ok: false, error: 'commit command: exit status 1' })
+    expect(d.committing).toBe(false)
+    expect(d.commitOutcome).toMatchObject({ ok: false })
+    d.close() // drops the pending status poll
+  })
+
   it('closing forgets the status state', () => {
     const d = useDiffStore()
     d.openDiff('/repo', 'local', 'status')

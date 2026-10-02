@@ -297,6 +297,10 @@ export interface GitStatusResultMsg extends GitStatusData {
   type: 'git_status_result'
   cwd: string
   req_id?: string
+  /** a commit is running in this repo (possibly started from another page) */
+  commit_running?: boolean
+  /** the last finished commit's reply, kept by the relay for a few minutes */
+  last_commit?: GitCommitResultMsg
 }
 export interface GitCommitResultMsg {
   type: 'git_commit_result'

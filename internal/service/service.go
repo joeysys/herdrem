@@ -25,7 +25,8 @@ type Service struct {
 	prefsStore   *store.PrefsStore
 	historyStore *store.HistoryStore
 	commitMu     sync.Mutex
-	committing   map[string]bool // host\x00cwd → a commit is running
+	committing   map[string]bool         // commitKey → a commit is running
+	lastCommit   map[string]commitRecord // commitKey → the last finished commit
 	files        *FileService
 	tunnels      *TunnelService
 	hub          *hub.Hub
