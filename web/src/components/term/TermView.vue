@@ -20,7 +20,7 @@ import HistoryPanel from './HistoryPanel.vue'
 import { MAX_HITS } from '../../utils/domHighlight'
 import { useHistorySuggest } from '../../composables/useHistorySuggest'
 import { whereOf } from '../../utils/cmdHistory'
-import { tailWindow, computeTailWindow } from '../../utils/tailWindow'
+import { tailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
 import TodoPanel from '../todo/TodoPanel.vue'
@@ -80,12 +80,9 @@ const zoom = useTermZoom(scrollEl)
 const RENDER_WINDOW_LINES = 200
 
 // When windowing is active (pinned to bottom), the rendered content is the
-// tail window and we track how many lines were dropped from the front. When
-// the user scrolls up, stickBottom flips and the view switches to the full
-// content; without compensation that transition would jump the viewport into
-// the middle of the history. We preserve the visible line by translating the
-// scroll position by the dropped line count (× measured line height).
-const windowDroppedLines = ref(0)
+// tail window. When the user scrolls up, stickBottom flips and the view
+// switches to the full content; without compensation that transition would
+// jump the viewport into the middle of the history (see the stickBottom watch).
 const renderContent = computed(() => {
   const raw = term.content
   if (!raw) return raw
@@ -97,60 +94,24 @@ const renderContent = computed(() => {
   return tailWindow(raw, RENDER_WINDOW_LINES)
 })
 
-// Track the window offset separately from the render computed: update it when
-// content changes while pinned to the bottom (the windowed state), so the
-// scroll-compensation watch below can read a stable value without the computed
-// having side effects.
-watch(
-  () => [term.content, term.stickBottom] as const,
-  ([raw, stick]) => {
-    if (stick && raw) {
-      windowDroppedLines.value = computeTailWindow(raw, RENDER_WINDOW_LINES).droppedLines
-    }
-  },
-  { immediate: true },
-)
-
-function measureLineHeight(): number {
-  const el = scrollEl.value
-  if (!el) return 0
-  // Measure the actual rendered line height by copying the computed style of
-  // a real terminal text node (inherits font/line-height from .term-body and
-  // .ansi-stream, including zoom), instead of a hard-coded probe.
-  const sample = el.querySelector('.ansi-stream')
-  if (!sample) return 0
-  const probe = document.createElement('div')
-  const cs = getComputedStyle(sample)
-  probe.style.cssText = 'position:absolute;visibility:hidden;'
-  probe.style.fontFamily = cs.fontFamily
-  probe.style.fontSize = cs.fontSize
-  probe.style.lineHeight = cs.lineHeight
-  probe.textContent = 'M'
-  el.appendChild(probe)
-  const h = probe.getBoundingClientRect().height
-  probe.remove()
-  return h || 0
-}
-
 // Preserve the visible line when switching between windowed (bottom) and full
-// rendering on stickBottom flips, so scrolling up does not jump to the middle
-// of the history.
+// rendering on stickBottom flips, so scrolling up does not jump into the
+// history. The window is exactly the tail of the full content, so the
+// viewport's distance from the bottom is the same in both renderings: keep
+// that instead of estimating the height of the lines added above. A line
+// height estimate is always short — glyphs from fallback fonts (box drawing,
+// emoji, CJK) make real lines taller — and the error adds up over every
+// dropped line, landing the view far above where the user was.
+// Runs as a pre-flush watcher, so the distance is read before the re-render.
 watch(
   () => term.stickBottom,
   async (now, before) => {
     const el = scrollEl.value
     if (!el) return
+    const fromBottom = el.scrollHeight - el.scrollTop
     await nextTick()
-    const prevScrollTop = el.scrollTop
-    const lineH = measureLineHeight()
-    const dropped = windowDroppedLines.value
     if (!now && before) {
-      // bottom (windowed) → scrolled up (full): the full content has the
-      // dropped lines before what we saw, so shift down by that many lines.
-      if (lineH > 0) {
-        const maxTop = Math.max(0, el.scrollHeight - el.clientHeight)
-        el.scrollTop = Math.min(prevScrollTop + dropped * lineH, maxTop)
-      }
+      el.scrollTop = Math.max(0, el.scrollHeight - fromBottom)
     } else if (now && !before) {
       // back to bottom: jump straight to the end.
       el.scrollTop = el.scrollHeight
