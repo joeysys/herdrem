@@ -34,6 +34,8 @@ export default defineConfig({
     buildIdPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
+      // notificationclick handling lives in public/sw-notify.js
+      workbox: { importScripts: ['sw-notify.js'] },
       manifest: {
         name: 'Herdrem',
         short_name: 'Herdrem',

@@ -25,7 +25,7 @@ describe('HistorySection', () => {
     h.record('fix it', { kind: 'ag' })
     h.record('fix more', { kind: 'ag' })
     const w = mount(HistorySection)
-    expect(w.get('[role="status"]').text()).toContain('1 commands · 2 prompts')
+    expect(w.get('[role="status"]').attributes('aria-label')).toBe('1 command · 2 prompts')
   })
 
   it('toggles recording of agent prompts', async () => {
