@@ -13,6 +13,7 @@ import {
   detectMenu, isCursorAgent, cursorKeySequence, isStickyChoice, menuLabel,
 } from '../../utils/menu'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
+import { autoFocus } from '../../utils/softKeyboard'
 import type { Pane } from '../../api/types'
 import ArrowPad from './ArrowPad.vue'
 import HistorySuggest from './HistorySuggest.vue'
@@ -288,7 +289,8 @@ function onFill(t: string) {
 // Merge fill text into the input: 'append' inserts at the cursor (end when
 // the input isn't focused) with space padding; 'prepend' puts it at the front
 // with a trailing space; 'replace' swaps the whole input (history picks).
-// Focus lands after the inserted text.
+// Focus lands after the inserted text. Only a history pick is an explicit
+// typing action; other fills leave the soft keyboard as it was.
 function insertIntoInput(snippet: string, kind: 'append' | 'prepend' | 'replace') {
   const el = cmdInputEl.value
   const r =
@@ -300,7 +302,8 @@ function insertIntoInput(snippet: string, kind: 'append' | 'prepend' | 'replace'
   text.value = r.text
   nextTick(() => {
     if (!el) return
-    el.focus()
+    if (kind === 'replace') el.focus()
+    else if (!autoFocus(el)) return
     el.setSelectionRange(r.cursor, r.cursor)
   })
 }

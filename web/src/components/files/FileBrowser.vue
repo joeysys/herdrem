@@ -7,6 +7,7 @@ import { useHaptic } from '../../composables/useHaptic'
 import { useUploadsStore, type UploadItem } from '../../stores/uploads'
 import { safeStorage } from '../../utils/storage'
 import { relayFileUrl } from '../../utils/relay'
+import { autoFocus } from '../../utils/softKeyboard'
 import type { FileEntry } from '../../api/types'
 
 const files = useFilesStore()
@@ -46,9 +47,10 @@ const sortKey = ref<SortKey>('mtime')
 const sortDesc = ref(true) // newest first by default
 const filterText = ref('')
 
-// Auto-focus the filter input when the browser opens
+// Auto-focus the filter input when the browser opens (desktop only: on touch
+// it would raise the keyboard just for browsing)
 onMounted(() => {
-  nextTick(() => filterEl.value?.focus())
+  nextTick(() => autoFocus(filterEl.value))
   document.addEventListener('click', closeEntryMenu)
 })
 onUnmounted(() => document.removeEventListener('click', closeEntryMenu))

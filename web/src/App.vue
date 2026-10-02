@@ -694,7 +694,10 @@ onMounted(() => {
       document.removeEventListener('pointerdown', lockOnce);
     };
     document.addEventListener('pointerdown', lockOnce, { once: true });
-    trap.arm(backHandler);
+    trap.arm(backHandler, backDepth);
+    // Opening a layer happens inside the tap that opened it, so this is the
+    // moment the extra sentinels still count as user-initiated.
+    watch(backDepth, () => trap.topUp());
   }
   boot();
 
@@ -715,6 +718,26 @@ onMounted(() => {
   }
   document.addEventListener('click', onDocClick);
 });
+
+/** backDepth counts the back presses backHandler needs to reach the root view
+ *  (mirrors closeTopLayer + term + space). */
+function backDepth(): number {
+  const layers = [
+    showTodoManager.value,
+    showSettings.value,
+    showNewPane.value,
+    ctxOpen.value,
+    showRelaySwitch.value,
+    diff.open,
+    !!files.preview,
+    files.browserOpen,
+  ];
+  let n = layers.filter(Boolean).length;
+  if (files.browserOpen) n += files.breadcrumbs.length; // one back per directory level
+  if (view.value === 'term') n++;
+  if (activeSpaceId.value) n++;
+  return n;
+}
 
 /** closes the topmost UI layer on back; returns true if something was closed */
 function backHandler(): boolean {

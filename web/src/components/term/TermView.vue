@@ -22,6 +22,7 @@ import { useHistorySuggest } from '../../composables/useHistorySuggest'
 import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow, computeTailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
+import { autoFocus } from '../../utils/softKeyboard'
 import TodoPanel from '../todo/TodoPanel.vue'
 import type { TodoBinding } from '../../api/types'
 
@@ -197,9 +198,7 @@ function fillShellInput(snippet: string, kind: 'append' | 'prepend') {
     : insertSnippet(shellText.value, el ? el.selectionStart : null, snippet)
   shellText.value = r.text
   nextTick(() => {
-    if (!el) return
-    el.focus()
-    el.setSelectionRange(r.cursor, r.cursor)
+    if (autoFocus(el)) el!.setSelectionRange(r.cursor, r.cursor)
   })
 }
 
@@ -220,6 +219,12 @@ watch(
 
 function focusShellInput() {
   activeShellInput()?.focus()
+}
+
+// Convenience focus (pane opened, output tapped, panel closed): never raises
+// the soft keyboard on its own — see utils/softKeyboard.
+function autoFocusShellInput() {
+  autoFocus(activeShellInput())
 }
 
 // --- input history (per-relay): suggestions + panel ---
@@ -243,7 +248,7 @@ function openHistory() {
 }
 function closeHistory() {
   showHistory.value = false
-  if (isShell.value) nextTick(() => focusShellInput())
+  if (isShell.value) nextTick(() => autoFocusShellInput())
 }
 // Picking never runs anything: it only fills the current pane's input, so an
 // agent prompt can be reused in a shell and vice versa.
@@ -327,7 +332,7 @@ function closeSearch() {
   nextTick(() => {
     const el = scrollEl.value
     if (el && term.stickBottom) el.scrollTop = el.scrollHeight
-    if (isShell.value) focusShellInput()
+    if (isShell.value) autoFocusShellInput()
   })
 }
 
@@ -367,12 +372,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 // Auto-focus shell input when entering a shell pane or when pane data loads
+// after mount (agents snapshot may be delayed). Keyed on isShell, not pane:
+// pane is a new object on every snapshot, which would re-steal focus.
 watch(isShell, (v) => {
-  if (v) nextTick(() => focusShellInput())
-})
-// Also focus when pane data arrives after mount (agents snapshot may be delayed)
-watch(pane, (p) => {
-  if (p && paneKind(p) === 'shell') nextTick(() => focusShellInput())
+  if (v) nextTick(() => autoFocusShellInput())
 })
 
 function onScroll() {
@@ -482,7 +485,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', onVisibility)
   document.addEventListener('keydown', onGlobalKeydown)
   // Focus shell input on mount if this is a shell pane
-  if (isShell.value) nextTick(() => focusShellInput())
+  if (isShell.value) nextTick(() => autoFocusShellInput())
   // Close mobile menu on outside click
   document.addEventListener('click', closeMenu)
   // Close todo panel on external close-todo-panel event (from App.vue global click)
@@ -501,7 +504,7 @@ watch(
     deepLoadedFor = ''
     closeSearch()
     showHistory.value = false
-    if (isShell.value) nextTick(() => focusShellInput())
+    if (isShell.value) nextTick(() => autoFocusShellInput())
   },
 )
 
@@ -593,7 +596,7 @@ onUnmounted(() => {
     </header>
 
     <div class="term-main">
-      <div ref="scrollEl" class="term-scroll" @scroll.passive="onScroll" @click="isShell && focusShellInput()">
+      <div ref="scrollEl" class="term-scroll" @scroll.passive="onScroll" @click="isShell && autoFocusShellInput()">
         <div v-if="term.loading && !term.content" class="term-loading" aria-live="polite">
           <span class="bar"></span>
           <span class="bar"></span>

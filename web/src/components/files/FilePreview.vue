@@ -56,6 +56,7 @@ function fallbackCopy(text: string): boolean {
   try {
     const textarea = document.createElement('textarea')
     textarea.value = text
+    textarea.readOnly = true // select without raising the soft keyboard
     textarea.style.position = 'fixed'
     textarea.style.left = '-9999px'
     textarea.style.top = '-9999px'
