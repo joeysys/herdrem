@@ -4,6 +4,8 @@ import { useTerminalStore } from '../../stores/terminal'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { agentTypeName, paneTitle } from '../../stores/connection'
 import { useHistorySuggest } from '../../composables/useHistorySuggest'
+import { isStandalone } from '../../composables/useHistoryTrap'
+import { isMacPlatform } from '../../composables/useShortcuts'
 import { whereOf } from '../../utils/cmdHistory'
 import { useTunnelsStore } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
@@ -336,7 +338,8 @@ watch(
   },
 )
 
-// --- prompt history: inline suggestions + Ctrl/Cmd+R ---
+// --- prompt history: inline suggestions + Ctrl/Cmd+R (installed window only) ---
+const historyTitle = isStandalone() ? `Input history (${isMacPlatform() ? '⌘' : 'Ctrl'}+R)` : 'Input history'
 const inputFocused = ref(false)
 function acceptSuggestion(t: string) {
   filledText.value = '' // a different text than what was filled: disarm
@@ -400,7 +403,7 @@ const suggest = useHistorySuggest({
         type="button"
         class="key"
         aria-label="Input history"
-        title="Input history (Ctrl+R)"
+        :title="historyTitle"
         @click="emit('history')"
         @pointerdown.prevent
       >⏱</button>

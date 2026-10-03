@@ -8,6 +8,7 @@ import { useTerminalStore } from '../../stores/terminal'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { safeStorage } from '../../utils/storage'
 import { ws } from '../../api/ws'
+import { isShortcutActive } from '../../composables/useShortcuts'
 
 vi.mock('../../api/ws', () => ({
   ws: {
@@ -38,6 +39,8 @@ async function flush() {
   await nextTick()
 }
 
+const setStandalone = (v: boolean) => (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(v)
+
 beforeEach(() => {
   safeStorage.removeItem('herdrem_term_zoom')
   safeStorage.removeItem('herdrem_cmd_history')
@@ -50,6 +53,7 @@ afterEach(() => {
   wrapper?.unmount()
   wrapper = null
   vi.useRealTimers()
+  setStandalone(false)
 })
 
 describe('TermView output search', () => {
@@ -136,7 +140,8 @@ describe('TermView output search', () => {
     expect(w.findAll('mark.term-hit')).toHaveLength(0)
   })
 
-  it('Ctrl+F opens the search instead of the browser find', async () => {
+  it('Ctrl+F opens the search instead of the browser find (installed window)', async () => {
+    setStandalone(true)
     const w = mountView('agent')
     const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
     document.dispatchEvent(ev)
@@ -146,6 +151,7 @@ describe('TermView output search', () => {
   })
 
   it('leaves Ctrl+F alone while another panel owns focus', async () => {
+    setStandalone(true)
     const w = mountView('agent')
     const other = document.createElement('input')
     document.body.appendChild(other)
@@ -156,6 +162,16 @@ describe('TermView output search', () => {
     expect(ev.defaultPrevented).toBe(false)
     expect(w.find('.find-bar').exists()).toBe(false)
     other.remove()
+  })
+
+  it('leaves Ctrl+F to the browser find in a normal tab', async () => {
+    const w = mountView('agent')
+    const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
+    document.dispatchEvent(ev)
+    await flush()
+    expect(ev.defaultPrevented).toBe(false)
+    expect(w.find('.find-bar').exists()).toBe(false)
+    expect(w.get('.desktop-only [aria-label="Search output"]').attributes('title')).toBe('Search output')
   })
 })
 
@@ -231,7 +247,8 @@ describe('TermView shell history', () => {
     expect(vi.mocked(ws.send).mock.calls.some((c) => (c[0] as { type: string }).type === 'send_text')).toBe(false)
   })
 
-  it('Ctrl+R opens the history panel and a pick fills the prompt', async () => {
+  it('Ctrl+R opens the history panel and a pick fills the prompt (installed window)', async () => {
+    setStandalone(true)
     const w = mountView('shell')
     useCmdHistoryStore().record('kubectl get pods', sh('p1'))
     const input = inlineInput(w)
@@ -299,13 +316,31 @@ describe('TermView agent prompt history', () => {
     expect((w.get('input[aria-label="Command input"]').element as HTMLInputElement).value).toBe('summarise the open PRs')
   })
 
-  it('Ctrl+R in the agent input opens the panel instead of reloading', async () => {
+  it('Ctrl+R in the agent input opens the panel instead of reloading (installed window)', async () => {
+    setStandalone(true)
     const w = mountView('agent')
     const ev = new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true, bubbles: true })
     agentInput(w).element.dispatchEvent(ev)
     await flush()
     expect(ev.defaultPrevented).toBe(true)
     expect(w.find('[role="dialog"][aria-label="Input history"]').exists()).toBe(true)
+  })
+
+  it('leaves Ctrl+R to the browser reload in a normal tab', async () => {
+    const w = mountView('agent')
+    const ev = new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true, bubbles: true })
+    agentInput(w).element.dispatchEvent(ev)
+    await flush()
+    expect(ev.defaultPrevented).toBe(false)
+    expect(w.find('[role="dialog"][aria-label="Input history"]').exists()).toBe(false)
+    // the terminal-scope binding (outside an input) stays off in a tab too
+    expect(isShortcutActive('term.history')).toBe(false)
+    expect(isShortcutActive('term.find')).toBe(false)
+    setStandalone(true)
+    expect(isShortcutActive('term.history')).toBe(true)
+    expect(isShortcutActive('term.find')).toBe(true)
+    setStandalone(false)
+    expect(w.get('.desktop-only [aria-label="Input history"]').attributes('title')).toBe('Input history')
   })
 })
 

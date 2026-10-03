@@ -37,6 +37,28 @@ describe('useShortcuts', () => {
     expect(formatChord(bind({ id: 'find', key: 'f', mod: true, run: () => {} }))).toBe('⌘+F')
   })
 
+  it('leaves Alt+digit to a Linux browser tab, which uses it to pick a tab', () => {
+    const seen: string[] = []
+    register(bind({ id: 'jump', code: 'Digit1', alt: true, browserTab: 'linux-blocked', run: () => { seen.push('1') } }))
+    const alt1 = () => key({ key: '1', code: 'Digit1', altKey: true })
+
+    Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64', configurable: true })
+    expect(isShortcutActive('jump')).toBe(false)
+    const ev = alt1()
+    expect(onShortcutKeydown(ev)).toBe(false)
+    expect(ev.defaultPrevented).toBe(false)
+
+    flags.__setStandalone(true) // installed window: the browser has no tabs to pick
+    expect(onShortcutKeydown(alt1())).toBe(true)
+    flags.__setStandalone(false)
+
+    Object.defineProperty(navigator, 'platform', { value: 'Win32', configurable: true })
+    expect(onShortcutKeydown(alt1())).toBe(true)
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
+    expect(onShortcutKeydown(alt1())).toBe(true)
+    expect(seen).toEqual(['1', '1', '1'])
+  })
+
   it('matches Alt by e.code when Option rewrites e.key', () => {
     const seen: string[] = []
     register(bind({ id: 'next', code: 'BracketRight', alt: true, run: () => { seen.push('next') } }))

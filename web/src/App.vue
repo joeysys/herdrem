@@ -409,16 +409,25 @@ function openTerminal(paneId: string) {
   activePaneId.value = paneId;
   view.value = 'term';
   ctxOpen.value = false;
-  files.closeBrowser(); // close file browser when switching panes
-  files.closePreview(); // and any preview overlay left open
-  diff.close(); // and any diff preview left open
+  closePaneLayers(); // panels of the previous pane
   pushHistory('term');
 }
 
 function closeTerminal() {
   view.value = 'list';
   activePaneId.value = '';
+  // Desktop split's ‹ calls this directly instead of going through back, so
+  // nothing else would close the pane's panels.
+  closePaneLayers();
   // Keep activeSpaceId so SpaceView re-enters the same space on back
+}
+
+/** The file browser, file preview and diff panel all belong to the open pane. */
+function closePaneLayers() {
+  files.closeBrowser();
+  files.closePreview();
+  diff.close();
+  directoryOverPreview.value = false;
 }
 
 function goBackFromTerm() {
@@ -556,8 +565,8 @@ function bindShortcuts() {
   add({ id: 'nav.deny', label: 'Deny focused card', scope: 'global', key: 'n', when: () => !!focusedBlockedId(), run: () => quickApprove(focusedBlockedId(), 'n') });
   add({ id: 'nav.prev', label: 'Previous pane', scope: 'global', code: 'BracketLeft', alt: true, run: () => stepPane(-1) });
   add({ id: 'nav.next', label: 'Next pane', scope: 'global', code: 'BracketRight', alt: true, run: () => stepPane(1) });
-  add({ id: 'nav.prev.mac', label: 'Previous pane', scope: 'global', code: 'BracketLeft', meta: true, shift: true, run: () => stepPane(-1) });
-  add({ id: 'nav.next.mac', label: 'Next pane', scope: 'global', code: 'BracketRight', meta: true, shift: true, run: () => stepPane(1) });
+  add({ id: 'nav.prev.mac', label: 'Previous pane', scope: 'global', code: 'BracketLeft', meta: true, shift: true, browserTab: 'mac-blocked', blockedNote: 'In a normal browser tab on Mac, ⌘⇧[ switches tabs. Use Alt+[', run: () => stepPane(-1) });
+  add({ id: 'nav.next.mac', label: 'Next pane', scope: 'global', code: 'BracketRight', meta: true, shift: true, browserTab: 'mac-blocked', blockedNote: 'In a normal browser tab on Mac, ⌘⇧] switches tabs. Use Alt+]', run: () => stepPane(1) });
   for (let n = 1; n <= 9; n++) {
     add({
       id: `nav.jump.${n}`,
@@ -565,6 +574,8 @@ function bindShortcuts() {
       scope: 'global',
       code: `Digit${n}`,
       alt: true,
+      browserTab: 'linux-blocked',
+      blockedNote: 'In a normal browser tab on Linux, Alt+number switches browser tabs. Use Alt+[ / Alt+]',
       run: () => jumpPane(n),
     });
   }
@@ -607,6 +618,7 @@ function liveChord(id: string, name: string): string {
 const approveTitle = computed(() => liveChord('nav.approve', 'Approve'));
 const denyTitle = computed(() => liveChord('nav.deny', 'Deny'));
 const settingsTitle = computed(() => liveChord('app.settings', 'Settings'));
+const helpTitle = computed(() => liveChord('help', 'Keyboard shortcuts'));
 
 let unbindShortcuts: (() => void) | null = null;
 
@@ -1078,6 +1090,7 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <button v-if="isDesktop" class="top-icon" aria-label="Keyboard shortcuts" :title="helpTitle" @click="showHelp = true">?</button>
       <button class="top-icon" aria-label="Settings" :title="settingsTitle" @click="showSettings = true">⚙</button>
     </header>
 

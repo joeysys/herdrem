@@ -97,6 +97,28 @@ describe('TermView shell shortcuts', () => {
     expect((input.element as HTMLInputElement).value).toBe('git status')
   })
 
+  it('walks older shell history and ArrowDown restores the draft', async () => {
+    const w = mountShell()
+    const where = { kind: 'sh' as const, paneId: 'p1', host: 'local', workspaceId: 'default' }
+    useCmdHistoryStore().record('first', where)
+    useCmdHistoryStore().record('second', where)
+    const input = w.get('input[aria-label="Command input"]')
+    await input.trigger('focus')
+    await input.setValue('draft')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    await nextTick()
+    expect((input.element as HTMLInputElement).value).toBe('second')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    await nextTick()
+    expect((input.element as HTMLInputElement).value).toBe('first')
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    await nextTick()
+    expect((input.element as HTMLInputElement).value).toBe('second')
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    await nextTick()
+    expect((input.element as HTMLInputElement).value).toBe('draft')
+  })
+
   it('does not send Ctrl+L from a browser tab', async () => {
     const w = mountShell()
     const input = w.get('input[aria-label="Command input"]').element as HTMLInputElement

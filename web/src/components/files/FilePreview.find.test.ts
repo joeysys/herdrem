@@ -42,15 +42,21 @@ async function search(w: VueWrapper, q: string) {
 
 const marks = (w: VueWrapper) => w.findAll('mark.term-hit')
 
+const setStandalone = (v: boolean) => (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(v)
+
+// Ctrl/⌘+F is the app's find only in the installed window; a browser tab
+// keeps the browser's own find (see the last test).
 beforeEach(() => {
   vi.useFakeTimers()
   setActivePinia(createPinia())
+  setStandalone(true)
 })
 
 afterEach(() => {
   wrapper?.unmount()
   wrapper = null
   vi.useRealTimers()
+  setStandalone(false)
 })
 
 describe('FilePreview find', () => {
@@ -182,7 +188,7 @@ describe('FilePreview find', () => {
     expect(marks(w)).toHaveLength(0)
   })
 
-  it('Ctrl+F opens the find bar instead of the browser find', async () => {
+  it('Ctrl+F opens the find bar instead of the browser find (installed window)', async () => {
     const w = open('/workspace/a.txt', 'hello\n')
     const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
     document.dispatchEvent(ev)
@@ -217,5 +223,16 @@ describe('FilePreview find', () => {
     const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
     document.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(false)
+  })
+
+  it('leaves Ctrl+F to the browser find in a normal tab', async () => {
+    setStandalone(false)
+    const w = open('/workspace/a.txt', 'hello\n')
+    const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, cancelable: true, bubbles: true })
+    document.dispatchEvent(ev)
+    await flush()
+    expect(ev.defaultPrevented).toBe(false)
+    expect(w.find('.find-bar').exists()).toBe(false)
+    expect(w.get('[aria-label="Search file"]').attributes('title')).toBe('Search file')
   })
 })

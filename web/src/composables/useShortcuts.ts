@@ -25,9 +25,11 @@ export interface ShortcutDef {
   /**
    * blocked: not bound in a browser tab (the browser keeps the key).
    * mac-blocked: same, but only on Mac.
+   * linux-blocked: same, but only on Linux / ChromeOS, where Firefox and
+   * Chrome use Alt+1…9 to pick a tab.
    * The entry stays in the help panel with blockedNote.
    */
-  browserTab?: 'blocked' | 'mac-blocked'
+  browserTab?: 'blocked' | 'mac-blocked' | 'linux-blocked'
   blockedNote?: string
   /** shown in help, never dispatched (the component already handles the key) */
   helpOnly?: boolean
@@ -83,6 +85,13 @@ export function isMacPlatform(): boolean {
   return /Mac|iPhone|iPad|iPod/.test(p) || /Mac OS X/.test(ua)
 }
 
+export function isLinuxPlatform(): boolean {
+  if (typeof navigator === 'undefined' || isMacPlatform()) return false
+  const p = navigator.platform || ''
+  const ua = navigator.userAgent || ''
+  return /Linux|X11|CrOS/.test(p) || /Linux|X11|CrOS/.test(ua)
+}
+
 export function register(def: ShortcutDef): () => void {
   bindings.set(def.id, def)
   shortcutVersion.value++
@@ -128,6 +137,9 @@ export function shortcutBlock(def: ShortcutDef): string | null {
   }
   if (def.browserTab === 'mac-blocked' && isMacPlatform() && !isStandalone()) {
     return def.blockedNote || 'A normal browser tab on Mac will not let this key through'
+  }
+  if (def.browserTab === 'linux-blocked' && isLinuxPlatform() && !isStandalone()) {
+    return def.blockedNote || 'In a normal browser tab on Linux this key belongs to the browser'
   }
   if (isBareCharacter(def) && hasSoftKeyboard()) return 'Bare character keys are disabled on touch screens'
   return null
@@ -182,7 +194,7 @@ export function listShortcuts(): ShortcutView[] {
   }))
 }
 
-function isTextInput(el: EventTarget | null): boolean {
+export function isTextInput(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   if (el instanceof HTMLTextAreaElement) return !el.readOnly
   if (el instanceof HTMLInputElement) {

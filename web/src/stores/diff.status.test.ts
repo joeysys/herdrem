@@ -190,6 +190,34 @@ describe('diff store — git status', () => {
     expect(sent()).toHaveLength(0) // settled: polling stops
   })
 
+  it('stops polling when its own commit result never arrives', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.commit({ message: 'fix it' })
+
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'older', ok: true, hash: 'old' },
+    }))
+    expect(d.committing).toBe(true)
+
+    // still running: a slow commit is not abandoned
+    vi.advanceTimersByTime(20_000)
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      commit_running: true,
+      last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'older', ok: true, hash: 'old' },
+    }))
+    expect(d.committing).toBe(true)
+
+    vi.advanceTimersByTime(15_000)
+    d.setStatusResult(statusMsg(last().req_id as string)) // relay restart: no last_commit
+    expect(d.committing).toBe(false)
+    expect(d.commitOutcome).toMatchObject({ ok: false, error: expect.stringContaining('not confirmed') })
+
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(10_000)
+    expect(sent()).toHaveLength(0)
+  })
+
   it('refuses a message whose encoded frame would exceed the relay read limit', () => {
     const d = useDiffStore()
     d.openDiff('/repo', 'local', 'status')

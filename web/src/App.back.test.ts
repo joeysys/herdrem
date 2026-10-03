@@ -516,4 +516,33 @@ describe('desktop file panel placement', () => {
     layout.setPreference('auto');
     await flush();
   });
+
+  it.each([true, false])('closes the file panel with the pane on ‹ (docked: %s)', async (docked) => {
+    setActivePinia(createPinia());
+    const wrapper = mount(App);
+    await flush();
+    await enterTerminal(wrapper);
+
+    const layout = useLayoutMode();
+    layout.setPreference('desktop');
+    const files = useFilesStore();
+    files.browserDocked = docked;
+    files.openBrowser('/root/proj', 'local');
+    files.openPath('/root/proj/a.txt', '/root/proj', 'local', null);
+    await flush();
+    expect(wrapper.find('.split-term').exists()).toBe(true);
+    expect(files.browserOpen).toBe(true);
+
+    await wrapper.get('.split-term button[aria-label="Back to agent list"]').trigger('click');
+    await flush();
+
+    expect(wrapper.find('.split-term').exists()).toBe(false);
+    expect(files.browserOpen).toBe(false);
+    expect(files.preview).toBeNull();
+    expect(wrapper.find('.fb-drawer').exists()).toBe(false);
+
+    wrapper.unmount();
+    layout.setPreference('auto');
+    await flush();
+  });
 });

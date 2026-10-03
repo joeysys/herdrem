@@ -67,6 +67,13 @@ export const useDiffStore = defineStore('diff', () => {
   let seenCommitReq = '';
   let commitPollTimer: ReturnType<typeof setTimeout> | null = null;
   const COMMIT_POLL_MS = 3000;
+  // Own commit whose result never shows up (relay restarted and dropped the
+  // in-memory last_commit, or another client took the slot). Statuses that
+  // still say the commit is running are exempt — a long git commit stays
+  // busy. 15s of "not running, and not our req id" is long enough to ignore a
+  // status taken before the relay registered the commit.
+  const COMMIT_RESULT_WAIT_MS = 15000;
+  let commitSentAt = 0;
 
   function newReqId(): string {
     return uid();
@@ -117,6 +124,7 @@ export const useDiffStore = defineStore('diff', () => {
     focusPath.value = '';
     statusReqId.value = '';
     commitReqId.value = '';
+    commitSentAt = 0;
     if (commitPollTimer) clearTimeout(commitPollTimer);
     commitPollTimer = null;
   }
@@ -305,6 +313,7 @@ export const useDiffStore = defineStore('diff', () => {
     }
     commitReqId.value = reqId;
     committing.value = true;
+    commitSentAt = Date.now();
     commitOutcome.value = null;
     const sent = ws.send(msg);
     if (!sent) {
@@ -337,8 +346,16 @@ export const useDiffStore = defineStore('diff', () => {
       // Our own commit. Its reply only reaches the connection that sent it,
       // so after a reconnect the relay's last_commit is the only copy. A
       // status without it (still running, or taken before the relay saw the
-      // commit) settles nothing.
-      if (!running && last?.req_id === commitReqId.value) showCommitResult(last);
+      // commit) settles nothing until COMMIT_RESULT_WAIT_MS has passed.
+      if (!running && last?.req_id === commitReqId.value) {
+        showCommitResult(last);
+        return;
+      }
+      if (!running && commitSentAt > 0 && Date.now() - commitSentAt >= COMMIT_RESULT_WAIT_MS) {
+        committing.value = false;
+        commitOutcome.value = { ok: false, error: 'commit result was not confirmed — check git status' };
+        return;
+      }
       return;
     }
     if (running) {

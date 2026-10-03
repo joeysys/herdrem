@@ -23,8 +23,9 @@ import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
-import { ensureShellShortcuts, isShortcutActive, register, shellActions, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
+import { ensureShellShortcuts, isShortcutActive, isTextInput, register, shellActions, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 import TodoPanel from '../todo/TodoPanel.vue'
+import TermIcon from './TermIcon.vue'
 import type { TodoBinding } from '../../api/types'
 
 const props = defineProps<{ paneId: string }>()
@@ -237,7 +238,10 @@ const activeSuggest = shellSuggest.active
 let recalling = false
 let histCursor = -1
 let histDraft = ''
-watch(shellText, () => { if (!recalling) histCursor = -1 })
+// flush sync: the default pre watcher runs after this turn, by which time
+// recallShellHistory has already cleared `recalling`, so every ArrowUp looked
+// like a user edit and snapped the cursor back to the newest entry.
+watch(shellText, () => { if (!recalling) histCursor = -1 }, { flush: 'sync' })
 
 function recallShellHistory(dir: 1 | -1): boolean {
   const list = history.entries.filter((e) => (e.k ?? 'sh') === 'sh').map((e) => e.c)
@@ -415,8 +419,8 @@ function bindTermShortcuts() {
     return true
   }
   const add = (def: Parameters<typeof register>[0]) => offTermShortcuts.push(register(def))
-  add({ id: 'term.find', label: 'Search output', scope: 'global', key: 'f', mod: true, when: termFindOk, run: () => openSearch() })
-  add({ id: 'term.history', label: 'Input history', scope: 'terminal', key: 'r', mod: true, when: () => termFindOk() && !isTextInput(document.activeElement), run: () => openHistory() })
+  add({ id: 'term.find', label: 'Search output', scope: 'global', key: 'f', mod: true, browserTab: 'blocked', blockedNote: 'In a normal browser tab, Ctrl/⌘+F is the browser find. Use the ⌕ search button', when: termFindOk, run: () => openSearch() })
+  add({ id: 'term.history', label: 'Input history', scope: 'terminal', key: 'r', mod: true, browserTab: 'blocked', blockedNote: 'In a normal browser tab, Ctrl/⌘+R reloads the page. Use the ⏱ history button', when: () => termFindOk() && !isTextInput(document.activeElement), run: () => openHistory() })
   add({ id: 'term.insert', label: 'Focus the input', scope: 'terminal', key: 'i', run: () => focusPrompt() })
   add({ id: 'term.slash', label: 'Focus the input and type /', scope: 'terminal', key: '/', run: () => insertSlash() })
   add({ id: 'term.files', label: 'File tree', scope: 'terminal', key: 'e', when: () => conn.hasFeature('files'), run: () => openFiles() })
@@ -433,13 +437,8 @@ function liveChord(id: string, name: string) {
 const fileTitle = computed(() => liveChord('term.files', 'Files'))
 const diffTitle = computed(() => liveChord('term.diff', 'Diff'))
 const todoTitle = computed(() => liveChord('term.todo', 'Todo'))
-
-function isTextInput(el: Element | null): boolean {
-  if (!el) return false
-  if (el instanceof HTMLTextAreaElement) return !el.readOnly
-  if (el instanceof HTMLInputElement) return !el.readOnly && !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'file'].includes(el.type)
-  return (el as HTMLElement).isContentEditable
-}
+const searchTitle = computed(() => liveChord('term.find', 'Search output'))
+const historyTitle = computed(() => liveChord('term.history', 'Input history'))
 
 // Auto-focus shell input when entering a shell pane or when pane data loads
 // after mount (agents snapshot may be delayed). Keyed on isShell, not pane:
@@ -617,55 +616,55 @@ onUnmounted(() => {
 
       <!-- Desktop: show all buttons inline -->
       <div class="head-actions desktop-only">
-        <button class="icon-btn" aria-label="Browse files" :title="fileTitle" @click.stop="openFiles">🗂</button>
-        <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" :title="diffTitle" @click.stop="openDiff">⎇</button>
-        <button v-if="conn.hasFeature('git-commit')" class="icon-btn" aria-label="Git status" title="Git status: stage and commit" @click.stop="openStatus">±</button>
+        <button class="icon-btn" aria-label="Browse files" :title="fileTitle" @click.stop="openFiles"><TermIcon name="files" /></button>
+        <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" :title="diffTitle" @click.stop="openDiff"><TermIcon name="diff" /></button>
+        <button v-if="conn.hasFeature('git-commit')" class="icon-btn" aria-label="Git status" title="Git status: stage and commit" @click.stop="openStatus"><TermIcon name="status" /></button>
         <button
           class="icon-btn"
           :class="{ active: hasTodo }"
           aria-label="Todo notes"
           :title="todoTitle"
           @click="showTodo = !showTodo"
-        >✎</button>
+        ><TermIcon name="todo" /></button>
         <button
           class="icon-btn"
           :class="{ active: searchOpen }"
           aria-label="Search output"
-          title="Search output (Ctrl+F)"
+          :title="searchTitle"
           :aria-pressed="searchOpen"
           @click="searchOpen ? closeSearch() : openSearch()"
-        >⌕</button>
+        ><TermIcon name="search" /></button>
         <button
           class="icon-btn"
           :class="{ active: showHistory }"
           aria-label="Input history"
-          title="Input history (Ctrl+R)"
+          :title="historyTitle"
           :aria-pressed="showHistory"
           @click="showHistory ? closeHistory() : openHistory()"
-        >⏱</button>
+        ><TermIcon name="history" /></button>
         <button
           class="icon-btn wide-only"
           :class="{ active: term.fullscreen }"
           aria-label="Toggle fullscreen"
           title="Fullscreen"
           @click="term.toggleFullscreen()"
-        >⛶</button>
-        <button class="icon-btn" aria-label="Refresh output" title="Refresh" @click="term.clearPaneCache(props.paneId)">⟳</button>
+        ><TermIcon name="fullscreen" /></button>
+        <button class="icon-btn" aria-label="Refresh output" title="Refresh" @click="term.clearPaneCache(props.paneId)"><TermIcon name="refresh" /></button>
       </div>
 
       <!-- Mobile: collapse into dropdown menu -->
       <div class="head-actions mobile-only">
-        <button class="icon-btn" :class="{ active: showMenu }" aria-label="More actions" title="More" @click.stop="showMenu = !showMenu">⋮</button>
+        <button class="icon-btn" :class="{ active: showMenu }" aria-label="More actions" title="More" @click.stop="showMenu = !showMenu"><TermIcon name="more" /></button>
         <div v-if="showMenu" class="head-menu" role="menu" aria-label="Terminal actions" @click.stop>
-          <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false">🗂 Files</button>
-          <button v-if="conn.hasFeature('git-diff')" type="button" role="menuitem" aria-label="Git diff" @click.stop="openDiff(); showMenu = false">⎇ Diff</button>
-          <button v-if="conn.hasFeature('git-commit')" type="button" role="menuitem" aria-label="Git status" @click.stop="openStatus(); showMenu = false">± Status</button>
-          <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false">✎ Todo</button>
-          <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false">⌕ Search</button>
-          <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false">⏱ History</button>
-          <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false">⤢ Zoom</button>
-          <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false">⟳ Refresh</button>
-          <button type="button" role="menuitem" aria-label="Open settings" @click="emit('openSettings'); showMenu = false">⚙ Settings</button>
+          <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false"><TermIcon name="files" />Files</button>
+          <button v-if="conn.hasFeature('git-diff')" type="button" role="menuitem" aria-label="Git diff" @click.stop="openDiff(); showMenu = false"><TermIcon name="diff" />Diff</button>
+          <button v-if="conn.hasFeature('git-commit')" type="button" role="menuitem" aria-label="Git status" @click.stop="openStatus(); showMenu = false"><TermIcon name="status" />Status</button>
+          <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false"><TermIcon name="todo" />Todo</button>
+          <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false"><TermIcon name="search" />Search</button>
+          <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false"><TermIcon name="history" />History</button>
+          <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false"><TermIcon name="zoom" />Zoom</button>
+          <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false"><TermIcon name="refresh" />Refresh</button>
+          <button type="button" role="menuitem" aria-label="Open settings" @click="emit('openSettings'); showMenu = false"><TermIcon name="settings" />Settings</button>
         </div>
       </div>
     </header>

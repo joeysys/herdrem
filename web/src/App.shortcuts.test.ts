@@ -4,6 +4,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import App from './App.vue'
 import { useAgentsStore, useConnectionStore } from './stores/connection'
+import { isShortcutActive } from './composables/useShortcuts'
+import { useLayoutMode } from './composables/useLayoutMode'
 import { ws } from './api/ws'
 
 vi.mock('./api/ws', () => ({
@@ -17,7 +19,7 @@ vi.mock('./api/ws', () => ({
   },
 }))
 
-const flags = window as unknown as { __setCoarsePointer: (v: boolean) => void }
+const flags = window as unknown as { __setCoarsePointer: (v: boolean) => void; __setStandalone: (v: boolean) => void }
 
 let wrapper: VueWrapper | null = null
 
@@ -38,10 +40,14 @@ beforeEach(() => {
   vi.mocked(ws.send).mockClear()
 })
 
+const platform = Object.getOwnPropertyDescriptor(navigator, 'platform')
+
 afterEach(() => {
   wrapper?.unmount()
   wrapper = null
   flags.__setCoarsePointer(false)
+  flags.__setStandalone(false)
+  if (platform) Object.defineProperty(navigator, 'platform', platform)
 })
 
 async function seed() {
@@ -146,5 +152,32 @@ describe('desktop shortcuts on the list', () => {
     key({ key: 'Escape' })
     await flush()
     expect(w.find('#shortcut-help-title').exists()).toBe(false)
+  })
+
+  it('opens the shortcut help from the header button on desktop only', async () => {
+    const layout = useLayoutMode()
+    layout.setPreference('desktop')
+    try {
+      const w = await seed()
+      await w.get('header [aria-label="Keyboard shortcuts"]').trigger('click')
+      await flush()
+      expect(w.get('#shortcut-help-title').text()).toBe('Shortcuts')
+      await w.get('[aria-label="Close shortcuts"]').trigger('click')
+      await flush()
+      layout.setPreference('mobile')
+      await flush()
+      expect(w.find('header [aria-label="Keyboard shortcuts"]').exists()).toBe(false)
+    } finally {
+      layout.setPreference('auto')
+    }
+  })
+
+  it('marks ⌘⇧[ / ] unavailable in a Mac browser tab', async () => {
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
+    await seed()
+    expect(isShortcutActive('nav.prev.mac')).toBe(false)
+    expect(isShortcutActive('nav.next.mac')).toBe(false)
+    flags.__setStandalone(true)
+    expect(isShortcutActive('nav.next.mac')).toBe(true)
   })
 })

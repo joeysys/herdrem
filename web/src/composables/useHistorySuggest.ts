@@ -1,5 +1,6 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { useCmdHistoryStore } from '../stores/cmdHistory'
+import { isStandalone } from './useHistoryTrap'
 import type { HistoryKind, Where } from '../utils/cmdHistory'
 
 export interface HistorySuggestOptions {
@@ -18,8 +19,8 @@ export interface HistorySuggestOptions {
 
 /**
  * Inline history suggestions + keyboard handling shared by the shell prompt
- * and the agent input. Ctrl/Cmd+R opens the history panel (instead of
- * reloading the page); while suggestions are visible Tab / → accept, ↑ ↓
+ * and the agent input. In the installed window Ctrl/Cmd+R opens the history
+ * panel (a browser tab keeps it as reload); while suggestions are visible Tab / → accept, ↑ ↓
  * choose and Esc dismisses. With no suggestions every key behaves normally.
  */
 export function useHistorySuggest(o: HistorySuggestOptions) {
@@ -35,7 +36,9 @@ export function useHistorySuggest(o: HistorySuggestOptions) {
 
   function onKeydown(e: KeyboardEvent) {
     if (e.isComposing) return
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'r') {
+    // In a browser tab Ctrl/⌘+R stays the browser's reload (the ⏱ key opens
+    // history there); only the installed window takes it, like the shell chords.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'r' && isStandalone()) {
       e.preventDefault()
       o.openHistory()
       return

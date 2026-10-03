@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import TermInput from './TermInput.vue'
@@ -26,10 +26,16 @@ const blockedPane = {
   option_labels: ['approve', 'deny'],
 }
 
+const setStandalone = (v: boolean) => (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(v)
+
 beforeEach(() => {
   safeStorage.removeItem('herdrem_cmd_history')
   safeStorage.removeItem('herdrem_history_agents')
   setActivePinia(createPinia())
+})
+
+afterEach(() => {
+  setStandalone(false)
 })
 
 describe('TermInput', () => {
@@ -216,7 +222,8 @@ describe('TermInput prompt history', () => {
     expect(w.get('button.send-btn').attributes('aria-label')).toBe('Fill command into terminal')
   })
 
-  it('emits history from the ⏱ key and from Ctrl+R (which no longer reloads the page)', async () => {
+  it('emits history from the ⏱ key and from Ctrl+R in the installed window', async () => {
+    setStandalone(true)
     setup()
     const w = mount(TermInput, { props: { pane: hpane } })
     await w.get('[aria-label="Input history"]').trigger('click')
@@ -224,6 +231,17 @@ describe('TermInput prompt history', () => {
     w.get('input.cmd').element.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(true)
     expect(w.emitted('history')).toHaveLength(2)
+    expect(w.get('[aria-label="Input history"]').attributes('title')).toBe('Input history (Ctrl+R)')
+  })
+
+  it('leaves Ctrl+R to the browser reload in a normal tab', async () => {
+    setup()
+    const w = mount(TermInput, { props: { pane: hpane } })
+    const ev = new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true, bubbles: true })
+    w.get('input.cmd').element.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false)
+    expect(w.emitted('history')).toBeUndefined()
+    expect(w.get('[aria-label="Input history"]').attributes('title')).toBe('Input history')
   })
 
   it('a replace fill swaps the whole input (history pick)', async () => {

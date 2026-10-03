@@ -10,7 +10,7 @@ import { highlight, langForPath } from '../../utils/highlight'
 import { relayFileUrl, relayHttpBase } from '../../utils/relay'
 import { applyHighlights, clearHighlights, matchesQuery, setActiveGroup, MAX_HITS } from '../../utils/domHighlight'
 import FindBar from '../common/FindBar.vue'
-import { addOverlaySource, register } from '../../composables/useShortcuts'
+import { addOverlaySource, isShortcutActive, register, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 
 const files = useFilesStore()
 const conn = useConnectionStore()
@@ -103,6 +103,11 @@ async function copyContent() {
   }, 2000)
 }
 
+const findTitle = computed(() => {
+  void shortcutVersion.value
+  return isShortcutActive('file.find') ? `Search file (${shortcutChord('file.find')})` : 'Search file'
+})
+
 let offFind: (() => void) | null = null
 let offOverlay: (() => void) | null = null
 onBeforeUnmount(() => {
@@ -121,6 +126,8 @@ onMounted(() => {
     scope: 'overlay',
     key: 'f',
     mod: true,
+    browserTab: 'blocked',
+    blockedNote: 'In a normal browser tab, Ctrl/⌘+F is the browser find. Use the search button',
     when: () => {
       if (!preview.value || !searchable.value) return false
       const active = document.activeElement
@@ -531,7 +538,7 @@ function fmtSize(bytes: number): string {
         class="fp-btn"
         :class="{ active: findOpen }"
         aria-label="Search file"
-        title="Search file (Ctrl+F)"
+        :title="findTitle"
         :aria-pressed="findOpen"
         @click="findOpen ? closeFind() : openFind()"
       >⌕</button>
