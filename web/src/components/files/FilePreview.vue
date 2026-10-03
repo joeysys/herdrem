@@ -10,6 +10,7 @@ import { highlight, langForPath } from '../../utils/highlight'
 import { relayFileUrl, relayHttpBase } from '../../utils/relay'
 import { applyHighlights, clearHighlights, matchesQuery, setActiveGroup, MAX_HITS } from '../../utils/domHighlight'
 import FindBar from '../common/FindBar.vue'
+import { addOverlaySource, register } from '../../composables/useShortcuts'
 
 const files = useFilesStore()
 const conn = useConnectionStore()
@@ -102,12 +103,32 @@ async function copyContent() {
   }, 2000)
 }
 
+let offFind: (() => void) | null = null
+let offOverlay: (() => void) | null = null
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer)
   if (findDebounce) clearTimeout(findDebounce)
-  document.removeEventListener('keydown', onGlobalKeydown)
+  offFind?.()
+  offFind = null
+  offOverlay?.()
+  offOverlay = null
 })
-onMounted(() => document.addEventListener('keydown', onGlobalKeydown))
+onMounted(() => {
+  offOverlay = addOverlaySource(() => !!preview.value)
+  offFind = register({
+    id: 'file.find',
+    label: 'Search file',
+    scope: 'overlay',
+    key: 'f',
+    mod: true,
+    when: () => {
+      if (!preview.value || !searchable.value) return false
+      const active = document.activeElement
+      return !active || active === document.body || !!rootEl.value?.contains(active)
+    },
+    run: () => openFind(),
+  })
+})
 
 const fileName = computed(() => {
   const full = preview.value?.path || ''
@@ -465,16 +486,7 @@ watch(htmlRendered, (v) => { if (v && findOpen.value) closeFind(false) })
 // A different file starts a fresh search.
 watch(() => preview.value?.path, () => closeFind(false))
 
-// Ctrl/Cmd+F opens this find instead of the browser's, but only while a
-// searchable preview is up and focus is inside it (or nowhere).
-function onGlobalKeydown(e: KeyboardEvent) {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return
-  if (!preview.value || !searchable.value) return
-  const active = document.activeElement
-  if (active && active !== document.body && !rootEl.value?.contains(active)) return
-  e.preventDefault()
-  openFind()
-}
+
 
 function fmtSize(bytes: number): string {
   if (!bytes) return ''

@@ -27,6 +27,15 @@ import { useRelayConnection } from './composables/useRelayConnection';
 import { useNotify } from './composables/useNotify';
 import { useHaptic } from './composables/useHaptic';
 import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/useHistoryTrap';
+import {
+  register,
+  setShortcutContext,
+  ensureShellShortcuts,
+  ensureChordHelp,
+  shortcutVersion,
+  shortcutChord,
+  isShortcutActive,
+} from './composables/useShortcuts';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
 import { canCookieReconnect, relayHostLabel, relayHttpBase, relayNeedsToken } from './utils/relay';
@@ -42,6 +51,7 @@ import FilePreview from './components/files/FilePreview.vue';
 import DiffPreview from './components/files/DiffPreview.vue';
 import TunnelPanel from './components/tunnel/TunnelPanel.vue';
 import TodoManager from './components/todo/TodoManager.vue';
+import ShortcutHelp from './components/common/ShortcutHelp.vue';
 
 const conn = useConnectionStore();
 const agents = useAgentsStore();
@@ -70,6 +80,7 @@ const activePaneId = ref('');
 const viewMode = ref<'list' | 'spaces'>((safeStorage.getItem('herdrem_viewmode') as 'list' | 'spaces') || 'list');
 const activeSpaceId = ref<string | null>(null);
 const showSettings = ref(false);
+const showHelp = ref(false);
 const showTodoManager = ref(false);
 // When the todo manager is opened while inside a space, scope it to that
 // workspace by default (the workspace select doubles as the list filter).
@@ -168,6 +179,10 @@ function currentStateName(): string {
 
 /** closes a topmost overlay (non-view) layer; returns true if something closed */
 function closeTopLayer(): boolean {
+  if (showHelp.value) {
+    showHelp.value = false;
+    return true;
+  }
   if (showTodoManager.value) {
     showTodoManager.value = false;
     return true;
@@ -275,6 +290,7 @@ function onPopState(ev: PopStateEvent) {
 }
 
 onMounted(() => {
+  unbindShortcuts = bindShortcuts();
   relativeTimeTimer = setInterval(() => {
     now.value = Math.floor(Date.now() / 1000);
   }, 60_000);
@@ -301,6 +317,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  unbindShortcuts?.();
+  unbindShortcuts = null;
   if (relativeTimeTimer) clearInterval(relativeTimeTimer);
   window.removeEventListener('popstate', onPopState);
 });
@@ -438,6 +456,159 @@ function onSpaceBack() {
 function onSpaceNewTab(workspaceId: string, host?: string) {
   createPane('tab', { workspaceId, host });
 }
+
+function overlayOpen(): boolean {
+  return showHelp.value || showTodoManager.value || showSettings.value || showNewPane.value
+    || ctxOpen.value || showRelaySwitch.value || diff.open || !!files.preview || files.browserOpen;
+}
+
+function isShown(el: HTMLElement): boolean {
+  if (!el.isConnected) return false;
+  // A real layout engine reports painted boxes. jsdom never does, so a
+  // connected element that no ancestor hides still counts.
+  if (el.getClientRects().length > 0) return true;
+  for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+    if (getComputedStyle(node).display === 'none') return false;
+  }
+  return true;
+}
+
+function visibleCards(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('.agent-card, .g-card')]
+    .filter((el) => el.dataset.paneId && isShown(el));
+}
+
+/** Visual order when the list is on screen; otherwise the filtered agent list. */
+function paneIdsInOrder(): string[] {
+  const cards = visibleCards();
+  if (cards.length) return cards.map((el) => el.dataset.paneId || '').filter(Boolean);
+  return agents.filtered.map((a) => a.pane_id);
+}
+
+function moveCard(delta: number) {
+  const cards = visibleCards();
+  if (!cards.length) return;
+  const current = document.activeElement?.closest('.agent-card, .g-card');
+  const at = current ? cards.indexOf(current as HTMLElement) : -1;
+  const next = at < 0 ? (delta > 0 ? cards[0] : cards[cards.length - 1]) : cards[at + delta];
+  if (!next) return;
+  next.focus();
+  next.scrollIntoView({ block: 'nearest' });
+}
+
+function focusNextBlocked() {
+  const cards = visibleCards().filter((el) => el.classList.contains('blocked'));
+  if (!cards.length) return;
+  const current = document.activeElement?.closest('.agent-card, .g-card');
+  const at = current ? cards.indexOf(current as HTMLElement) : -1;
+  const next = cards[(at + 1) % cards.length];
+  next.focus();
+  next.scrollIntoView({ block: 'nearest' });
+}
+
+function focusedBlockedId(): string {
+  const el = document.activeElement?.closest('.agent-card, .g-card') as HTMLElement | null;
+  if (!el || !el.classList.contains('blocked')) return '';
+  return el.dataset.paneId || '';
+}
+
+function jumpPane(n: number) {
+  const id = paneIdsInOrder()[n - 1];
+  if (id) openTerminal(id);
+}
+
+function stepPane(delta: number) {
+  const ids = paneIdsInOrder();
+  if (!ids.length) return;
+  const current = activePaneId.value || (document.activeElement?.closest('.agent-card, .g-card') as HTMLElement | null)?.dataset.paneId || '';
+  let at = ids.indexOf(current);
+  if (at < 0) at = delta > 0 ? -1 : 0;
+  const id = ids[(at + delta + ids.length) % ids.length];
+  if (id) openTerminal(id);
+}
+
+function onShortcutEsc() {
+  if (closeTopLayer()) return;
+  if (view.value === 'term') {
+    closeTerminal();
+    return;
+  }
+  if (activeSpaceId.value) activeSpaceId.value = null;
+}
+
+function bindShortcuts() {
+  setShortcutContext({
+    overlay: overlayOpen,
+    terminal: () => view.value === 'term',
+  });
+  ensureShellShortcuts();
+  ensureChordHelp();
+  const off: Array<() => void> = [];
+  const add = (def: Parameters<typeof register>[0]) => off.push(register(def));
+  add({ id: 'help', label: 'Keyboard shortcuts', scope: 'global', key: '?', when: () => !showHelp.value, run: () => { showHelp.value = true; } });
+  add({ id: 'nav.back', label: 'Close overlay or go back', scope: 'global', key: 'Escape', run: () => onShortcutEsc() });
+  add({ id: 'nav.down', label: 'Next card', scope: 'global', key: 'j', when: () => visibleCards().length > 0, run: () => moveCard(1) });
+  add({ id: 'nav.up', label: 'Previous card', scope: 'global', key: 'k', when: () => visibleCards().length > 0, run: () => moveCard(-1) });
+  add({ id: 'nav.down.arrow', label: 'Next card', scope: 'global', key: 'ArrowDown', when: () => visibleCards().length > 0, run: () => moveCard(1) });
+  add({ id: 'nav.up.arrow', label: 'Previous card', scope: 'global', key: 'ArrowUp', when: () => visibleCards().length > 0, run: () => moveCard(-1) });
+  add({ id: 'nav.blocked', label: 'Next blocked', scope: 'global', key: 'b', when: () => visibleCards().some((el) => el.classList.contains('blocked')), run: () => focusNextBlocked() });
+  add({ id: 'nav.approve', label: 'Approve focused card', scope: 'global', key: 'y', when: () => !!focusedBlockedId(), run: () => quickApprove(focusedBlockedId(), 'y') });
+  add({ id: 'nav.deny', label: 'Deny focused card', scope: 'global', key: 'n', when: () => !!focusedBlockedId(), run: () => quickApprove(focusedBlockedId(), 'n') });
+  add({ id: 'nav.prev', label: 'Previous pane', scope: 'global', code: 'BracketLeft', alt: true, run: () => stepPane(-1) });
+  add({ id: 'nav.next', label: 'Next pane', scope: 'global', code: 'BracketRight', alt: true, run: () => stepPane(1) });
+  add({ id: 'nav.prev.mac', label: 'Previous pane', scope: 'global', code: 'BracketLeft', meta: true, shift: true, run: () => stepPane(-1) });
+  add({ id: 'nav.next.mac', label: 'Next pane', scope: 'global', code: 'BracketRight', meta: true, shift: true, run: () => stepPane(1) });
+  for (let n = 1; n <= 9; n++) {
+    add({
+      id: `nav.jump.${n}`,
+      label: `Pane ${n}`,
+      scope: 'global',
+      code: `Digit${n}`,
+      alt: true,
+      run: () => jumpPane(n),
+    });
+  }
+  add({
+    id: 'nav.view',
+    label: 'Toggle list / spaces',
+    scope: 'global',
+    key: 's',
+    run: () => setViewMode(viewMode.value === 'list' ? 'spaces' : 'list'),
+  });
+  add({
+    id: 'app.settings',
+    label: 'Open settings',
+    scope: 'global',
+    key: ',',
+    mod: true,
+    browserTab: 'mac-blocked',
+    blockedNote: 'In a normal browser tab on Mac, ⌘+, opens browser settings. Use the settings button in the top bar',
+    run: () => { showSettings.value = true; },
+  });
+  add({
+    id: 'input.blur',
+    label: 'Blur the input',
+    scope: 'input',
+    key: 'Escape',
+    run: (e) => {
+      const t = e.target;
+      if (t instanceof HTMLElement) t.blur();
+    },
+  });
+  return () => off.forEach((fn) => fn());
+}
+
+function liveChord(id: string, name: string): string {
+  void shortcutVersion.value;
+  if (!isShortcutActive(id)) return name;
+  const chord = shortcutChord(id);
+  return chord ? `${name} (${chord})` : name;
+}
+const approveTitle = computed(() => liveChord('nav.approve', 'Approve'));
+const denyTitle = computed(() => liveChord('nav.deny', 'Deny'));
+const settingsTitle = computed(() => liveChord('app.settings', 'Settings'));
+
+let unbindShortcuts: (() => void) | null = null;
 
 function quickApprove(paneId: string, answer: string) {
   haptic(18);
@@ -723,6 +894,7 @@ onMounted(() => {
  *  (mirrors closeTopLayer + term + space). */
 function backDepth(): number {
   const layers = [
+    showHelp.value,
     showTodoManager.value,
     showSettings.value,
     showNewPane.value,
@@ -906,7 +1078,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <button class="top-icon" aria-label="Settings" title="Settings" @click="showSettings = true">⚙</button>
+      <button class="top-icon" aria-label="Settings" :title="settingsTitle" @click="showSettings = true">⚙</button>
     </header>
 
     <main
@@ -1014,6 +1186,7 @@ onUnmounted(() => {
                 ]"
                 role="button"
                 tabindex="0"
+                :data-pane-id="a.pane_id"
                 :aria-current="splitMode && a.pane_id === activePaneId ? 'true' : undefined"
                 :aria-label="`Open terminal for ${a.project || a.agent || a.pane_id}`"
                 @click="openTerminal(a.pane_id)"
@@ -1049,12 +1222,12 @@ onUnmounted(() => {
                       <button
                         class="qa-btn yes"
                         aria-label="Approve"
-                        title="Approve (y)"
+                        :title="approveTitle"
                         @click="quickApprove(a.pane_id, 'y')"
                       >
                         y
                       </button>
-                      <button class="qa-btn no" aria-label="Deny" title="Deny (n)" @click="quickApprove(a.pane_id, 'n')">
+                      <button class="qa-btn no" aria-label="Deny" :title="denyTitle" @click="quickApprove(a.pane_id, 'n')">
                         n
                       </button>
                     </template>
@@ -1129,6 +1302,7 @@ onUnmounted(() => {
     />
     <TunnelPanel v-if="tunnelsStore.showPanel" />
     <TodoManager v-if="showTodoManager" :initial-binding="todoScope" @close="showTodoManager = false" />
+    <ShortcutHelp v-if="showHelp" @close="showHelp = false" />
 
     <div class="toast-stack" aria-live="polite">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type" @click="notify.dismissToast(t.id)">

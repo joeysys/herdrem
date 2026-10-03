@@ -288,9 +288,6 @@ export const useDiffStore = defineStore('diff', () => {
       return;
     }
     const reqId = newReqId();
-    commitReqId.value = reqId;
-    committing.value = true;
-    commitOutcome.value = null;
     const msg: GitCommitReq = {
       type: 'git_commit',
       cwd: s.cwd,
@@ -298,11 +295,24 @@ export const useDiffStore = defineStore('diff', () => {
       req_id: reqId,
       ...(opts.useCommand ? { use_command: true } : { message: opts.message ?? '' }),
     };
+    // JSON escaping can double a message (quotes, backslashes, control
+    // characters), so the byte cap on the text alone does not keep the frame
+    // under the relay's read limit — and an oversized frame drops the whole
+    // connection. Check the frame, as sendStage does.
+    if (utf8Len(JSON.stringify(msg)) > MAX_MSG_BYTES) {
+      commitOutcome.value = { ok: false, error: 'commit message too long once encoded — shorten it' };
+      return;
+    }
+    commitReqId.value = reqId;
+    committing.value = true;
+    commitOutcome.value = null;
     const sent = ws.send(msg);
     if (!sent) {
       committing.value = false;
       commitOutcome.value = { ok: false, error: 'not connected' };
+      return;
     }
+    watchCommit();
   }
 
   function setStatusResult(msg: GitStatusResultMsg) {
@@ -323,19 +333,34 @@ export const useDiffStore = defineStore('diff', () => {
   // this panel reopened) keeps the button busy and is polled until it ends,
   // and its result is then taken from last_commit.
   function syncCommitState(running: boolean, last?: GitCommitResultMsg) {
-    if (commitReqId.value && committing.value) return; // our own reply is on its way
+    if (commitReqId.value && committing.value) {
+      // Our own commit. Its reply only reaches the connection that sent it,
+      // so after a reconnect the relay's last_commit is the only copy. A
+      // status without it (still running, or taken before the relay saw the
+      // commit) settles nothing.
+      if (!running && last?.req_id === commitReqId.value) showCommitResult(last);
+      return;
+    }
     if (running) {
       committing.value = true;
-      if (!commitPollTimer) {
-        commitPollTimer = setTimeout(() => {
-          commitPollTimer = null;
-          if (state.value?.mode === 'status') requestStatus();
-        }, COMMIT_POLL_MS);
-      }
+      watchCommit();
       return;
     }
     committing.value = false;
     if (last?.req_id && last.req_id !== seenCommitReq) showCommitResult(last);
+  }
+
+  // While a commit is busy, re-read the status every few seconds until it
+  // settles: nothing else asks for one after a reconnect. Skipped while a
+  // stage is in flight, whose reply is the status it is waiting for.
+  function watchCommit() {
+    if (commitPollTimer) return;
+    commitPollTimer = setTimeout(() => {
+      commitPollTimer = null;
+      if (!committing.value || !state.value) return;
+      if (state.value.mode === 'status' && !staging.value) requestStatus();
+      watchCommit();
+    }, COMMIT_POLL_MS);
   }
 
   function showCommitResult(msg: GitCommitResultMsg) {

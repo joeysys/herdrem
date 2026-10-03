@@ -59,7 +59,10 @@ export function useHistorySuggest(o: HistorySuggestOptions) {
         o.accept(chosen)
       }
     } else if (e.key === 'Escape') {
+      if (!list.length) return
       dismissedFor.value = o.text.value
+      e.preventDefault()
+      e.stopPropagation()
     }
   }
 

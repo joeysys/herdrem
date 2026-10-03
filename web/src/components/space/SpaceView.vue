@@ -169,6 +169,7 @@ function newTab() {
           :class="[bucket(p.status), { active: props.activePaneId && p.pane_id === props.activePaneId }]"
           role="button"
           tabindex="0"
+          :data-pane-id="p.pane_id"
           :aria-current="props.activePaneId && p.pane_id === props.activePaneId ? 'true' : undefined"
           :aria-label="`Open terminal for ${paneTitle(p)}`"
           @click="emit('openTerminal', p.pane_id)"

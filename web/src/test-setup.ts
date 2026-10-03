@@ -3,12 +3,24 @@
 // which toggles the '(display-mode: standalone)' media query.
 
 let standalone = false
-;(window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone = (v: boolean) => {
+let coarsePointer = false
+const testFlags = window as unknown as {
+  __setStandalone: (v: boolean) => void
+  __setCoarsePointer: (v: boolean) => void
+}
+testFlags.__setStandalone = (v: boolean) => {
   standalone = v
+}
+testFlags.__setCoarsePointer = (v: boolean) => {
+  coarsePointer = v
 }
 
 window.matchMedia = ((query: string) => ({
-  matches: query === '(display-mode: standalone)' ? standalone : false,
+  matches: query === '(display-mode: standalone)'
+    ? standalone
+    : query === '(pointer: coarse)'
+      ? coarsePointer
+      : false,
   media: query,
   onchange: null,
   addEventListener: () => {},

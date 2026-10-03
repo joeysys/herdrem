@@ -23,6 +23,7 @@ import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
+import { ensureShellShortcuts, isShortcutActive, register, shellActions, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 import TodoPanel from '../todo/TodoPanel.vue'
 import type { TodoBinding } from '../../api/types'
 
@@ -122,6 +123,7 @@ const shellText = ref('')
 const shellFocused = ref(false)
 const shellInputEl = ref<HTMLInputElement | null>(null)
 const shellKeysEl = ref<InstanceType<typeof ShellKeys> | null>(null)
+const termInputEl = ref<InstanceType<typeof TermInput> | null>(null)
 
 // Restore/persist shell input draft per pane
 watch(
@@ -231,7 +233,47 @@ const shellSuggest = useHistorySuggest({
 })
 const suggestions = shellSuggest.suggestions
 const activeSuggest = shellSuggest.active
-const onShellKeydown = shellSuggest.onKeydown
+
+let recalling = false
+let histCursor = -1
+let histDraft = ''
+watch(shellText, () => { if (!recalling) histCursor = -1 })
+
+function recallShellHistory(dir: 1 | -1): boolean {
+  const list = history.entries.filter((e) => (e.k ?? 'sh') === 'sh').map((e) => e.c)
+  if (!list.length) return false
+  if (histCursor < 0) histDraft = shellText.value
+  const next = histCursor + dir
+  if (next < -1 || next >= list.length) return false
+  histCursor = next
+  recalling = true
+  shellText.value = next < 0 ? histDraft : list[next]
+  recalling = false
+  nextTick(() => {
+    const el = activeShellInput()
+    const at = shellText.value.length
+    el?.setSelectionRange(at, at)
+  })
+  return true
+}
+
+function onShellKeydown(e: KeyboardEvent) {
+  if (e.isComposing) return
+  if (!suggestions.value.length && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    if (recallShellHistory(e.key === 'ArrowUp' ? 1 : -1)) {
+      e.preventDefault()
+      return
+    }
+  }
+  shellSuggest.onKeydown(e)
+}
+
+function inputHasSelection(e: KeyboardEvent): boolean {
+  const t = e.target
+  if ((t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) && t.selectionStart !== t.selectionEnd) return true
+  const sel = window.getSelection()
+  return !!sel && !sel.isCollapsed && sel.toString().length > 0
+}
 
 // --- output search ---
 // Searches every line the view retains. Opening it asks the relay once for a
@@ -321,15 +363,82 @@ function stepHit(delta: number) {
   ansiRef.value?.setActiveHit(hitIndex.value, true)
 }
 
-// Ctrl/Cmd+F opens the search instead of the browser's find, but only while
-// focus is on this view (or nowhere), so other panels keep their own find.
-function onGlobalKeydown(e: KeyboardEvent) {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return
-  if (files.preview) return // the file preview has its own find
+function focusPrompt() {
+  if (isShell.value) focusShellInput()
+  else termInputEl.value?.focusInput()
+}
+
+function insertSlash() {
+  if (isShell.value) {
+    const el = activeShellInput()
+    const value = shellText.value
+    const here = document.activeElement === el
+    const start = here ? (el?.selectionStart ?? value.length) : value.length
+    const end = here ? (el?.selectionEnd ?? start) : start
+    shellText.value = value.slice(0, start) + '/' + value.slice(end)
+    nextTick(() => {
+      const input = activeShellInput()
+      input?.focus()
+      const at = start + 1
+      input?.setSelectionRange(at, at)
+    })
+    return
+  }
+  termInputEl.value?.insertText('/')
+}
+
+function termFindOk(): boolean {
+  if (files.preview) return false
   const active = document.activeElement
-  if (active && active !== document.body && !rootEl.value?.contains(active)) return
-  e.preventDefault()
-  openSearch()
+  return !active || active === document.body || !!rootEl.value?.contains(active)
+}
+
+let offTermShortcuts: Array<() => void> = []
+
+function bindTermShortcuts() {
+  ensureShellShortcuts()
+  shellActions.active = () => isShell.value && (shellFocused.value || boxFocused.value)
+  shellActions.interrupt = (e) => {
+    if (inputHasSelection(e)) return false
+    term.sendKey('Ctrl+c')
+    shellText.value = ''
+    return true
+  }
+  shellActions.eof = (e) => {
+    if (inputHasSelection(e)) return false
+    term.sendKey('Ctrl+d')
+    return true
+  }
+  shellActions.clear = (e) => {
+    if (inputHasSelection(e)) return false
+    term.sendKey('Ctrl+l')
+    return true
+  }
+  const add = (def: Parameters<typeof register>[0]) => offTermShortcuts.push(register(def))
+  add({ id: 'term.find', label: 'Search output', scope: 'global', key: 'f', mod: true, when: termFindOk, run: () => openSearch() })
+  add({ id: 'term.history', label: 'Input history', scope: 'terminal', key: 'r', mod: true, when: () => termFindOk() && !isTextInput(document.activeElement), run: () => openHistory() })
+  add({ id: 'term.insert', label: 'Focus the input', scope: 'terminal', key: 'i', run: () => focusPrompt() })
+  add({ id: 'term.slash', label: 'Focus the input and type /', scope: 'terminal', key: '/', run: () => insertSlash() })
+  add({ id: 'term.files', label: 'File tree', scope: 'terminal', key: 'e', when: () => conn.hasFeature('files'), run: () => openFiles() })
+  add({ id: 'term.diff', label: 'Git Diff', scope: 'terminal', key: 'g', when: () => conn.hasFeature('git-diff'), run: () => openDiff() })
+  add({ id: 'term.todo', label: 'Todo', scope: 'terminal', key: 't', run: () => { showTodo.value = !showTodo.value } })
+}
+
+function liveChord(id: string, name: string) {
+  void shortcutVersion.value
+  if (!isShortcutActive(id)) return name
+  const chord = shortcutChord(id)
+  return chord ? `${name} (${chord})` : name
+}
+const fileTitle = computed(() => liveChord('term.files', 'Files'))
+const diffTitle = computed(() => liveChord('term.diff', 'Diff'))
+const todoTitle = computed(() => liveChord('term.todo', 'Todo'))
+
+function isTextInput(el: Element | null): boolean {
+  if (!el) return false
+  if (el instanceof HTMLTextAreaElement) return !el.readOnly
+  if (el instanceof HTMLInputElement) return !el.readOnly && !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'file'].includes(el.type)
+  return (el as HTMLElement).isContentEditable
 }
 
 // Auto-focus shell input when entering a shell pane or when pane data loads
@@ -444,7 +553,7 @@ onMounted(() => {
   if (scrollEl.value) zoom.bind(scrollEl.value)
   if (!document.hidden) startPoll()
   document.addEventListener('visibilitychange', onVisibility)
-  document.addEventListener('keydown', onGlobalKeydown)
+  bindTermShortcuts()
   // Focus shell input on mount if this is a shell pane
   if (isShell.value) nextTick(() => autoFocusShellInput())
   // Close mobile menu on outside click
@@ -474,7 +583,12 @@ onUnmounted(() => {
   if (scrollEl.value) zoom.unbind(scrollEl.value)
   document.removeEventListener('click', closeMenu)
   document.removeEventListener('visibilitychange', onVisibility)
-  document.removeEventListener('keydown', onGlobalKeydown)
+  offTermShortcuts.forEach((fn) => fn())
+  offTermShortcuts = []
+  shellActions.active = () => false
+  shellActions.interrupt = () => false
+  shellActions.eof = () => false
+  shellActions.clear = () => false
   if (searchDebounce) clearTimeout(searchDebounce)
   term.closePane()
 })
@@ -503,14 +617,14 @@ onUnmounted(() => {
 
       <!-- Desktop: show all buttons inline -->
       <div class="head-actions desktop-only">
-        <button class="icon-btn" aria-label="Browse files" title="Files" @click.stop="openFiles">🗂</button>
-        <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" title="Diff" @click.stop="openDiff">⎇</button>
+        <button class="icon-btn" aria-label="Browse files" :title="fileTitle" @click.stop="openFiles">🗂</button>
+        <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" :title="diffTitle" @click.stop="openDiff">⎇</button>
         <button v-if="conn.hasFeature('git-commit')" class="icon-btn" aria-label="Git status" title="Git status: stage and commit" @click.stop="openStatus">±</button>
         <button
           class="icon-btn"
           :class="{ active: hasTodo }"
           aria-label="Todo notes"
-          title="Todo"
+          :title="todoTitle"
           @click="showTodo = !showTodo"
         >✎</button>
         <button
@@ -621,7 +735,7 @@ onUnmounted(() => {
 
     <!-- Shell: special keys + quick chips; the ❯ toggle reveals an optional
          input box that shares the inline prompt's draft (v-model). -->
-    <TermInput v-if="!isShell" :pane="pane" @edit="emit('editCommands', 'skills')" @history="openHistory" />
+    <TermInput v-if="!isShell" ref="termInputEl" :pane="pane" @edit="emit('editCommands', 'skills')" @history="openHistory" />
     <ShellKeys
       v-else
       ref="shellKeysEl"

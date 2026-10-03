@@ -270,6 +270,25 @@ function onInput() {
 }
 
 // Ctrl+Enter: quick send — fill text + Enter in one shot (skips two-phase)
+function focusInput() {
+  cmdInputEl.value?.focus()
+}
+
+function insertText(ch: string) {
+  const el = cmdInputEl.value
+  const value = text.value
+  const start = el?.selectionStart ?? value.length
+  const end = el?.selectionEnd ?? start
+  text.value = value.slice(0, start) + ch + value.slice(end)
+  nextTick(() => {
+    el?.focus()
+    const at = start + ch.length
+    el?.setSelectionRange(at, at)
+  })
+}
+
+defineExpose({ focusInput, insertText })
+
 function quickSend() {
   haptic()
   const t = text.value
@@ -470,6 +489,7 @@ const suggest = useHistorySuggest({
         @focus="inputFocused = true"
         @blur="inputFocused = false"
         @keydown.ctrl.enter.prevent="quickSend"
+        @keydown.meta.enter.prevent="quickSend"
         @keydown="suggest.onKeydown"
       />
       <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed" :aria-label="isArmed ? 'Send command to pane' : 'Fill command into terminal'">

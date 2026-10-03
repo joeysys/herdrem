@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useDiffStore } from './diff'
 import { ws } from '../api/ws'
@@ -21,6 +21,11 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.mocked(ws.send).mockReset()
   vi.mocked(ws.send).mockReturnValue(true)
+  // a commit left busy keeps a status poll pending; fake timers drop it
+  vi.useFakeTimers()
+})
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('diff store — git status', () => {
@@ -140,26 +145,62 @@ describe('diff store — git status', () => {
   })
 
   it('picks up a commit still running after the panel reopened, and its result', () => {
-    vi.useFakeTimers()
-    try {
-      const d = useDiffStore()
-      d.openDiff('/repo', 'local', 'status')
-      d.setStatusResult(statusMsg(last().req_id as string, { commit_running: true }))
-      expect(d.committing).toBe(true) // the button stays busy
-      d.commit({ message: 'x' })
-      expect(sent().filter((m) => m.type === 'git_commit')).toHaveLength(0)
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.setStatusResult(statusMsg(last().req_id as string, { commit_running: true }))
+    expect(d.committing).toBe(true) // the button stays busy
+    d.commit({ message: 'x' })
+    expect(sent().filter((m) => m.type === 'git_commit')).toHaveLength(0)
 
-      vi.mocked(ws.send).mockClear()
-      vi.advanceTimersByTime(3000)
-      expect(sent().map((m) => m.type)).toEqual(['git_status']) // polled
-      d.setStatusResult(statusMsg(last().req_id as string, {
-        last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'other-page', ok: true, hash: 'def', subject: 'from a closed page', command: 'make commit' },
-      }))
-      expect(d.committing).toBe(false)
-      expect(d.commitOutcome).toMatchObject({ ok: true, hash: 'def', command: 'make commit' })
-    } finally {
-      vi.useRealTimers()
-    }
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(3000)
+    expect(sent().map((m) => m.type)).toEqual(['git_status']) // polled
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'other-page', ok: true, hash: 'def', subject: 'from a closed page', command: 'make commit' },
+    }))
+    expect(d.committing).toBe(false)
+    expect(d.commitOutcome).toMatchObject({ ok: true, hash: 'def', command: 'make commit' })
+  })
+
+  it('settles its own commit from the status when the reply was lost (reconnect)', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.commit({ message: 'fix it' })
+    const id = last().req_id as string
+
+    // a status taken before the relay registered the commit settles nothing
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: 'older', ok: true, hash: 'old' },
+    }))
+    expect(d.committing).toBe(true)
+    expect(d.commitOutcome).toBeNull()
+
+    // the reply went to the dropped connection; the poll still asks
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(3000)
+    expect(sent().map((m) => m.type)).toEqual(['git_status'])
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_commit: { type: 'git_commit_result', cwd: '/repo', req_id: id, ok: true, hash: 'abc', subject: 'fix it' },
+    }))
+    expect(d.committing).toBe(false)
+    expect(d.commitOutcome).toMatchObject({ ok: true, hash: 'abc' })
+
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(10_000)
+    expect(sent()).toHaveLength(0) // settled: polling stops
+  })
+
+  it('refuses a message whose encoded frame would exceed the relay read limit', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    vi.mocked(ws.send).mockClear()
+    d.commit({ message: '"'.repeat(16 * 1024 - 1) }) // under 16 KiB raw, ~32 KiB as JSON
+    expect(sent()).toHaveLength(0)
+    expect(d.committing).toBe(false)
+    expect(d.commitOutcome).toMatchObject({ ok: false, error: expect.stringContaining('too long') })
+
+    d.commit({ message: 'にほんご'.repeat(1000) }) // ~12 KiB of CJK: fine
+    expect(last()).toMatchObject({ type: 'git_commit' })
   })
 
   it('does not show a result this page already showed again after reopening', () => {

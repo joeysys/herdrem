@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useAgentsStore } from '../../stores/connection'
 import { useTodoStore, sameBinding } from '../../stores/todo'
 import type { Todo, TodoBinding } from '../../api/types'
@@ -99,18 +99,12 @@ function currentBindingKey(item: Todo): string {
     : ''
 }
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
-}
-
 onMounted(() => {
-  window.addEventListener('keydown', onKeydown)
   const key = props.initialBinding ? bindingKey(props.initialBinding) : ''
   if (key && workspaces.value.some((binding) => bindingKey(binding) === key)) {
     newBindingKey.value = key
   }
 })
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -122,7 +116,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </header>
 
       <form class="tm-add" @submit.prevent="add">
-        <textarea v-model="newText" rows="2" maxlength="65536" placeholder="Add a note or snippet…" aria-label="New todo" @keydown.ctrl.enter.prevent="ctrlEnterAdd"></textarea>
+        <textarea v-model="newText" rows="2" maxlength="65536" placeholder="Add a note or snippet…" aria-label="New todo" @keydown.ctrl.enter.prevent="ctrlEnterAdd" @keydown.meta.enter.prevent="ctrlEnterAdd"></textarea>
         <select v-model="newBindingKey" aria-label="Workspace scope: filters list, binds new todos" title="Filters the todo list and chooses where new todos go; All workspaces creates unbound todos">
           <option value="">All workspaces (new todos unbound)</option>
           <option v-for="binding in workspaces" :key="bindingKey(binding)" :value="bindingKey(binding)">{{ bindingLabel(binding) }}</option>

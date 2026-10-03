@@ -81,7 +81,8 @@ function fill(body: string) {
         rows="2"
         maxlength="65536"
         placeholder="add a note / snippet…"
-        @keydown.ctrl.enter="add"
+        @keydown.ctrl.enter.prevent="add"
+        @keydown.meta.enter.prevent="add"
       ></textarea>
       <button class="tp-add-btn" :disabled="!newText.trim()" @click="add">add</button>
     </div>
