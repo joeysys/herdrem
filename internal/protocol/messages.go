@@ -161,6 +161,9 @@ type SendText struct {
 	Text   string `json:"text"`
 	PaneID string `json:"pane_id"`
 	Submit bool   `json:"submit,omitempty"` // append \n if missing
+	// Paste sends text with line breaks as a bracketed paste, so they are
+	// inserted rather than taken as Enter (feature "send-text-paste").
+	Paste bool `json:"paste,omitempty"`
 }
 
 // SendKeys sends key sequences to a pane.

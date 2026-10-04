@@ -78,4 +78,27 @@ describe('ShellKeys', () => {
     expect(sendText).toHaveBeenCalledWith('ls -la', true)
     expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([''])
   })
+
+  it('the box is a wrapping textarea: Enter sends, pasted line breaks are dropped', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    localStorage.setItem('herdrem_shell_input', 'true')
+    const wrapper = mount(ShellKeys, {
+      props: {
+        pane: { pane_id: 'p1', status: 'idle' },
+        modelValue: '',
+        'onUpdate:modelValue': (v: string) => wrapper.setProps({ modelValue: v }),
+      },
+    })
+    const box = wrapper.get('textarea[aria-label="Command to send to shell"]')
+    expect(box.attributes('rows')).toBe('1')
+    await box.setValue('echo a\necho b')
+    expect(wrapper.props('modelValue')).toBe('echo aecho b')
+
+    const enter = new InputEvent('beforeinput', { inputType: 'insertLineBreak', cancelable: true })
+    box.element.dispatchEvent(enter)
+    expect(enter.defaultPrevented).toBe(true)
+    expect(sendText).toHaveBeenCalledWith('echo aecho b', true)
+  })
 })

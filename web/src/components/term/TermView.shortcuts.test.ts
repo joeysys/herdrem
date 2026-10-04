@@ -119,6 +119,35 @@ describe('TermView shell shortcuts', () => {
     expect((input.element as HTMLInputElement).value).toBe('draft')
   })
 
+  it('↑ in a multi-line shell box moves between lines before recalling history', async () => {
+    localStorage.setItem('herdrem_shell_input', 'true')
+    try {
+      useConnectionStore().setHello('test', ['send-text-paste'])
+      const w = mountShell()
+      useCmdHistoryStore().record('older command', { kind: 'sh' as const, paneId: 'p1', host: 'local', workspaceId: 'default' })
+      await nextTick()
+      const box = w.get('textarea[aria-label="Command to send to shell"]')
+      const el = box.element as HTMLTextAreaElement
+      await box.setValue('first\nsecond')
+      const up = () => {
+        const ev = new KeyboardEvent('keydown', { key: 'ArrowUp', cancelable: true, bubbles: true })
+        el.dispatchEvent(ev)
+        return ev
+      }
+
+      el.setSelectionRange(el.value.length, el.value.length) // on the second line
+      expect(up().defaultPrevented).toBe(false)
+      expect(el.value).toBe('first\nsecond')
+
+      el.setSelectionRange(2, 2) // first line: recall
+      expect(up().defaultPrevented).toBe(true)
+      await nextTick()
+      expect(el.value).toBe('older command')
+    } finally {
+      localStorage.removeItem('herdrem_shell_input')
+    }
+  })
+
   it('does not send Ctrl+L from a browser tab', async () => {
     const w = mountShell()
     const input = w.get('input[aria-label="Command input"]').element as HTMLInputElement
@@ -136,7 +165,7 @@ describe('TermView shell shortcuts', () => {
 describe('TermView terminal shortcuts', () => {
   it('i focuses the prompt and / inserts a slash without a second character', async () => {
     const w = mountAgent()
-    const input = w.get('input[aria-label="Command to send to pane"]').element as HTMLInputElement
+    const input = w.get('textarea[aria-label="Command to send to pane"]').element as HTMLInputElement
     const inserted = press(document, { key: 'i' })
     await nextTick()
     expect(inserted.defaultPrevented).toBe(true)

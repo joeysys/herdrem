@@ -2,8 +2,9 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
-import { agentTypeName, paneTitle } from '../../stores/connection'
+import { agentTypeName, paneTitle, useConnectionStore } from '../../stores/connection'
 import { useHistorySuggest } from '../../composables/useHistorySuggest'
+import { useWrappingInput } from '../../composables/useWrappingInput'
 import { isStandalone } from '../../composables/useHistoryTrap'
 import { isMacPlatform } from '../../composables/useShortcuts'
 import { whereOf } from '../../utils/cmdHistory'
@@ -29,7 +30,7 @@ const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
 
 const text = ref('')
-const cmdInputEl = ref<HTMLInputElement | null>(null)
+const cmdInputEl = ref<HTMLTextAreaElement | null>(null)
 const showArrows = ref(false)
 const arrowBtnEl = ref<HTMLElement | null>(null)
 const rootEl = ref<HTMLElement | null>(null)
@@ -266,7 +267,19 @@ function submit() {
   }
 }
 
+// Enter submits (like the form's own submit); long text wraps; Shift+Enter
+// adds a line where the relay can paste multi-line text.
+const conn = useConnectionStore()
+const canMultiline = () => conn.hasFeature('send-text-paste')
+const wrap = useWrappingInput(cmdInputEl, text, () => submit(), canMultiline)
+
+function onCmdKeydown(e: KeyboardEvent) {
+  wrap.onKeydown(e)
+  suggest.onKeydown(e)
+}
+
 function onInput() {
+  wrap.onInput()
   // New text typed — disarm so next send re-fills
   filledText.value = ''
 }
@@ -476,11 +489,11 @@ const suggest = useHistorySuggest({
 
     <form class="input-row" @submit.prevent="submit">
       <span class="prompt" aria-hidden="true">❯</span>
-      <input
+      <textarea
         ref="cmdInputEl"
         v-model="text"
         class="cmd"
-        type="text"
+        rows="1"
         :placeholder="isArmed ? 'press send to execute…' : 'send to pane…'"
         autocomplete="off"
         autocapitalize="off"
@@ -488,13 +501,14 @@ const suggest = useHistorySuggest({
         spellcheck="false"
         enterkeyhint="send"
         aria-label="Command to send to pane"
+        @beforeinput="wrap.onBeforeInput"
         @input="onInput"
         @focus="inputFocused = true"
         @blur="inputFocused = false"
         @keydown.ctrl.enter.prevent="quickSend"
         @keydown.meta.enter.prevent="quickSend"
-        @keydown="suggest.onKeydown"
-      />
+        @keydown="onCmdKeydown"
+      ></textarea>
       <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed" :aria-label="isArmed ? 'Send command to pane' : 'Fill command into terminal'">
         {{ isArmed ? 'send' : 'fill' }}
       </button>
@@ -616,6 +630,16 @@ const suggest = useHistorySuggest({
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   caret-color: var(--green);
+  /* a textarea that wraps long text and grows up to six lines */
+  display: block;
+  margin: 0;
+  padding: 0;
+  resize: none;
+  line-height: 1.45;
+  max-height: calc(1.45em * 6);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .cmd::placeholder { color: var(--faint); }
 .send-btn {

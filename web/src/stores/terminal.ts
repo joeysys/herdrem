@@ -275,6 +275,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   function sendText(text: string, submit = true) {
     if (!activePane.value) return false
     const msg: SendText = { type: 'send_text', pane_id: activePane.value, text, submit }
+    // Line breaks would reach the pane as Enter; a bracketed paste inserts them.
+    if (/[\r\n]/.test(text) && useConnectionStore().hasFeature('send-text-paste')) msg.paste = true
     const ok = ws.send(msg)
     if (ok) scheduleRefresh()
     return ok

@@ -271,7 +271,7 @@ describe('TermView shell history', () => {
 })
 
 describe('TermView agent prompt history', () => {
-  const agentInput = (w: VueWrapper) => w.get('input.cmd')
+  const agentInput = (w: VueWrapper) => w.get('textarea.cmd')
 
   it('opens on prompts for an agent pane and shows both header and key-row buttons', async () => {
     const w = mountView('agent')
@@ -362,8 +362,8 @@ describe('TermView history scope and workspace', () => {
 
   it('records an agent prompt with the pane\'s host and workspace', async () => {
     const w = mountIn('agent', { id: 'w7', label: 'billing' })
-    await w.get('input.cmd').setValue('summarise the failing invoices')
-    await w.get('input.cmd').trigger('keydown', { key: 'Enter', ctrlKey: true })
+    await w.get('textarea.cmd').setValue('summarise the failing invoices')
+    await w.get('textarea.cmd').trigger('keydown', { key: 'Enter', ctrlKey: true })
     expect(useCmdHistoryStore().entries[0]).toMatchObject({ c: 'summarise the failing invoices', k: 'ag', h: 'box', s: 'w7', l: 'billing' })
   })
 

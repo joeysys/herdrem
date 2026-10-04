@@ -5,6 +5,8 @@ import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { useHaptic } from '../../composables/useHaptic'
 import { useKeyRepeat } from '../../composables/useKeyRepeat'
 import { useQuickPopover } from '../../composables/useQuickPopover'
+import { useWrappingInput } from '../../composables/useWrappingInput'
+import { useConnectionStore } from '../../stores/connection'
 import {
   detectMenu, isStickyChoice, menuLabel,
 } from '../../utils/menu'
@@ -158,12 +160,17 @@ const text = computed({
   set: (v) => emit('update:modelValue', v),
 })
 
-const boxInputEl = ref<HTMLInputElement | null>(null)
+const boxInputEl = ref<HTMLTextAreaElement | null>(null)
 
 function toggleInput() {
   haptic(8)
   showInput.value = !showInput.value
-  if (showInput.value) nextTick(() => boxInputEl.value?.focus())
+  if (showInput.value) {
+    nextTick(() => {
+      wrap.fit() // text kept from last time may need more than one line
+      boxInputEl.value?.focus()
+    })
+  }
 }
 
 function submitInput() {
@@ -180,6 +187,16 @@ function submitInput() {
 defineExpose({
   inputEl: () => (showInput.value ? boxInputEl.value : null),
 })
+
+// Enter submits (like the form's own submit); long text wraps; Shift+Enter
+// adds a line where the relay can paste multi-line text.
+const conn = useConnectionStore()
+const wrap = useWrappingInput(boxInputEl, text, () => submitInput(), () => conn.hasFeature('send-text-paste'))
+
+function onBoxKeydown(e: KeyboardEvent) {
+  wrap.onKeydown(e)
+  emit('inputKeydown', e)
+}
 
 // --- special keys ---
 const SHELL_KEYS: Array<{ label: string; key: string; danger?: boolean; repeat?: boolean }> = [
@@ -287,11 +304,11 @@ function onArrowKey(key: string) {
 
     <form v-if="showInput" class="input-row" @submit.prevent="submitInput">
       <span class="prompt" aria-hidden="true">❯</span>
-      <input
+      <textarea
         ref="boxInputEl"
         v-model="text"
         class="cmd"
-        type="text"
+        rows="1"
         placeholder="send to shell…"
         autocomplete="off"
         autocapitalize="off"
@@ -299,10 +316,12 @@ function onArrowKey(key: string) {
         spellcheck="false"
         enterkeyhint="send"
         aria-label="Command to send to shell"
-        @keydown="emit('inputKeydown', $event)"
+        @beforeinput="wrap.onBeforeInput"
+        @input="wrap.onInput"
+        @keydown="onBoxKeydown"
         @focus="emit('inputFocus', true)"
         @blur="emit('inputFocus', false)"
-      />
+      ></textarea>
       <button type="submit" class="send-btn" :disabled="!text.length" aria-label="Send command to shell">send</button>
     </form>
 
@@ -426,6 +445,16 @@ function onArrowKey(key: string) {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   caret-color: var(--green);
+  /* a textarea that wraps long text and grows up to six lines */
+  display: block;
+  margin: 0;
+  padding: 0;
+  resize: none;
+  line-height: 1.45;
+  max-height: calc(1.45em * 6);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .cmd::placeholder { color: var(--faint); }
 .send-btn {

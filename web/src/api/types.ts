@@ -222,6 +222,8 @@ export interface SendText {
   text: string
   pane_id: string
   submit?: boolean
+  /** multi-line text goes as a bracketed paste (feature "send-text-paste") */
+  paste?: boolean
 }
 
 export interface SendKeys {

@@ -296,6 +296,19 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 	s.sendJSON(ctx, conn, reply)
 }
 
+// bracketedPaste wraps multi-line text the way a terminal pastes it, so an
+// agent or shell with bracketed paste on inserts the line breaks instead of
+// taking each one as Enter. Line breaks go as CR, as a terminal sends them,
+// and an end marker inside the text is dropped so it cannot end the paste
+// early. Single-line text never comes here: an app without bracketed paste
+// would show the markers as junk.
+func bracketedPaste(text string) string {
+	body := strings.ReplaceAll(text, "\x1b[201~", "")
+	body = strings.ReplaceAll(body, "\r\n", "\r")
+	body = strings.ReplaceAll(body, "\n", "\r")
+	return "\x1b[200~" + body + "\x1b[201~"
+}
+
 func (s *Service) handleSendText(ctx context.Context, conn *websocket.Conn, data []byte) {
 	var msg protocol.SendText
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -307,7 +320,12 @@ func (s *Service) handleSendText(ctx context.Context, conn *websocket.Conn, data
 		return
 	}
 	text := msg.Text
-	if msg.Submit && text != "" && text[len(text)-1] != '\n' {
+	if msg.Paste && strings.ContainsAny(text, "\r\n") {
+		text = bracketedPaste(text)
+		if msg.Submit {
+			text += "\n"
+		}
+	} else if msg.Submit && text != "" && text[len(text)-1] != '\n' {
 		text += "\n"
 	}
 	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {

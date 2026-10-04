@@ -504,6 +504,27 @@ func TestHandleMessage_Respond(t *testing.T) {
 	waitForSentText("3\n")
 }
 
+func TestHandleMessage_SendTextPaste(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{}
+	svc := New(client, nil, nil, nil, nil, hub.New(logger), logger)
+	ctx := context.Background()
+
+	cases := []struct{ name, msg, want string }{
+		{"multi-line paste, submitted", `{"type":"send_text","pane_id":"p","text":"one\ntwo\r\nthree","paste":true,"submit":true}`, "\x1b[200~one\rtwo\rthree\x1b[201~\n"},
+		{"multi-line paste, fill only", `{"type":"send_text","pane_id":"p","text":"a\nb","paste":true}`, "\x1b[200~a\rb\x1b[201~"},
+		{"an end marker inside cannot close the paste", `{"type":"send_text","pane_id":"p","text":"a\u001b[201~\nb","paste":true}`, "\x1b[200~a\rb\x1b[201~"},
+		{"single line stays plain even with paste", `{"type":"send_text","pane_id":"p","text":"ls","paste":true,"submit":true}`, "ls\n"},
+		{"without paste nothing changes", `{"type":"send_text","pane_id":"p","text":"a\nb","submit":true}`, "a\nb\n"},
+	}
+	for _, c := range cases {
+		svc.HandleMessage(ctx, nil, []byte(c.msg))
+		if got := client.SentText(); got != c.want {
+			t.Errorf("%s: sent %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // Regression for "terminal freezes while an agent streams": a term poll read
 // must bypass the versioned baseline. herdr's pane revision and
 // state_change_seq only move on metadata/state changes — not on streamed

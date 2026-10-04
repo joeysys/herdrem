@@ -255,3 +255,22 @@ describe('setContent poll mode', () => {
     expect(term.content).toBe('AAA\n')
   })
 })
+
+describe('useTerminalStore sendText paste', () => {
+  it('marks multi-line text as a paste when the relay supports it', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+
+    term.sendText('one\ntwo', true)
+    expect(send.mock.lastCall?.[0]).not.toHaveProperty('paste') // old relay: no flag
+
+    useConnectionStore().setHello('t', ['send-text-paste'])
+    term.sendText('one\ntwo', true)
+    expect(send.mock.lastCall?.[0]).toMatchObject({ type: 'send_text', text: 'one\ntwo', submit: true, paste: true })
+    term.sendText('single line', false)
+    expect(send.mock.lastCall?.[0]).not.toHaveProperty('paste')
+    send.mockRestore()
+  })
+})

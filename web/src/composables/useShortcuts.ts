@@ -300,6 +300,7 @@ export function ensureChordHelp() {
     id, label, scope, key: 'Enter', mod: true, helpOnly: true, run: () => {},
   })
   submit('input.submit', 'Send', 'input')
+  register({ id: 'input.newline', label: 'New line in the input', scope: 'input', key: 'Enter', shift: true, helpOnly: true, run: () => {} })
   submit('todo.add', 'Add todo', 'input')
   submit('git.commit', 'Commit', 'overlay')
 }

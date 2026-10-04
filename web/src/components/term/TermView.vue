@@ -23,6 +23,7 @@ import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
+import { caretOnEdgeLine } from '../../composables/useWrappingInput'
 import { ensureShellShortcuts, isShortcutActive, isTextInput, register, shellActions, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 import TodoPanel from '../todo/TodoPanel.vue'
 import TermIcon from './TermIcon.vue'
@@ -148,7 +149,7 @@ function shellSubmit() {
 
 // The shell's active text input: the ShellKeys input box when it is toggled
 // on, otherwise the inline input rendered inside the terminal output.
-function activeShellInput(): HTMLInputElement | null {
+function activeShellInput(): HTMLInputElement | HTMLTextAreaElement | null {
   return shellKeysEl.value?.inputEl?.() || shellInputEl.value
 }
 
@@ -264,7 +265,9 @@ function recallShellHistory(dir: 1 | -1): boolean {
 function onShellKeydown(e: KeyboardEvent) {
   if (e.isComposing) return
   if (!suggestions.value.length && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey) {
-    if (recallShellHistory(e.key === 'ArrowUp' ? 1 : -1)) {
+    // in multi-line text ↑ / ↓ move between lines until the first / last
+    const up = e.key === 'ArrowUp'
+    if (caretOnEdgeLine(e.target, up ? 'up' : 'down') && recallShellHistory(up ? 1 : -1)) {
       e.preventDefault()
       return
     }
