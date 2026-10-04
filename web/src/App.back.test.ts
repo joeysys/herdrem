@@ -28,6 +28,8 @@ import App from './App.vue';
 import { useLayoutMode } from './composables/useLayoutMode';
 import { useAgentsStore, useConnectionStore } from './stores/connection';
 import { useFilesStore } from './stores/files';
+import { useDiffStore } from './stores/diff';
+import { simulateChromeHistory, type ChromeHistory } from './test-chromeHistory';
 
 vi.mock('./api/ws', () => ({
   ws: {
@@ -90,6 +92,8 @@ async function enterTerminal(wrapper: ReturnType<typeof mount>) {
   await flush();
   const card = wrapper.find('.agent-card');
   expect(card.exists()).toBe(true);
+  // a real tap: the installed-app trap pushes its back entries on pointerup
+  await card.trigger('pointerup');
   await card.trigger('click');
   await flush();
   expect(wrapper.find('.term-wrap').exists()).toBe(true);
@@ -544,5 +548,89 @@ describe('desktop file panel placement', () => {
     wrapper.unmount();
     layout.setPreference('auto');
     await flush();
+  });
+});
+
+// Chrome skips every entry of the page on system back once it has pushed an
+// entry without user activation (all same-document entries share that state).
+// The trap used to re-push inside popstate, so the second back in a row left
+// the app. These run on a model of that rule rather than jsdom's history.
+describe('system back in the installed PWA under Chrome history skipping', () => {
+  async function setup() {
+    (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(true);
+    setActivePinia(createPinia());
+    const chrome = simulateChromeHistory(flush);
+    const wrapper = mount(App, { attachTo: document.body });
+    await flush();
+    bootApp();
+    seedAgent();
+    useConnectionStore().setHello('t', ['git-diff']);
+    await flush();
+    return { chrome, wrapper };
+  }
+  function teardown(chrome: ChromeHistory, wrapper: ReturnType<typeof mount>) {
+    wrapper.unmount();
+    chrome.restore();
+    (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(false);
+  }
+
+  it('term → git, then back, back, back without tapping: git, term, toast — then exit', async () => {
+    const { chrome, wrapper } = await setup();
+    const diff = useDiffStore();
+    chrome.tap(wrapper.get('.agent-card').element);
+    await flush();
+    chrome.tap(wrapper.get('.desktop-only button[aria-label="Git diff"]').element);
+    await flush();
+    expect(diff.open).toBe(true);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(diff.open).toBe(false);
+    expect(wrapper.find('.term-wrap').exists()).toBe(true);
+
+    await chrome.systemBack(); // used to leave the app here
+    expect(chrome.exited).toBe(false);
+    expect(wrapper.find('.term-wrap').exists()).toBe(false);
+    expect(wrapper.find('.agent-card').exists()).toBe(true);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(wrapper.find('.exit-toast').exists()).toBe(true);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(true);
+    teardown(chrome, wrapper);
+  });
+
+  it('a tap between backs tops the entries up again', async () => {
+    const { chrome, wrapper } = await setup();
+    chrome.tap(wrapper.get('.agent-card').element);
+    await flush();
+    await chrome.systemBack(); // term → list
+    expect(wrapper.find('.agent-card').exists()).toBe(true);
+    chrome.tap(wrapper.get('.agent-card').element); // back into a terminal
+    await flush();
+    chrome.tap(wrapper.get('.desktop-only button[aria-label="Git diff"]').element);
+    await flush();
+    for (let i = 0; i < 3; i++) await chrome.systemBack(); // git, term, toast
+    expect(chrome.exited).toBe(false);
+    expect(wrapper.find('.exit-toast').exists()).toBe(true);
+    teardown(chrome, wrapper);
+  });
+
+  it('a terminal opened without a tap (e.g. a new pane) adds no entry of its own', async () => {
+    const { chrome, wrapper } = await setup();
+    chrome.tap(wrapper.get('.agent-card').element); // a tap fills the trap
+    await flush();
+    await chrome.systemBack(); // back to the list
+    const before = history.length;
+    // opened by code, no tap: nothing may be pushed (it would poison the page)
+    useAgentsStore().setAgents([
+      { pane_id: 'p1', project: 'demo', cwd: '/root/proj', host: 'local', status: 'idle', kind: 'agent', last_active: 1 },
+    ]);
+    (wrapper.vm as unknown as { openTerminal?: (id: string) => void }).openTerminal?.('p1');
+    await flush();
+    expect(history.length).toBe(before);
+    teardown(chrome, wrapper);
   });
 });

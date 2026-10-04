@@ -160,6 +160,10 @@ let exiting = false;
 function pushHistory(state: string) {
   exiting = false;
   clearExitToast();
+  // The installed-app trap owns history: an entry pushed here — maybe with
+  // no tap behind it (a notification, a new pane) — would make Chrome skip
+  // every entry of the page on the next back (see useHistoryTrap).
+  if (trap.isActive()) return;
   if (history.state?.view === state) return;
   history.pushState({ view: state }, '');
 }
@@ -880,8 +884,8 @@ onMounted(() => {
     };
     document.addEventListener('pointerdown', lockOnce, { once: true });
     trap.arm(backHandler, backDepth);
-    // Opening a layer happens inside the tap that opened it, so this is the
-    // moment the extra sentinels still count as user-initiated.
+    // Opening a layer happens inside the tap that opened it, so the entries
+    // for the new depth still count as user-initiated (the trap checks).
     watch(backDepth, () => trap.topUp());
   }
   boot();
@@ -962,6 +966,7 @@ function backHandler(): boolean {
 
 onUnmounted(() => {
   unsubMsg?.();
+  trap.disarm();
   conn.disconnect();
 });
 </script>

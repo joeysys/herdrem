@@ -25,6 +25,11 @@ var borderRE = regexp.MustCompile(`^[│|┃╎┆]+`)
 // parenRE matches "(y)es" / "(n)o" / "(a)lways" style shortcuts.
 var parenRE = regexp.MustCompile(`\(([a-z0-9])\)\s*[a-z]`)
 
+// ruleRE matches a horizontal rule (optionally inside a box border). Claude's
+// AskUserQuestion draws one between its options and the trailing "Chat about
+// this" item; it separates, it does not end, the menu.
+var ruleRE = regexp.MustCompile(`^[\s│|┃╎┆]*[─━═┄┅┈┉╌╍\-–—_]{3,}[\s│|┃╎┆]*$`)
+
 // isContinuation reports whether line is the wrapped tail of a long menu item.
 // A wrapped label is indented under its item; interleaved prose starts at the
 // margin. Blank lines never continue a menu.
@@ -59,7 +64,8 @@ func ParseNumberedMenu(text string) (payloads, labels []string) {
 		if prevLine != -1 {
 			adjacent = true
 			for j := prevLine + 1; j < i; j++ {
-				if !isContinuation(strings.TrimRight(lines[j], "\r")) {
+				between := strings.TrimRight(lines[j], "\r")
+				if !isContinuation(between) && !ruleRE.MatchString(between) {
 					adjacent = false
 					break
 				}
@@ -108,17 +114,8 @@ func DetectOptions(text, agent string) []string {
 	if strings.Contains(lower, "approve all pending") {
 		return copySlice(SubagentOptions)
 	}
-	if paren := parenRE.FindAllStringSubmatch(lower, -1); len(paren) >= 2 {
-		var seen []string
-		for _, p := range paren {
-			if !containsString(seen, p[1]) {
-				seen = append(seen, p[1])
-			}
-		}
-		if len(seen) > 5 {
-			seen = seen[:5]
-		}
-		return seen
+	if keys := parenShortcuts(lower); len(keys) > 0 {
+		return keys
 	}
 	// Cursor list UI: arrow + Enter, not y/n
 	if strings.Contains(lower, "allow once") ||
@@ -137,6 +134,29 @@ func DetectOptions(text, agent string) []string {
 		return copySlice(GenericYN)
 	}
 	return FallbackOptionsForAgent(agent)
+}
+
+// parenShortcuts reads a "(y)es (n)o (a)lways" prompt. A real one lists its
+// keys on one line; matches scattered over the screen are prose ("the (v)erbose
+// flag"), so only a line with at least two distinct keys counts — the last
+// such line, being closest to the prompt.
+func parenShortcuts(lower string) []string {
+	lines := strings.Split(lower, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var seen []string
+		for _, p := range parenRE.FindAllStringSubmatch(lines[i], -1) {
+			if !containsString(seen, p[1]) {
+				seen = append(seen, p[1])
+			}
+		}
+		if len(seen) >= 2 {
+			if len(seen) > 5 {
+				seen = seen[:5]
+			}
+			return seen
+		}
+	}
+	return nil
 }
 
 // DetectMenu returns (options, labels) for a blocked pane. labels mirrors

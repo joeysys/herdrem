@@ -153,3 +153,49 @@ func TestFallbackOptionsForAgent_ReturnsCopy(t *testing.T) {
 		t.Error("fallback returned shared backing array, mutation leaked")
 	}
 }
+
+// Claude's AskUserQuestion menu: options with indented descriptions, then a
+// rule before the last item. The rule used to break the run, the menu was
+// dropped, and the (x)es fallback picked letters out of prose above it.
+const askUserQuestionScreen = `Some earlier output mentioning (e)dge cases,
+a (0)-based index and the (v)erbose flag on separate lines.
+
+ ☐ Conflict policy
+
+In a normal browser tab, how should Ctrl/⌘ shortcuts that conflict with the browser be handled?
+
+❯ 1. Restore only Ctrl+R (Recommended)
+     Give Ctrl/⌘+R back to the browser for refresh; use the ⏱ button for input history.
+  2. Restore both Ctrl+R and Ctrl+F
+     Return both keys to the browser (refresh / find in page).
+  3. Remap Ctrl+R to a conflict-free key
+     Restore refresh in the tab; use Alt+R for input history.
+  4. Type something.
+──────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel`
+
+func TestDetectMenu_AskUserQuestionWithRule(t *testing.T) {
+	opts, labels := DetectMenu(askUserQuestionScreen, "claude")
+	if !reflect.DeepEqual(opts, []string{"1", "2", "3", "4", "5"}) {
+		t.Fatalf("opts = %v, want 1..5", opts)
+	}
+	want := []string{"Restore only Ctrl+R (Recommended)", "Restore both Ctrl+R and Ctrl+F", "Remap Ctrl+R to a conflict-free key", "Type something.", "Chat about this"}
+	if !reflect.DeepEqual(labels, want) {
+		t.Errorf("labels = %q", labels)
+	}
+}
+
+func TestDetectOptions_ParenShortcutsMustShareALine(t *testing.T) {
+	// one shortcut per line is prose, not a (y)es/(n)o prompt
+	text := "Some earlier output mentioning (e)dge cases,\na (0)-based index and the (v)erbose flag.\nWaiting…"
+	if opts := DetectOptions(text, "claude"); len(opts) != 0 {
+		t.Errorf("opts = %v, want none for claude", opts)
+	}
+	// the prompt line closest to the bottom wins
+	text = "earlier: (a)bc (b)cd\nProceed? (y)es (n)o"
+	if opts := DetectOptions(text, ""); !reflect.DeepEqual(opts, []string{"y", "n"}) {
+		t.Errorf("opts = %v, want [y n]", opts)
+	}
+}

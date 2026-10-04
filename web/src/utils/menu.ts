@@ -6,6 +6,9 @@
 
 const MENU_ITEM_RE = /^[\s│|┃╎┆]*(?:[❯>›»▶●•*\-]\s*)?[[\(]?([1-9])[\]\).:]\s+(\S.*?)[\s│|┃╎┆]*$/
 const BORDER_RE = /^[│|┃╎┆]+/
+// A horizontal rule: Claude's AskUserQuestion draws one before its trailing
+// "Chat about this" item. It separates, it does not end, the menu.
+const RULE_RE = /^[\s│|┃╎┆]*[─━═┄┅┈┉╌╍\-–—_]{3,}[\s│|┃╎┆]*$/
 
 function isContinuation(line: string): boolean {
   const body = line.replace(BORDER_RE, '')
@@ -28,7 +31,8 @@ export function parseNumberedMenu(text: string): { payloads: string[]; labels: s
     if (prevLine !== -1) {
       adjacent = true
       for (let j = prevLine + 1; j < i; j++) {
-        if (!isContinuation(lines[j].replace(/\r$/, ''))) {
+        const between = lines[j].replace(/\r$/, '')
+        if (!isContinuation(between) && !RULE_RE.test(between)) {
           adjacent = false
           break
         }
@@ -60,9 +64,17 @@ export function detectOptions(text: string): string[] {
   const { payloads } = parseNumberedMenu(text)
   if (payloads.length) return payloads
 
-  const paren = [...lower.matchAll(PAREN_RE)].map((m) => m[1])
-  if (paren.length >= 2) {
-    return [...new Set(paren)].slice(0, 5)
+  return parenShortcuts(lower)
+}
+
+// A real "(y)es (n)o (a)lways" prompt lists its keys on one line; matches
+// scattered over the screen are prose ("the (v)erbose flag"), so only a line
+// with at least two distinct keys counts — the last one, nearest the prompt.
+function parenShortcuts(lower: string): string[] {
+  const lines = lower.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const keys = [...new Set([...lines[i].matchAll(PAREN_RE)].map((m) => m[1]))]
+    if (keys.length >= 2) return keys.slice(0, 5)
   }
   return []
 }

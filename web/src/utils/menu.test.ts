@@ -55,3 +55,36 @@ describe('isStickyChoice / menuLabel', () => {
     expect(menuLabel('No')).toBe('No')
   })
 })
+
+// Claude's AskUserQuestion: a rule before the last item used to drop the menu,
+// and the (x)es fallback then turned prose letters into buttons.
+const ASK_USER_QUESTION = `Some earlier output mentioning (e)dge cases,
+a (0)-based index and the (v)erbose flag on separate lines.
+
+ ☐ Conflict policy
+
+❯ 1. Restore only Ctrl+R (Recommended)
+     Give Ctrl/⌘+R back to the browser for refresh.
+  2. Restore both Ctrl+R and Ctrl+F
+     Return both keys to the browser.
+  3. Remap Ctrl+R to a conflict-free key
+     Use Alt+R for input history.
+  4. Type something.
+──────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel`
+
+describe('AskUserQuestion menu', () => {
+  it('reads all five items across the rule', () => {
+    expect(detectMenu(ASK_USER_QUESTION)).toEqual({
+      options: ['1', '2', '3', '4', '5'],
+      labels: ['Restore only Ctrl+R (Recommended)', 'Restore both Ctrl+R and Ctrl+F', 'Remap Ctrl+R to a conflict-free key', 'Type something.', 'Chat about this'],
+    })
+  })
+
+  it('takes (x)es shortcuts only from one prompt line', () => {
+    expect(detectOptions('mentions (e)dge cases\nand the (v)erbose flag\n')).toEqual([])
+    expect(detectOptions('earlier: (a)bc (b)cd\nProceed? (y)es (n)o')).toEqual(['y', 'n'])
+  })
+})

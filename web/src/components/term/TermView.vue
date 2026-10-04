@@ -86,8 +86,32 @@ const RENDER_WINDOW_LINES = 200
 // tail window. When the user scrolls up, stickBottom flips and the view
 // switches to the full content; without compensation that transition would
 // jump the viewport into the middle of the history (see the stickBottom watch).
+// While the user reads back, hold the view on the content as it was when
+// they left the bottom. An agent TUI that keeps redrawing its status area
+// makes the relay send full snapshots of a rolling window rather than append
+// deltas; re-rendering each one would drop the lines that scrolled off the
+// top and slide the text under the reader by however many lines were just
+// printed. New output waits behind the "new output" button, and returning to
+// the bottom catches up. Search reads deeper history, so it stays live.
+const frozen = ref<string | null>(null)
+watch(
+  () => term.stickBottom,
+  (pinned) => {
+    frozen.value = pinned ? null : term.content
+  },
+  { flush: 'sync' }, // at the flip, before any further content lands
+)
+const shownContent = computed(() =>
+  frozen.value !== null && !searchOpen.value ? frozen.value : term.content,
+)
+const hasNewOutput = computed(() => shownContent.value !== term.content)
+
+function jumpToNewOutput() {
+  term.stickBottom = true // the stickBottom watch scrolls to the end
+}
+
 const renderContent = computed(() => {
-  const raw = term.content
+  const raw = shownContent.value
   if (!raw) return raw
   // When the user scrolls up to read history, render the full content so the
   // scroll-back window stays intact; windowing only applies when pinned to the
@@ -287,6 +311,10 @@ function inputHasSelection(e: KeyboardEvent): boolean {
 // deeper scrollback (SEARCH_LINES) so older output is findable too.
 const SEARCH_LINES = 3000
 const searchOpen = ref(false)
+watch(searchOpen, (open) => {
+  // leaving search while scrolled up: hold what search was showing
+  if (!open && !term.stickBottom) frozen.value = term.content
+})
 const searchQuery = ref('')
 const appliedQuery = ref('')
 const hitCount = ref(0)
@@ -357,6 +385,7 @@ function onHits(n: number) {
   if (pendingJump) {
     pendingJump = false
     hitIndex.value = n - 1
+    markScrollIntent() // jumping to a hit may leave the bottom
     ansiRef.value?.setActiveHit(hitIndex.value, true)
   } else {
     hitIndex.value = Math.min(hitIndex.value, n - 1)
@@ -367,6 +396,7 @@ function stepHit(delta: number) {
   const n = hitCount.value
   if (!n) return
   hitIndex.value = (hitIndex.value + delta + n) % n
+  markScrollIntent()
   ansiRef.value?.setActiveHit(hitIndex.value, true)
 }
 
@@ -450,11 +480,52 @@ watch(isShell, (v) => {
   if (v) nextTick(() => autoFocusShellInput())
 })
 
+// Only the user leaves the bottom. Layout fires scroll events too — the soft
+// keyboard opening, the input box growing with a paste — and treating those
+// as "the user scrolled up" unpinned the view while the user was at the
+// bottom: output stopped following, and the full re-render that unpinning
+// switches to could land far up in the history. So a scroll away from the
+// bottom only unpins within a moment of real scroll input (wheel, touch,
+// scrollbar drag, scroll keys, or a search jump); the scroll events that
+// follow, e.g. a fling's momentum, keep that gesture alive.
+const SCROLL_INTENT_MS = 700
+const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '])
+let scrollIntentAt = -Infinity
+function markScrollIntent() {
+  scrollIntentAt = performance.now()
+}
+function onScrollKey(e: KeyboardEvent) {
+  if (SCROLL_KEYS.has(e.key) && !isTextInput(e.target)) markScrollIntent()
+}
+
 function onScroll() {
   const el = scrollEl.value
   if (!el) return
   const near = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-  term.stickBottom = near
+  const now = performance.now()
+  const intent = now - scrollIntentAt < SCROLL_INTENT_MS
+  if (intent) scrollIntentAt = now
+  if (near) {
+    term.stickBottom = true
+    return
+  }
+  if (intent) {
+    term.stickBottom = false
+    return
+  }
+  // moved by layout, not by the user: stay at the bottom
+  if (term.stickBottom) el.scrollTop = el.scrollHeight
+}
+
+// The scroller shrinking (keyboard, a taller input box) keeps its scrollTop,
+// hiding the last lines below the fold; while pinned, follow the bottom.
+let scrollResize: ResizeObserver | null = null
+function watchScrollerSize(el: HTMLElement) {
+  if (typeof ResizeObserver === 'undefined') return
+  scrollResize = new ResizeObserver(() => {
+    if (term.stickBottom) el.scrollTop = el.scrollHeight
+  })
+  scrollResize.observe(el)
 }
 
 // Keep the view pinned to the bottom as fresh output arrives
@@ -555,7 +626,11 @@ function onVisibility() {
 
 onMounted(() => {
   term.openPane(props.paneId)
-  if (scrollEl.value) zoom.bind(scrollEl.value)
+  if (scrollEl.value) {
+    zoom.bind(scrollEl.value)
+    watchScrollerSize(scrollEl.value)
+  }
+  window.addEventListener('keydown', onScrollKey, true)
   if (!document.hidden) startPoll()
   document.addEventListener('visibilitychange', onVisibility)
   bindTermShortcuts()
@@ -586,6 +661,8 @@ watch(
 onUnmounted(() => {
   stopPoll()
   if (scrollEl.value) zoom.unbind(scrollEl.value)
+  scrollResize?.disconnect()
+  window.removeEventListener('keydown', onScrollKey, true)
   document.removeEventListener('click', closeMenu)
   document.removeEventListener('visibilitychange', onVisibility)
   offTermShortcuts.forEach((fn) => fn())
@@ -685,7 +762,16 @@ onUnmounted(() => {
     </header>
 
     <div class="term-main">
-      <div ref="scrollEl" class="term-scroll" @scroll.passive="onScroll" @click="isShell && autoFocusShellInput()">
+      <div
+        ref="scrollEl"
+        class="term-scroll"
+        @scroll.passive="onScroll"
+        @wheel.passive="markScrollIntent"
+        @touchstart.passive="markScrollIntent"
+        @touchmove.passive="markScrollIntent"
+        @pointerdown="markScrollIntent"
+        @click="isShell && autoFocusShellInput()"
+      >
         <div v-if="term.loading && !term.content" class="term-loading" aria-live="polite">
           <span class="bar"></span>
           <span class="bar"></span>
@@ -724,6 +810,15 @@ onUnmounted(() => {
           </AnsiStream>
         </div>
       </div>
+      <!-- Output that arrived while reading back (the view holds still). -->
+      <button
+        v-if="hasNewOutput"
+        type="button"
+        class="new-output"
+        aria-label="Jump to new output"
+        title="Jump to new output"
+        @click="jumpToNewOutput"
+      >↓ new output</button>
       <!-- Floating (absolute) so showing/hiding never shifts the layout. -->
       <FindBar
         v-if="searchOpen"
@@ -931,6 +1026,23 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
 }
+/* Bottom-right, above the prompt line, out of the way of the text. */
+.new-output {
+  position: absolute;
+  right: 14px;
+  bottom: 40px;
+  z-index: 14;
+  padding: 5px 11px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--blue);
+  background: var(--surface);
+  border: 1px solid rgba(96, 165, 250, .5);
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+}
+.new-output:hover { background: var(--blue-soft); }
+
 /* Sits just above the prompt line (term-scroll bottom padding + one line), so
    it never covers what is being typed. */
 .suggest-float {
