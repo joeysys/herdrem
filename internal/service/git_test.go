@@ -67,7 +67,7 @@ func TestGitDiff_UnstagedAndCached(t *testing.T) {
 	initRepo(t, dir)
 	fs := NewFileService(rootsFor(dir), nil)
 
-	unstaged, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "")
+	unstaged, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", false)
 	if err != nil {
 		t.Fatalf("unstaged diff: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestGitDiff_UnstagedAndCached(t *testing.T) {
 		t.Errorf("unstaged diff missing diff header:\n%s", unstaged)
 	}
 
-	cached, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "")
+	cached, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", false)
 	if err != nil {
 		t.Fatalf("cached diff: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestGitDiff_Commit(t *testing.T) {
 	head := initRepo(t, dir)
 	fs := NewFileService(rootsFor(dir), nil)
 
-	out, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, head)
+	out, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, head, false)
 	if err != nil {
 		t.Fatalf("commit diff: %v", err)
 	}
@@ -110,8 +110,146 @@ func TestGitDiff_Commit(t *testing.T) {
 	}
 
 	// commit mode without a ref must error
-	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ""); err == nil {
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, "", false); err == nil {
 		t.Error("commit mode with empty ref should error")
+	}
+}
+
+func TestGitDiff_NameStatus(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	head := initRepo(t, dir)
+	fs := NewFileService(rootsFor(dir), nil)
+	ctx := context.Background()
+
+	unstaged, err := fs.GitDiff(ctx, "local", dir, GitDiffUnstaged, "", true)
+	if err != nil {
+		t.Fatalf("unstaged name-status: %v", err)
+	}
+	if unstaged != "M\ta.txt\n" {
+		t.Errorf("unstaged name-status = %q", unstaged)
+	}
+
+	cached, err := fs.GitDiff(ctx, "local", dir, GitDiffCached, "", true)
+	if err != nil {
+		t.Fatalf("cached name-status: %v", err)
+	}
+	if cached != "A\tb.txt\n" {
+		t.Errorf("cached name-status = %q", cached)
+	}
+
+	show, err := fs.GitDiff(ctx, "local", dir, GitDiffCommit, head, true)
+	if err != nil {
+		t.Fatalf("commit name-status: %v", err)
+	}
+	if !strings.Contains(show, "first commit") || !strings.HasSuffix(show, "\nA\ta.txt\n") {
+		t.Errorf("commit name-status should keep the header and list a.txt:\n%s", show)
+	}
+	if strings.Contains(show, "@@") {
+		t.Errorf("commit name-status should not carry a patch:\n%s", show)
+	}
+
+	// renames keep both paths; non-ASCII names stay readable; paths are
+	// relative to a subdirectory cwd like the patch view.
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.Mkdir(dir+"/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, dir+"/sub/ふるい.txt", "same content for rename detection\n")
+	run("add", "sub")
+	run("commit", "-m", "add sub")
+	run("mv", "sub/ふるい.txt", "sub/あたらしい.txt")
+	sub, err := fs.GitDiff(ctx, "local", dir+"/sub", GitDiffCached, "", true)
+	if err != nil {
+		t.Fatalf("subdir name-status: %v", err)
+	}
+	if !strings.HasPrefix(sub, "R100\tふるい.txt\tあたらしい.txt\n") {
+		t.Errorf("subdir rename name-status = %q", sub)
+	}
+}
+
+func TestGitLogView_Switches(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	initRepo(t, dir)
+	run("commit", "-qm", "main two") // b.txt was staged by initRepo
+	run("checkout", "-qb", "side")
+	mustWrite(t, dir+"/side.txt", "side\n")
+	run("add", "side.txt")
+	run("commit", "-qm", "side work")
+	sideHash := run("rev-parse", "HEAD")
+	run("checkout", "-q", "-")
+	run("checkout", "-qb", "lonely")
+	mustWrite(t, dir+"/lonely.txt", "x\n")
+	run("add", "lonely.txt")
+	run("commit", "-qm", "unmerged branch")
+	run("checkout", "-q", "-")
+	run("merge", "-q", "--no-ff", "-m", "merge side", "side")
+	// user config that would change the format if not pinned
+	run("config", "format.pretty", "short")
+	run("config", "log.abbrevCommit", "true")
+	run("config", "log.decorate", "no")
+
+	fs := NewFileService(rootsFor(dir), nil)
+	ctx := context.Background()
+	view := func(o GitLogOptions) string {
+		t.Helper()
+		out, truncated, err := fs.GitLogView(ctx, "local", dir, o)
+		if err != nil {
+			t.Fatalf("log view %+v: %v", o, err)
+		}
+		if truncated {
+			t.Fatalf("log view %+v truncated", o)
+		}
+		return out
+	}
+
+	oneline := view(GitLogOptions{Oneline: true})
+	if !strings.Contains(oneline, sideHash+" (side) side work") {
+		t.Errorf("oneline should carry the full hash:\n%s", oneline)
+	}
+	if !strings.Contains(oneline, "(HEAD -> ") {
+		t.Errorf("oneline should decorate refs despite log.decorate=no:\n%s", oneline)
+	}
+	if strings.Contains(oneline, "unmerged branch") {
+		t.Errorf("without --all the unmerged branch is not reachable:\n%s", oneline)
+	}
+
+	full := view(GitLogOptions{})
+	if !strings.Contains(full, "commit "+sideHash) || !strings.Contains(full, "Date:") {
+		t.Errorf("default should be the medium format with full hashes:\n%s", full)
+	}
+
+	if g := view(GitLogOptions{Oneline: true, Graph: true}); !strings.Contains(g, "|\\") && !strings.Contains(g, "|/") {
+		t.Errorf("graph should draw the merge:\n%s", g)
+	}
+	if all := view(GitLogOptions{Oneline: true, All: true}); !strings.Contains(all, "unmerged branch") {
+		t.Errorf("--all should list every branch:\n%s", all)
+	}
+	if fp := view(GitLogOptions{Oneline: true, FirstParent: true}); strings.Contains(fp, "side work") || !strings.Contains(fp, "merge side") {
+		t.Errorf("--first-parent should skip the merged branch's commits:\n%s", fp)
+	}
+	if nm := view(GitLogOptions{Oneline: true, NoMerges: true}); strings.Contains(nm, "merge side") || !strings.Contains(nm, "side work") {
+		t.Errorf("--no-merges should drop only the merge commit:\n%s", nm)
 	}
 }
 
@@ -123,7 +261,7 @@ func TestGitDiff_OutsideRoots(t *testing.T) {
 	initRepo(t, dir)
 	other := t.TempDir()
 	fs := NewFileService(rootsFor(other), nil)
-	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, ""); err == nil {
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", false); err == nil {
 		t.Error("diff outside allowed roots should be rejected")
 	}
 }
@@ -209,7 +347,7 @@ func TestGitDiff_CommitRejectsOptionInjection(t *testing.T) {
 		"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", // not hex
 	}
 	for _, ref := range bad {
-		if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ref); err == nil {
+		if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ref, false); err == nil {
 			t.Errorf("commit ref %q should be rejected", ref)
 		}
 	}
@@ -239,7 +377,7 @@ func TestGitDiff_PathspecLimitsToCwd(t *testing.T) {
 
 	fs := NewFileService(rootsFor(dir), nil)
 	// Diff from the root should include both b.txt and sub/c.txt.
-	rootDiff, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "")
+	rootDiff, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", false)
 	if err != nil {
 		t.Fatalf("root cached diff: %v", err)
 	}
@@ -251,7 +389,7 @@ func TestGitDiff_PathspecLimitsToCwd(t *testing.T) {
 	}
 
 	// Diff from the subdirectory should only include sub/c.txt, not b.txt.
-	subDiff, err := fs.GitDiff(context.Background(), "local", sub, GitDiffCached, "")
+	subDiff, err := fs.GitDiff(context.Background(), "local", sub, GitDiffCached, "", false)
 	if err != nil {
 		t.Fatalf("sub cached diff: %v", err)
 	}

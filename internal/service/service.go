@@ -181,6 +181,8 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleGitDiff(ctx, conn, data)
 	case "git_log":
 		s.handleGitLog(ctx, conn, data)
+	case "git_log_view":
+		s.handleGitLogView(ctx, conn, data)
 	case "git_status":
 		s.handleGitStatus(ctx, conn, data)
 	case "git_stage":

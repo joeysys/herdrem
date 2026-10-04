@@ -2,8 +2,10 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { ws } from '../api/ws';
 import { uid } from '../utils/id';
+import { safeStorage } from '../utils/storage';
 import type {
-  GitDiff, GitLog, GitDiffMode, CommitEntry, GitDiffContent, GitLogResult,
+  GitDiff, GitLog, GitDiffMode, GitDiffFormat, CommitEntry, GitDiffContent, GitLogResult,
+  GitLogOptions, GitLogViewReq, GitLogViewResult,
   GitStatusData, GitStatusResultMsg, GitCommitResultMsg, GitStageReq, GitCommitReq,
 } from '../api/types';
 
@@ -16,8 +18,24 @@ const MAX_MSG_BYTES = 24 * 1024;
 const MAX_COMMIT_MESSAGE_BYTES = 16 * 1024;
 const utf8Len = (s: string) => new TextEncoder().encode(s).length;
 
-/** The panel's tabs: the three diffs plus git status (stage / commit). */
-export type DiffViewMode = GitDiffMode | 'status';
+/** The panel's tabs: the three diffs, git status (stage / commit) and git log. */
+export type DiffViewMode = GitDiffMode | 'status' | 'log';
+
+const LOG_OPTS_KEY = 'herdrem_git_log_opts';
+const DEFAULT_LOG_OPTS: GitLogOptions = { oneline: true, graph: true, all: false, first_parent: false, no_merges: false };
+
+function loadLogOptions(): GitLogOptions {
+  try {
+    const saved = JSON.parse(safeStorage.getItem(LOG_OPTS_KEY) || '{}') as Record<string, unknown>;
+    const opts = { ...DEFAULT_LOG_OPTS };
+    for (const k of Object.keys(opts) as (keyof GitLogOptions)[]) {
+      if (typeof saved[k] === 'boolean') opts[k] = saved[k] as boolean;
+    }
+    return opts;
+  } catch {
+    return { ...DEFAULT_LOG_OPTS };
+  }
+}
 
 export interface CommitOutcome {
   ok: boolean;
@@ -34,7 +52,12 @@ export interface DiffState {
   mode: DiffViewMode;
   commit: string;
   content: string;
+  /** what `content` holds: '' a patch, 'name-status' one line per file */
+  format: '' | GitDiffFormat;
   commits: CommitEntry[];
+  /** log tab: most commits the relay lists, and whether the text was cut */
+  logLimit: number;
+  logTruncated: boolean;
   loading: boolean;
   loadingCommits: boolean;
   error?: string;
@@ -43,6 +66,12 @@ export interface DiffState {
 export const useDiffStore = defineStore('diff', () => {
   const open = ref(false);
   const halfScreen = ref(false);
+  /** Show `--name-status` instead of the patch. A view preference: it
+   *  outlives closing the panel, unlike the rest of the state. */
+  const nameStatus = ref(false);
+  /** The log tab's switches, remembered on this device. */
+  const logOptions = ref<GitLogOptions>(loadLogOptions());
+  const logViewReqId = ref('');
   const state = ref<DiffState | null>(null);
   // request ids of in-flight requests, so stale responses cannot overwrite
   // the current view (e.g. a slow unstaged response arriving after the user
@@ -88,7 +117,10 @@ export const useDiffStore = defineStore('diff', () => {
       mode,
       commit,
       content: '',
+      format: '',
       commits: [],
+      logLimit: 0,
+      logTruncated: false,
       loading: true,
       loadingCommits: false,
     };
@@ -97,6 +129,10 @@ export const useDiffStore = defineStore('diff', () => {
     if (mode === 'status') {
       state.value.loading = false;
       requestStatus();
+      return;
+    }
+    if (mode === 'log') {
+      requestLogView();
       return;
     }
     requestDiff();
@@ -111,6 +147,7 @@ export const useDiffStore = defineStore('diff', () => {
     state.value = null;
     diffReqId.value = '';
     logReqId.value = '';
+    logViewReqId.value = '';
     resetStatus();
   }
 
@@ -132,6 +169,75 @@ export const useDiffStore = defineStore('diff', () => {
   /** Drop all state — used when switching relays. */
   function reset() {
     close();
+    nameStatus.value = false; // the next relay may not support it
+  }
+
+  /** Switch between the patch and `--name-status`, reloading the diff. */
+  function setNameStatus(on: boolean) {
+    if (nameStatus.value === on) return;
+    nameStatus.value = on;
+    const s = state.value;
+    if (!s || s.mode === 'status' || (s.mode === 'commit' && !s.commit)) return;
+    state.value = { ...s, content: '', loading: true, error: undefined };
+    requestDiff();
+  }
+
+  /** Flip one log switch, remember it, and reload the log. */
+  function setLogOption(key: keyof GitLogOptions, on: boolean) {
+    if (logOptions.value[key] === on) return;
+    logOptions.value = { ...logOptions.value, [key]: on };
+    safeStorage.setItem(LOG_OPTS_KEY, JSON.stringify(logOptions.value));
+    const s = state.value;
+    if (!s || s.mode !== 'log') return;
+    state.value = { ...s, content: '', loading: true, error: undefined };
+    requestLogView();
+  }
+
+  /** From the log: show that commit (git show). */
+  function showCommit(hash: string) {
+    if (!state.value) return;
+    setCommit(hash);
+    // the commit tab's picker lists recent commits; fetch them once
+    if (!state.value.commits.length) requestLog();
+  }
+
+  function requestLogView() {
+    const s = state.value;
+    if (!s) return;
+    const reqId = newReqId();
+    logViewReqId.value = reqId;
+    const o = logOptions.value;
+    const msg: GitLogViewReq = { type: 'git_log_view', cwd: s.cwd, host: s.host, req_id: reqId };
+    for (const k of Object.keys(o) as (keyof GitLogOptions)[]) if (o[k]) msg[k] = true;
+    ws.send(msg);
+  }
+
+  function setLogViewResult(msg: GitLogViewResult) {
+    const s = state.value;
+    if (!s || s.mode !== 'log' || msg.cwd !== s.cwd) return;
+    if (msg.req_id && logViewReqId.value && msg.req_id !== logViewReqId.value) return;
+    state.value = {
+      ...s,
+      content: msg.content || '',
+      format: '',
+      logLimit: msg.limit || 0,
+      logTruncated: !!msg.truncated,
+      loading: false,
+      error: undefined,
+    };
+  }
+
+  function setLogViewError(reqId?: string) {
+    const s = state.value;
+    if (!s || s.mode !== 'log') return;
+    if (reqId && logViewReqId.value && reqId !== logViewReqId.value) return;
+    state.value = { ...s, content: '', loading: false, error: 'git log failed (not a repo or unreachable host)' };
+  }
+
+  /** From a name-status row: back to the patch, scrolled to that file. */
+  function showPatchFor(path: string) {
+    focusPath.value = path;
+    setNameStatus(false);
   }
 
   /** Toggle between full-screen overlay and bottom half-screen. */
@@ -148,6 +254,10 @@ export const useDiffStore = defineStore('diff', () => {
       return;
     }
     state.value = { ...state.value, mode, content: '', loading: true, error: undefined };
+    if (mode === 'log') {
+      requestLogView();
+      return;
+    }
     if (mode === 'commit') {
       // Need a commit to show; if none selected, fetch the log so the user can
       // pick one. Don't request a diff until a commit is chosen.
@@ -172,6 +282,10 @@ export const useDiffStore = defineStore('diff', () => {
       requestStatus();
       return;
     }
+    if (state.value.mode === 'log') {
+      requestLogView();
+      return;
+    }
     if (state.value.mode === 'commit' && !state.value.commit) {
       requestLog();
       return;
@@ -181,7 +295,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   function requestDiff() {
     const s = state.value;
-    if (!s || s.mode === 'status') return;
+    if (!s || s.mode === 'status' || s.mode === 'log') return;
     const reqId = newReqId();
     diffReqId.value = reqId;
     const msg: GitDiff = {
@@ -190,6 +304,7 @@ export const useDiffStore = defineStore('diff', () => {
       host: s.host,
       mode: s.mode,
       commit: s.mode === 'commit' ? s.commit : undefined,
+      ...(nameStatus.value ? { format: 'name-status' as const } : {}),
       req_id: reqId,
     };
     ws.send(msg);
@@ -207,12 +322,14 @@ export const useDiffStore = defineStore('diff', () => {
 
   function setDiffContent(msg: GitDiffContent) {
     const s = state.value;
-    if (!s) return;
+    // a late diff reply must not pull the panel out of a non-diff tab
+    if (!s || s.mode === 'status' || s.mode === 'log') return;
     if (msg.cwd !== s.cwd) return;
     if (msg.req_id && diffReqId.value && msg.req_id !== diffReqId.value) return;
     state.value = {
       ...s,
       content: msg.content || '',
+      format: msg.format === 'name-status' ? 'name-status' : '',
       mode: msg.mode,
       commit: msg.commit || s.commit,
       loading: false,
@@ -234,7 +351,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   function setDiffError(reqId?: string) {
     const s = state.value;
-    if (!s) return;
+    if (!s || s.mode === 'status' || s.mode === 'log') return;
     if (reqId && diffReqId.value && reqId !== diffReqId.value) return;
     state.value = {
       ...s,
@@ -410,7 +527,14 @@ export const useDiffStore = defineStore('diff', () => {
   function showFileDiff(path: string, staged: boolean) {
     if (!state.value) return;
     focusPath.value = path;
-    setMode(staged ? 'cached' : 'unstaged');
+    const mode = staged ? 'cached' : 'unstaged';
+    // The point is the file's patch, so leave the name-status view.
+    if (nameStatus.value && state.value.mode === mode) {
+      setNameStatus(false);
+      return;
+    }
+    nameStatus.value = false;
+    setMode(mode);
   }
 
   function clearFocus() {
@@ -432,6 +556,14 @@ export const useDiffStore = defineStore('diff', () => {
     close,
     reset,
     toggleHalfScreen,
+    nameStatus,
+    setNameStatus,
+    showPatchFor,
+    logOptions,
+    setLogOption,
+    showCommit,
+    setLogViewResult,
+    setLogViewError,
     setMode,
     setCommit,
     refresh,

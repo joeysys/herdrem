@@ -100,6 +100,7 @@ type GitDiffContent struct {
 	Cwd     string `json:"cwd"`
 	Mode    string `json:"mode"`             // "unstaged" | "cached" | "commit"
 	Commit  string `json:"commit,omitempty"` // echoed when mode == "commit"
+	Format  string `json:"format,omitempty"` // echoed from the request ("name-status"); empty for a patch
 	Content string `json:"content"`          // diff text (may be empty)
 	ReqID   string `json:"req_id,omitempty"` // echoed from the matching GitDiff
 }
@@ -110,6 +111,16 @@ type GitLogResult struct {
 	Cwd     string      `json:"cwd"`
 	Commits interface{} `json:"commits"`
 	ReqID   string      `json:"req_id,omitempty"` // echoed from the matching GitLog
+}
+
+// GitLogViewResult carries the log view's text.
+type GitLogViewResult struct {
+	Type      string `json:"type"` // "git_log_view_result"
+	Cwd       string `json:"cwd"`
+	Content   string `json:"content"`
+	Limit     int    `json:"limit"`               // most commits the relay lists
+	Truncated bool   `json:"truncated,omitempty"` // output hit the byte cap
+	ReqID     string `json:"req_id,omitempty"`
 }
 
 // ErrorMsg is a generic error response.
@@ -241,6 +252,8 @@ type GitDiff struct {
 	Host   string `json:"host,omitempty"`
 	Mode   string `json:"mode"`             // "unstaged" | "cached" | "commit"
 	Commit string `json:"commit,omitempty"` // required when mode == "commit"
+	// Format is "" (patch) or "name-status" (feature "git-name-status").
+	Format string `json:"format,omitempty"`
 	ReqID  string `json:"req_id,omitempty"` // client-generated; echoed in the response
 }
 
@@ -250,6 +263,20 @@ type GitLog struct {
 	Cwd   string `json:"cwd"`
 	Host  string `json:"host,omitempty"`
 	ReqID string `json:"req_id,omitempty"`
+}
+
+// GitLogView requests `git log` text for the log view (feature
+// "git-log-view"). Each switch maps to one fixed git flag.
+type GitLogView struct {
+	Type        string `json:"type"` // "git_log_view"
+	Cwd         string `json:"cwd"`
+	Host        string `json:"host,omitempty"`
+	Oneline     bool   `json:"oneline,omitempty"`
+	Graph       bool   `json:"graph,omitempty"`
+	All         bool   `json:"all,omitempty"`
+	FirstParent bool   `json:"first_parent,omitempty"`
+	NoMerges    bool   `json:"no_merges,omitempty"`
+	ReqID       string `json:"req_id,omitempty"`
 }
 
 // AgentEvent is an optional push event.

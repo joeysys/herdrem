@@ -130,7 +130,21 @@ export interface GitDiffContent {
   cwd: string
   mode: 'unstaged' | 'cached' | 'commit'
   commit?: string
+  /** echoed from the request; absent for a patch */
+  format?: GitDiffFormat
   content: string
+  req_id?: string
+}
+
+export interface GitLogViewResult {
+  type: 'git_log_view_result'
+  cwd: string
+  /** git log text; hashes are always full */
+  content: string
+  /** most commits the relay lists */
+  limit: number
+  /** output hit the relay's byte cap */
+  truncated?: boolean
   req_id?: string
 }
 
@@ -267,6 +281,8 @@ export interface FileList {
 }
 
 export type GitDiffMode = 'unstaged' | 'cached' | 'commit'
+/** `git diff --name-status` instead of the patch */
+export type GitDiffFormat = 'name-status'
 
 // --- git status / stage / commit (feature "git-commit") ---
 export interface GitStatusEntry {
@@ -338,11 +354,29 @@ export interface GitDiff {
   host?: string
   mode: GitDiffMode
   commit?: string
+  /** feature "git-name-status"; omitted for a patch */
+  format?: GitDiffFormat
   req_id?: string
 }
 
 export interface GitLog {
   type: 'git_log'
+  cwd: string
+  host?: string
+  req_id?: string
+}
+
+/** The log view's switches (feature "git-log-view"), one git flag each. */
+export interface GitLogOptions {
+  oneline: boolean
+  graph: boolean
+  all: boolean
+  first_parent: boolean
+  no_merges: boolean
+}
+
+export interface GitLogViewReq extends Partial<GitLogOptions> {
+  type: 'git_log_view'
   cwd: string
   host?: string
   req_id?: string
@@ -471,6 +505,7 @@ export type ServerMessage =
   | FileListing
   | GitDiffContent
   | GitLogResult
+  | GitLogViewResult
   | PrefsSnapshot
   | ErrorMsg
   | TunnelsSnapshot
@@ -498,6 +533,7 @@ export type ClientMessage =
   | FileList
   | GitDiff
   | GitLog
+  | GitLogViewReq
   | PrefsGet
   | PrefsSet
   | TunnelCreate

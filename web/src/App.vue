@@ -837,6 +837,7 @@ onMounted(() => {
     if (msg.type === 'file_content') files.setContent(msg);
     if (msg.type === 'git_diff_content') diff.setDiffContent(msg);
     if (msg.type === 'git_log_result') diff.setLogResult(msg);
+    if (msg.type === 'git_log_view_result') diff.setLogViewResult(msg);
     if (msg.type === 'git_status_result') diff.setStatusResult(msg);
     if (msg.type === 'git_commit_result') diff.setCommitResult(msg);
     if (msg.type === 'error' && (msg.op === 'git_status' || msg.op === 'git_stage')) diff.setStatusError(msg.req_id, msg.message);
@@ -849,6 +850,7 @@ onMounted(() => {
     }
     if (msg.type === 'error' && msg.op === 'git_diff') diff.setDiffError(msg.req_id);
     if (msg.type === 'error' && msg.op === 'git_log') diff.setLogError(msg.req_id);
+    if (msg.type === 'error' && msg.op === 'git_log_view') diff.setLogViewError(msg.req_id);
     if (msg.type === 'error' && msg.op === 'mark_pane_read') {
       notify.push({ message: `failed to mark idle: ${msg.message}`, type: 'info' });
     }

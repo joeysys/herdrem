@@ -46,7 +46,9 @@ const (
 // returns the diff text. cwd must resolve inside the host's allowed roots.
 // The diff is limited to files under cwd (via `-- .` pathspec) so the
 // preview respects the same sandbox boundary as the file browser.
-func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDiffMode, commit string) (string, error) {
+// nameStatus swaps the patch for `--name-status` (one "<status>\t<path>"
+// line per file; commit mode keeps the commit header above them).
+func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDiffMode, commit string, nameStatus bool) (string, error) {
 	if !fs.hostOK(host) {
 		return "", fmt.Errorf("unauthorized host %q", host)
 	}
@@ -78,6 +80,12 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 		// plain diff
 	default:
 		return "", fmt.Errorf("invalid diff mode: %q", mode)
+	}
+	if nameStatus {
+		// quotePath=false keeps non-ASCII names readable instead of octal
+		// escapes; only control characters, quotes and backslashes stay quoted.
+		args = append([]string{"-c", "core.quotePath=false"}, args...)
+		args = append(args, "--name-status")
 	}
 	// Limit the diff to files under cwd so the preview stays within the
 	// pane's sandbox boundary (consistent with the file browser).
@@ -112,6 +120,57 @@ func (fs *FileService) GitLog(ctx context.Context, host, cwd string) ([]CommitEn
 		return nil, err
 	}
 	return parseGitLog(out), nil
+}
+
+// maxLogViewCommits bounds the log view (feature "git-log-view").
+const maxLogViewCommits = 300
+
+// GitLogOptions are the log view's switches. They map to fixed flags only;
+// nothing from the client reaches git's argv as text.
+type GitLogOptions struct {
+	Oneline     bool
+	Graph       bool
+	All         bool
+	FirstParent bool
+	NoMerges    bool
+}
+
+// GitLogView runs `git log` for the log view and returns git's own text, at
+// most maxLogViewCommits commits. Hashes are always full (the view links each
+// one to `git show`, which only takes a full hash); the client shortens them
+// for display. truncated reports that the output hit the byte cap.
+func (fs *FileService) GitLogView(ctx context.Context, host, cwd string, o GitLogOptions) (content string, truncated bool, err error) {
+	if !fs.hostOK(host) {
+		return "", false, fmt.Errorf("unauthorized host %q", host)
+	}
+	if err := isSafePath(cwd, fs.roots(host)); err != nil {
+		return "", false, err
+	}
+	// Pin everything user config could change: format.pretty, log.abbrevCommit,
+	// log.decorate, color, and log.showSignature (which would run gpg).
+	pretty := "--pretty=medium"
+	if o.Oneline {
+		pretty = "--pretty=oneline"
+	}
+	args := []string{"--no-pager", "log", "--no-color", "--no-show-signature", "--no-abbrev-commit",
+		"--decorate=short", pretty, "-n", fmt.Sprintf("%d", maxLogViewCommits)}
+	if o.Graph {
+		args = append(args, "--graph")
+	}
+	if o.All {
+		args = append(args, "--all")
+	}
+	if o.FirstParent {
+		args = append(args, "--first-parent")
+	}
+	if o.NoMerges {
+		args = append(args, "--no-merges")
+	}
+	out, err := fs.runGit(ctx, host, cwd, args...)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), len(out) >= maxDiffBytes, nil
 }
 
 func parseGitLog(out []byte) []CommitEntry {

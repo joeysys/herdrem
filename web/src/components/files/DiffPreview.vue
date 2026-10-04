@@ -6,6 +6,9 @@ import { useConnectionStore } from '../../stores/connection';
 import GitStatusView from './GitStatusView.vue';
 import { useHaptic } from '../../composables/useHaptic';
 import { highlight } from '../../utils/highlight';
+import { parseNameStatus } from '../../utils/nameStatus';
+import { parseGitLog } from '../../utils/gitLog';
+import type { GitLogOptions } from '../../api/types';
 
 const diff = useDiffStore();
 const files = useFilesStore();
@@ -132,6 +135,58 @@ const sections = computed<DiffSection[]>(() => {
   }
   return result;
 });
+
+// `--name-status` view: the commit header (git show) and one row per file.
+const nameStatusView = computed(() => {
+  const s = state.value;
+  if (!s || s.format !== 'name-status' || !s.content) return null;
+  return parseNameStatus(s.content);
+});
+const canNameStatus = computed(
+  () => conn.hasFeature('git-name-status') && state.value?.mode !== 'status' && state.value?.mode !== 'log',
+);
+
+// --- log tab ---
+const LOG_SWITCHES: { key: keyof GitLogOptions; label: string; title: string }[] = [
+  { key: 'oneline', label: 'oneline', title: '--oneline: one line per commit' },
+  { key: 'graph', label: 'graph', title: '--graph: draw the branch lines' },
+  { key: 'all', label: 'all', title: '--all: every branch and tag, not just HEAD' },
+  { key: 'first_parent', label: 'first-parent', title: '--first-parent: follow only the first parent of a merge' },
+  { key: 'no_merges', label: 'no-merges', title: '--no-merges: hide merge commits' },
+];
+const logLines = computed(() => {
+  const s = state.value;
+  if (!s || s.mode !== 'log' || !s.content) return [];
+  return parseGitLog(s.content, diff.logOptions);
+});
+
+function toggleLogOption(key: keyof GitLogOptions) {
+  haptic();
+  diff.setLogOption(key, !diff.logOptions[key]);
+}
+
+function openCommit(hash: string) {
+  haptic();
+  diff.showCommit(hash);
+}
+
+const NS_LABELS: Record<string, string> = {
+  M: 'modified', A: 'added', D: 'deleted', R: 'renamed', C: 'copied', T: 'type changed', U: 'unmerged', X: 'unknown', B: 'broken pairing',
+};
+function nsLabel(status: string): string {
+  if (status.length > 1) return `merge: ${status.split('').map((c) => NS_LABELS[c] ?? c).join(' / ')}`;
+  return NS_LABELS[status] ?? status;
+}
+
+function toggleNameStatus() {
+  haptic();
+  diff.setNameStatus(!diff.nameStatus);
+}
+
+function showPatch(path: string) {
+  haptic();
+  diff.showPatchFor(path);
+}
 
 // The commit dropdown button shows only the short hash; the dropdown items
 // still show hash + subject + author + date.
@@ -261,6 +316,30 @@ watch(showCommitList, (open) => {
         >
           commit
         </button>
+        <button
+          v-if="conn.hasFeature('git-log-view')"
+          class="dp-mode"
+          :class="{ active: state.mode === 'log' }"
+          :aria-pressed="state.mode === 'log'"
+          title="Commit history (git log)"
+          @click="pickMode('log')"
+        >
+          log
+        </button>
+      </div>
+
+      <div v-if="state.mode === 'log'" class="dp-modes" role="group" aria-label="Log options">
+        <button
+          v-for="o in LOG_SWITCHES"
+          :key="o.key"
+          class="dp-mode"
+          :class="{ active: diff.logOptions[o.key] }"
+          :aria-pressed="diff.logOptions[o.key]"
+          :title="o.title"
+          @click="toggleLogOption(o.key)"
+        >
+          {{ o.label }}
+        </button>
       </div>
 
       <div v-if="state.mode === 'commit'" class="dp-commit-wrap">
@@ -294,6 +373,16 @@ watch(showCommitList, (open) => {
       </div>
 
       <button
+        v-if="canNameStatus"
+        class="dp-btn"
+        :class="{ active: diff.nameStatus }"
+        :aria-pressed="diff.nameStatus"
+        :title="diff.nameStatus ? 'Show the patch' : 'List changed files only (--name-status)'"
+        @click="toggleNameStatus"
+      >
+        name-status
+      </button>
+      <button
         class="dp-btn"
         :class="{ active: diff.halfScreen }"
         :aria-label="diff.halfScreen ? 'Expand to full screen' : 'Switch to half screen'"
@@ -317,9 +406,46 @@ watch(showCommitList, (open) => {
 
       <div v-else-if="state.loading" class="dp-loading">loading diff…</div>
 
+      <div v-else-if="state.mode === 'log'" class="dp-log">
+        <div v-if="!logLines.length" class="dp-empty">no commits</div>
+        <div v-else class="dp-log-text mono" role="region" aria-label="Commit history">
+          <div v-for="(l, i) in logLines" :key="i" class="dp-log-line"><span v-if="l.graph" class="dp-log-graph">{{ l.graph }}</span><template v-if="l.hash"><span v-if="l.keyword" class="dp-log-kw">commit </span><button type="button" class="dp-log-hash" :title="`Show commit ${l.hash.slice(0, 7)}`" :aria-label="`Show commit ${l.hash.slice(0, 7)}`" @click="openCommit(l.hash)">{{ l.keyword ? l.hash : l.hash.slice(0, 7) }}</button><span v-if="l.decor" class="dp-log-decor">{{ l.decor }}</span></template>{{ l.text }}</div>
+        </div>
+        <p v-if="logLines.length" class="dp-log-foot">
+          {{ state.logTruncated ? 'output cut at 1 MiB — ' : '' }}showing up to {{ state.logLimit }} commits
+        </p>
+      </div>
+
       <div v-else-if="!state.content" class="dp-empty">
         <span v-if="state.mode === 'commit' && !state.commit">pick a commit to show its diff</span>
         <span v-else>no changes</span>
+      </div>
+
+      <div v-else-if="nameStatusView" class="dp-ns">
+        <pre v-if="nameStatusView.header" class="dp-ns-header mono">{{ nameStatusView.header }}</pre>
+        <ul v-if="nameStatusView.entries.length" class="dp-ns-list" aria-label="Changed files">
+          <li
+            v-for="e in nameStatusView.entries"
+            :key="e.status + (e.orig ?? '') + e.path"
+            class="dp-ns-row"
+            :data-path="e.path"
+          >
+            <span class="dp-ns-badge mono" :class="`s-${e.status[0]}`" :title="nsLabel(e.status)" :aria-label="nsLabel(e.status)">{{ e.status }}</span>
+            <button type="button" class="dp-ns-path mono" :title="`Show diff of ${e.path}`" @click="showPatch(e.path)">
+              {{ e.path }}<span v-if="e.orig" class="dp-ns-dim"> ← {{ e.orig }}</span>
+            </button>
+            <span v-if="e.score" class="dp-ns-dim mono" :title="`${e.score}% similar`">{{ +e.score }}%</span>
+            <button
+              v-if="e.status !== 'D'"
+              type="button"
+              class="dp-ns-open mono"
+              :aria-label="`Open ${e.path}`"
+              :title="`Open ${e.path}`"
+              @click="openFilePath(e.path)"
+            >open</button>
+          </li>
+        </ul>
+        <div v-else class="dp-empty">no file changes</div>
       </div>
 
       <div v-else class="dp-files">
@@ -569,6 +695,76 @@ watch(showCommitList, (open) => {
    block instead of the outer .dp-scroll). The rounded corners are applied
    to the header instead. */
 .dp-file.flash { box-shadow: inset 3px 0 0 var(--blue); transition: box-shadow 0.3s; }
+
+.dp-log { padding: 10px 0 16px; }
+.dp-log-text {
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text);
+  overflow-x: auto;
+  padding: 0 12px;
+}
+.dp-log-line { white-space: pre; min-height: 1.55em; }
+.dp-log-graph { color: var(--muted); }
+.dp-log-kw { color: var(--orange); }
+.dp-log-hash {
+  font: inherit;
+  color: var(--orange);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.dp-log-hash:hover { color: var(--blue); text-decoration: underline; }
+.dp-log-decor { color: var(--green); }
+.dp-log-foot {
+  margin: 10px 12px 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--faint);
+}
+
+.dp-ns { padding: 10px 12px 16px; }
+.dp-ns-header {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: var(--text-2xs);
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dp-ns-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dp-ns-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
+.dp-ns-row:hover { background: var(--surface-2); }
+.dp-ns-badge {
+  flex-shrink: 0; min-width: 18px; text-align: center; font-size: var(--text-2xs); font-weight: 700; color: var(--text-dim);
+}
+.dp-ns-badge.s-M, .dp-ns-badge.s-T { color: var(--orange); }
+.dp-ns-badge.s-A { color: var(--green); }
+.dp-ns-badge.s-D { color: var(--red); }
+.dp-ns-badge.s-R, .dp-ns-badge.s-C { color: var(--blue); }
+.dp-ns-badge.s-U { color: #fff; background: var(--red); border-radius: 3px; }
+.dp-ns-path {
+  flex: 1; min-width: 0; text-align: left; background: none; border: none; padding: 2px 0;
+  font-size: var(--text-xs); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.dp-ns-path:hover { color: var(--blue); }
+.dp-ns-dim { color: var(--faint); font-size: var(--text-2xs); flex-shrink: 0; }
+.dp-ns-open {
+  flex-shrink: 0; font-size: var(--text-2xs); color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 2px 7px;
+}
+.dp-ns-open:hover { color: var(--text); }
 .dp-files {
   min-width: 100%;
   padding: 8px;

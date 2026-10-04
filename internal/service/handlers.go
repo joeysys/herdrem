@@ -216,7 +216,11 @@ func (s *Service) handleGitDiff(ctx context.Context, conn *websocket.Conn, data 
 	if mode == "" {
 		mode = GitDiffUnstaged
 	}
-	content, err := s.files.GitDiff(ctx, msg.Host, msg.Cwd, mode, msg.Commit)
+	if msg.Format != "" && msg.Format != "name-status" {
+		s.sendErrorKeyReq(ctx, conn, "git_diff", "invalid diff format: "+msg.Format, "invalid", msg.ReqID)
+		return
+	}
+	content, err := s.files.GitDiff(ctx, msg.Host, msg.Cwd, mode, msg.Commit, msg.Format == "name-status")
 	if err != nil {
 		code := "git_error"
 		if isPermErr(err) {
@@ -230,8 +234,48 @@ func (s *Service) handleGitDiff(ctx context.Context, conn *websocket.Conn, data 
 		Cwd:     msg.Cwd,
 		Mode:    string(mode),
 		Commit:  msg.Commit,
+		Format:  msg.Format,
 		Content: content,
 		ReqID:   msg.ReqID,
+	})
+}
+
+func (s *Service) handleGitLogView(ctx context.Context, conn *websocket.Conn, data []byte) {
+	if s.files == nil {
+		s.sendErrorKeyReq(ctx, conn, "git_log_view", "files not available", "unavailable", "")
+		return
+	}
+	var msg protocol.GitLogView
+	if err := json.Unmarshal(data, &msg); err != nil {
+		s.sendErrorKeyReq(ctx, conn, "git_log_view", "invalid message: "+err.Error(), "invalid", "")
+		return
+	}
+	if msg.Cwd == "" {
+		s.sendErrorKeyReq(ctx, conn, "git_log_view", "missing cwd", "invalid", msg.ReqID)
+		return
+	}
+	content, truncated, err := s.files.GitLogView(ctx, msg.Host, msg.Cwd, GitLogOptions{
+		Oneline:     msg.Oneline,
+		Graph:       msg.Graph,
+		All:         msg.All,
+		FirstParent: msg.FirstParent,
+		NoMerges:    msg.NoMerges,
+	})
+	if err != nil {
+		code := "git_error"
+		if isPermErr(err) {
+			code = "permission"
+		}
+		s.sendErrorKeyReq(ctx, conn, "git_log_view", err.Error(), code, msg.ReqID)
+		return
+	}
+	s.sendJSON(ctx, conn, protocol.GitLogViewResult{
+		Type:      "git_log_view_result",
+		Cwd:       msg.Cwd,
+		Content:   content,
+		Limit:     maxLogViewCommits,
+		Truncated: truncated,
+		ReqID:     msg.ReqID,
 	})
 }
 
