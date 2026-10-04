@@ -411,9 +411,9 @@ describe('TermView header menu', () => {
   it('the phone menu has no fullscreen (the terminal already fills the screen there) but keeps zoom', async () => {
     const w = mountView('agent')
     await w.get('.mobile-only button[aria-label="More actions"]').trigger('click')
-    const items = w.findAll('.head-menu [role="menuitem"]').map((b) => b.attributes('aria-label'))
+    const items = w.findAll('.head-menu [role="menuitem"]').map((b) => b.attributes('aria-label') ?? '')
     expect(items).not.toContain('Toggle fullscreen')
-    expect(items).toContain('Toggle zoom')
+    expect(items).toContain('Toggle zoom (now 100%)')
   })
 
   it('the desktop fullscreen button is marked to hide below 900px', () => {
@@ -426,7 +426,38 @@ describe('TermView header menu', () => {
     const scroll = w.get('.term-scroll').element as HTMLElement
     expect(scroll.style.getPropertyValue('--term-zoom')).toBe('1.000')
     await w.get('.mobile-only button[aria-label="More actions"]').trigger('click')
-    await w.get('.head-menu [aria-label="Toggle zoom"]').trigger('click')
+    await w.get('.head-menu [aria-label^="Toggle zoom"]').trigger('click')
     expect(scroll.style.getPropertyValue('--term-zoom')).toBe('1.500')
+  })
+
+  it('shows the zoom: the menu item is active with its value, and a header chip resets it', async () => {
+    const w = mountView('agent')
+    const menuItem = async () => {
+      await w.get('.mobile-only button[aria-label="More actions"]').trigger('click')
+      return w.get('.head-menu [aria-label^="Toggle zoom"]')
+    }
+    let item = await menuItem()
+    expect(item.classes()).not.toContain('active')
+    expect(item.get('.menu-val').text()).toBe('100%')
+    expect(w.find('.zoom-chip').exists()).toBe(false)
+
+    // ctrl+wheel out: smaller than 100% counts as zoomed too
+    w.get('.term-scroll').element.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, ctrlKey: true, cancelable: true }))
+    await nextTick()
+    expect(w.get('.zoom-chip').text()).toBe('90%')
+    item = w.get('.head-menu [aria-label^="Toggle zoom"]')
+    expect(item.classes()).toContain('active')
+    expect(item.get('.menu-val').text()).toBe('90%')
+    expect(item.attributes('aria-label')).toBe('Toggle zoom (now 90%)')
+
+    // the toggle goes back to 100% from any zoom, not on to 150%
+    await item.trigger('click')
+    expect(w.find('.zoom-chip').exists()).toBe(false)
+
+    await (await menuItem()).trigger('click')
+    expect(w.get('.zoom-chip').text()).toBe('150%')
+    await w.get('.zoom-chip').trigger('click')
+    expect(w.find('.zoom-chip').exists()).toBe(false)
+    expect((w.get('.term-scroll').element as HTMLElement).style.getPropertyValue('--term-zoom')).toBe('1.000')
   })
 })

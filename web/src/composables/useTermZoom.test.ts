@@ -44,4 +44,37 @@ describe('useTermZoom', () => {
     expect(z.zoom.value).toBeCloseTo(1.5)
     expect(el.style.getPropertyValue('--term-zoom')).toBe('1.500')
   })
+
+  it('a slow pinch still leaves 100%, though small values near it snap', () => {
+    const el = document.createElement('div')
+    const z = useTermZoom(ref(el))
+    z.setZoom(1)
+    z.bind(el)
+    const touches = (d: number) => [{ clientX: 0, clientY: 0 }, { clientX: d, clientY: 0 }]
+    const fire = (type: string, list: unknown[]) => {
+      const e = new Event(type, { cancelable: true }) as Event & { touches: unknown[] }
+      Object.defineProperty(e, 'touches', { value: list })
+      el.dispatchEvent(e)
+    }
+    fire('touchstart', touches(200))
+    fire('touchmove', touches(205)) // +2.5%: snaps to 100%
+    expect(z.percent.value).toBe(100)
+    for (let d = 210; d <= 240; d += 5) fire('touchmove', touches(d))
+    expect(z.percent.value).toBe(120)
+  })
+
+  it('wheel steps land back on 100% and report a whole percentage', () => {
+    const el = document.createElement('div')
+    const z = useTermZoom(ref(el))
+    z.setZoom(1)
+    z.bind(el)
+    const wheel = (deltaY: number) => el.dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, cancelable: true }))
+    wheel(-1)
+    expect(z.percent.value).toBe(110)
+    wheel(1) // 1.1 × 0.9 = 0.99
+    expect(z.zoom.value).toBe(1)
+    expect(z.percent.value).toBe(100)
+    wheel(1)
+    expect(z.percent.value).toBe(90)
+  })
 })

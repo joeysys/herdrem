@@ -492,9 +492,12 @@ function openStatus() {
   diff.openDiff(pane.value?.cwd || '/', pane.value?.host || 'local', 'status')
 }
 
+// Any zoom other than 100% — larger or smaller — is "zoomed": the menu item
+// shows it, a header chip shows the value, and the toggle goes back to 100%.
+const zoomed = computed(() => zoom.percent.value !== 100)
+
 function toggleZoom() {
-  if (zoom.zoom.value > 1.05) zoom.setZoom(1)
-  else zoom.setZoom(1.5)
+  zoom.setZoom(zoomed.value ? 1 : 1.5)
 }
 
 function markDone() {
@@ -617,6 +620,15 @@ onUnmounted(() => {
         <i class="dot"></i>{{ pane?.status || '—' }}
       </span>
 
+      <button
+        v-if="zoomed"
+        type="button"
+        class="zoom-chip"
+        :aria-label="`Zoom ${zoom.percent.value}%, reset to 100%`"
+        title="Reset zoom to 100%"
+        @click="zoom.setZoom(1)"
+      >{{ zoom.percent.value }}%</button>
+
       <!-- Desktop: show all buttons inline -->
       <div class="head-actions desktop-only">
         <button class="icon-btn" aria-label="Browse files" :title="fileTitle" @click.stop="openFiles"><TermIcon name="files" /></button>
@@ -665,7 +677,7 @@ onUnmounted(() => {
           <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false"><TermIcon name="todo" />Todo</button>
           <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false"><TermIcon name="search" />Search</button>
           <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false"><TermIcon name="history" />History</button>
-          <button type="button" role="menuitem" aria-label="Toggle zoom" :class="{ active: zoom.zoom.value > 1.05 }" @click="toggleZoom(); showMenu = false"><TermIcon name="zoom" />Zoom</button>
+          <button type="button" role="menuitem" :aria-label="`Toggle zoom (now ${zoom.percent.value}%)`" :class="{ active: zoomed }" @click="toggleZoom(); showMenu = false"><TermIcon name="zoom" />Zoom<span class="menu-val">{{ zoom.percent.value }}%</span></button>
           <button type="button" role="menuitem" aria-label="Refresh output" @click="term.clearPaneCache(props.paneId); showMenu = false"><TermIcon name="refresh" />Refresh</button>
           <button type="button" role="menuitem" aria-label="Open settings" @click="emit('openSettings'); showMenu = false"><TermIcon name="settings" />Settings</button>
         </div>
@@ -844,6 +856,20 @@ onUnmounted(() => {
 }
 .head-menu button:hover { background: var(--surface-2); color: var(--text); }
 .head-menu button.active { color: var(--blue); }
+.menu-val { margin-left: auto; padding-left: 12px; font-size: var(--text-2xs); color: var(--muted); }
+.head-menu button.active .menu-val { color: var(--blue); }
+.zoom-chip {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--blue);
+  background: var(--blue-soft);
+  border: 1px solid rgba(96, 165, 250, .5);
+  border-radius: 999px;
+}
+.zoom-chip:hover { filter: brightness(1.15); }
 
 @media (max-width: 639px) {
   .desktop-only { display: none; }
