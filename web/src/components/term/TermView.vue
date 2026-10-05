@@ -485,31 +485,54 @@ watch(isShell, (v) => {
 // as "the user scrolled up" unpinned the view while the user was at the
 // bottom: output stopped following, and the full re-render that unpinning
 // switches to could land far up in the history. So a scroll away from the
-// bottom only unpins within a moment of real scroll input (wheel, touch,
-// scrollbar drag, scroll keys, or a search jump); the scroll events that
-// follow, e.g. a fling's momentum, keep that gesture alive.
+// bottom only unpins within a moment of input that moves the view up: an
+// upward wheel, a finger dragged down, a press on the scrollbar, up-scroll
+// keys, or a search jump. A tap is not one — tapping a shell's prompt (it
+// sits inside the scroller) opens the soft keyboard right after. Scroll
+// events away from the bottom, e.g. a fling's momentum, keep the gesture
+// alive; those at the bottom (following output) do not.
 const SCROLL_INTENT_MS = 700
-const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '])
+const SCROLL_UP_KEYS = new Set(['PageUp', 'ArrowUp', 'Home'])
+const TOUCH_SLOP = 8
 let scrollIntentAt = -Infinity
 function markScrollIntent() {
   scrollIntentAt = performance.now()
 }
 function onScrollKey(e: KeyboardEvent) {
-  if (SCROLL_KEYS.has(e.key) && !isTextInput(e.target)) markScrollIntent()
+  if (isTextInput(e.target)) return
+  if (SCROLL_UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) markScrollIntent()
+}
+function onWheel(e: WheelEvent) {
+  if (e.deltaY < 0) markScrollIntent()
+}
+// highest point the finger reached this touch; dragging down from it past
+// the slop scrolls the view up
+let touchTop: number | null = null
+function onTouchStart(e: TouchEvent) {
+  touchTop = e.touches[0]?.clientY ?? null
+}
+function onTouchMove(e: TouchEvent) {
+  const y = e.touches[0]?.clientY
+  if (touchTop === null || y === undefined) return
+  if (y < touchTop) touchTop = y
+  else if (y - touchTop > TOUCH_SLOP) markScrollIntent()
+}
+function onScrollerPointerDown(e: PointerEvent) {
+  // the scrollbar belongs to the scroller itself; a press on the text hits a child
+  if (e.target === e.currentTarget && e.pointerType !== 'touch') markScrollIntent()
 }
 
 function onScroll() {
   const el = scrollEl.value
   if (!el) return
   const near = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-  const now = performance.now()
-  const intent = now - scrollIntentAt < SCROLL_INTENT_MS
-  if (intent) scrollIntentAt = now
   if (near) {
     term.stickBottom = true
     return
   }
-  if (intent) {
+  const now = performance.now()
+  if (now - scrollIntentAt < SCROLL_INTENT_MS) {
+    scrollIntentAt = now
     term.stickBottom = false
     return
   }
@@ -766,10 +789,10 @@ onUnmounted(() => {
         ref="scrollEl"
         class="term-scroll"
         @scroll.passive="onScroll"
-        @wheel.passive="markScrollIntent"
-        @touchstart.passive="markScrollIntent"
-        @touchmove.passive="markScrollIntent"
-        @pointerdown="markScrollIntent"
+        @wheel.passive="onWheel"
+        @touchstart.passive="onTouchStart"
+        @touchmove.passive="onTouchMove"
+        @pointerdown="onScrollerPointerDown"
         @click="isShell && autoFocusShellInput()"
       >
         <div v-if="term.loading && !term.content" class="term-loading" aria-live="polite">

@@ -341,6 +341,9 @@ watch(activeSpaceId, (id, oldId) => {
 // bare delta check reads as intent and flip-flops the header — the state
 // machine filters those deltas out.
 const listScrollEl = ref<HTMLElement | null>(null);
+const topbarEl = ref<HTMLElement | null>(null);
+const listHeadEl = ref<HTMLElement | null>(null);
+const filtersRef = ref<{ $el: HTMLElement } | null>(null);
 const hideHeader = ref(false);
 const autoHide = createAutoHideScroll();
 let contentDirtyAt = 0;
@@ -351,12 +354,21 @@ function onListScroll() {
   const el = listScrollEl.value;
   if (!el) return;
   const now = performance.now();
+  // Hiding the chrome hands its height to the scroller, so the scroll room
+  // left once hidden is today's room minus whatever the chrome takes now —
+  // exact even mid-transition, as the two heights always add up.
+  const chrome = [topbarEl.value, listHeadEl.value, filtersRef.value?.$el].reduce(
+    (h, e) => h + (e instanceof HTMLElement ? e.offsetHeight : 0),
+    0,
+  );
+  const maxScroll = el.scrollHeight - el.clientHeight;
   autoHideStep(
     autoHide,
     el.scrollTop,
-    el.scrollHeight - el.clientHeight,
+    maxScroll,
     now,
     now - contentDirtyAt < AUTO_HIDE.dirtyWindow,
+    maxScroll - chrome,
   );
   hideHeader.value = autoHide.hidden;
 }
@@ -883,7 +895,8 @@ onMounted(() => {
       document.removeEventListener('pointerdown', lockOnce);
     };
     document.addEventListener('pointerdown', lockOnce, { once: true });
-    trap.arm(backHandler, backDepth);
+    // a tap that refills the trap makes the next back show the toast again
+    trap.arm(backHandler, backDepth, clearExitToast);
     // Opening a layer happens inside the tap that opened it, so the entries
     // for the new depth still count as user-initiated (the trap checks).
     watch(backDepth, () => trap.topUp());
@@ -958,9 +971,16 @@ function backHandler(): boolean {
   }
   exitToast.value = true;
   if (exitToastTimer) clearTimeout(exitToastTimer);
-  exitToastTimer = setTimeout(() => {
-    exitToast.value = false;
-  }, 2500);
+  exitToastTimer = null;
+  // With the trap's last entry spent, the next system back leaves at once
+  // and nothing can be pushed until the user taps. A toast that timed out
+  // would hide that, so it stays until a tap refills the trap and clears it
+  // (the back after that shows it again).
+  if (trap.hasCredit()) {
+    exitToastTimer = setTimeout(() => {
+      exitToast.value = false;
+    }, 2500);
+  }
   return true;
 }
 
@@ -1026,6 +1046,7 @@ onUnmounted(() => {
   </div>
   <div v-else class="app">
     <header
+      ref="topbarEl"
       class="topbar"
       :class="{
         'hide-mobile': view === 'term' && !splitMode,
@@ -1131,7 +1152,7 @@ onUnmounted(() => {
         "
       >
         <div class="list-view view-enter">
-          <div class="list-head" :class="{ 'auto-hidden': hideHeader }">
+          <div ref="listHeadEl" class="list-head" :class="{ 'auto-hidden': hideHeader }">
             <div class="head-counts">
               <span class="count-group"
                 ><span class="count agents">{{ agents.counts.agents }}</span
@@ -1174,7 +1195,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <AgentFilters :class="{ 'auto-hidden': hideHeader }" />
+          <AgentFilters ref="filtersRef" :class="{ 'auto-hidden': hideHeader }" />
 
           <div ref="listScrollEl" class="list-scroll" @scroll.passive="onListScroll">
             <SpaceView

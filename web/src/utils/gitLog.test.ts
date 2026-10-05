@@ -41,6 +41,22 @@ describe('parseGitLog', () => {
     expect(lines[1]).toEqual({ graph: '| ', text: 'Author: A <a@x>' })
   })
 
+  // Bug: the body-line graph match was greedy over spaces and took git's
+  // message indent (and a message's own "*") as drawing; octopus "-" / "."
+  // connectors leaked into the text.
+  it('medium --graph keeps the message indent and bullets as text', () => {
+    const out = `*   commit ${H1}\n|\\  Merge: a b\n| | Author: A <a@x>\n| |\n| |     subject stays indented\n| |     * bullet\n| |     - dash\n|\\-.  \n| | \\ \n`
+    const lines = parseGitLog(out, { oneline: false, graph: true })
+    expect(lines[1]).toEqual({ graph: '|\\', text: '  Merge: a b' })
+    expect(lines[2]).toEqual({ graph: '| | ', text: 'Author: A <a@x>' })
+    expect(lines[3]).toEqual({ graph: '| |', text: '' })
+    expect(lines[4]).toEqual({ graph: '| | ', text: '    subject stays indented' })
+    expect(lines[5]).toEqual({ graph: '| | ', text: '    * bullet' })
+    expect(lines[6]).toEqual({ graph: '| | ', text: '    - dash' })
+    expect(lines[7]).toEqual({ graph: '|\\-.  ', text: '' })
+    expect(lines[8]).toEqual({ graph: '| | \\ ', text: '' })
+  })
+
   it('empty output is no lines', () => {
     expect(parseGitLog('', { oneline: true, graph: true })).toEqual([])
   })

@@ -97,6 +97,33 @@ describe('autoHideStep', () => {
     expect(s.hidden).toBe(false)
   })
 
+  // Bug: hiding hands the chrome's height to the scroller. With 185px of room
+  // and 258px of chrome (as measured on a phone with 8 cards), the room left
+  // was below minRoom, so the header showed again at once — and hid on the
+  // next scroll, flickering while the user scrolled to the bottom.
+  it('does not hide when the room left after hiding would show it again', () => {
+    const CHROME = 258
+    const layout = (shown: number, s: AutoHideScroll) => (s.hidden ? shown - CHROME : shown)
+    for (const shown of [185, 353]) {
+      const s = createAutoHideScroll()
+      let st = 0
+      let toggles = 0
+      for (let i = 0; i < 40; i++) {
+        now += 16
+        st = Math.min(st + 20, layout(shown, s)) // drag down; the scroller clamps
+        const was = s.hidden
+        autoHideStep(s, st, layout(shown, s), now, false, shown - CHROME)
+        if (s.hidden !== was) toggles++
+      }
+      expect(toggles).toBe(0)
+    }
+    // plenty of room once hidden: hides as before
+    const s = createAutoHideScroll()
+    s.lastSt = 200
+    for (let i = 0; i < 10; i++) autoHideStep(s, 200 + 20 * (i + 1), 773, (now += 16), false, 773 - CHROME)
+    expect(s.hidden).toBe(true)
+  })
+
   it('always shows when barely scrollable or near the top', () => {
     const s = createAutoHideScroll()
     s.hidden = true

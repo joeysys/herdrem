@@ -19,7 +19,13 @@ export interface LogLine {
 const GRAPH = String.raw`[*|/\\_ .\-]*?`
 const ONELINE = new RegExp(String.raw`^(${GRAPH})([0-9a-f]{40})( \([^)]*\))?(.*)$`)
 const MEDIUM = new RegExp(String.raw`^(${GRAPH})commit ([0-9a-f]{40})( \([^)]*\))?(.*)$`)
-const GRAPH_ONLY = /^[*|/\\_ ]*/
+// A line of nothing but drawing (connectors between commits).
+const GRAPH_LINE = /^[*|/\\_ .\-]*$/
+// The drawing in front of a message line: one cell per lane, each a symbol
+// and its gap. Stopping at the first cell that starts with a space leaves
+// git's own indent ("|     subject") and any "*" or "-" of the message
+// with the text.
+const GRAPH_CELLS = /^(?:[|/\\_.\-][ |/\\_.\-])*/
 
 export function parseGitLog(content: string, opts: { oneline: boolean; graph: boolean }): LogLine[] {
   const lines = content.replace(/\n$/, '').split('\n')
@@ -31,7 +37,7 @@ export function parseGitLog(content: string, opts: { oneline: boolean; graph: bo
     }
     // body lines: only peel off a graph prefix when one was asked for, so an
     // indented message line keeps its own leading characters
-    const graph = opts.graph ? GRAPH_ONLY.exec(line)![0] : ''
+    const graph = !opts.graph ? '' : GRAPH_LINE.test(line) ? line : GRAPH_CELLS.exec(line)![0]
     return { graph, text: line.slice(graph.length) }
   })
 }

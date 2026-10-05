@@ -71,7 +71,7 @@ describe('TermView scroll-up from the tail window', () => {
     expect(el.textContent).not.toContain('│ old 0') // windowed
 
     // user scrolls 100px up from the bottom
-    el.dispatchEvent(new Event('wheel'))
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
     el.scrollTop = el.scrollHeight - CLIENT_H - 100
     const fromBottom = el.scrollHeight - el.scrollTop
     el.dispatchEvent(new Event('scroll'))
@@ -106,7 +106,7 @@ describe('TermView while reading back', () => {
     const win = (from: number) => Array.from({ length: 500 }, (_, i) => `line ${from + i}`).join('\n')
     term.setContent('p1', win(0))
     await settle()
-    el.dispatchEvent(new Event('wheel')) // the user scrolls…
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })) // the user scrolls…
     el.scrollTop = 3000 // …well above the bottom
     el.dispatchEvent(new Event('scroll'))
     await settle()
@@ -181,7 +181,7 @@ describe('TermView while reading back', () => {
 // view unpinned at the bottom, stopped following output, and switched to the
 // full render, which could land far up once the history above changed.
 describe('TermView scroll events the user did not make', () => {
-  it('keep the view pinned and at the bottom', async () => {
+  async function pinned() {
     useAgentsStore().setAgents([{ pane_id: 'p1', project: 'demo', cwd: '/tmp', host: 'local', status: 'idle', kind: 'agent' }])
     const term = useTerminalStore()
     term.activePane = 'p1'
@@ -190,22 +190,64 @@ describe('TermView scroll events the user did not make', () => {
     fakeLayout(el)
     term.setContent('p1', Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n'))
     await settle()
-    const windowed = el.scrollHeight
-
-    // layout leaves the view 150px above the bottom and the browser fires scroll
+    return { term, wrapper, el }
+  }
+  // layout leaves the view 150px above the bottom and the browser fires scroll
+  async function layoutScroll(el: HTMLElement) {
     el.scrollTop = el.scrollHeight - CLIENT_H - 150
     el.dispatchEvent(new Event('scroll'))
     await settle()
+  }
+  const touch = (type: string, clientY: number) => Object.assign(new Event(type), { touches: [{ clientY }] })
+
+  it('keep the view pinned and at the bottom', async () => {
+    const { term, wrapper, el } = await pinned()
+    const windowed = el.scrollHeight
+
+    await layoutScroll(el)
     expect(term.stickBottom).toBe(true)
     expect(el.scrollTop).toBe(el.scrollHeight - CLIENT_H)
     expect(el.scrollHeight).toBe(windowed) // still the tail window, no full re-render
 
-    // the same position reached by the user does unpin
-    el.dispatchEvent(new Event('touchstart'))
-    el.scrollTop = el.scrollHeight - CLIENT_H - 150
-    el.dispatchEvent(new Event('scroll'))
-    await settle()
+    // the same position reached by a finger dragging the text down does unpin
+    el.dispatchEvent(touch('touchstart', 100))
+    el.dispatchEvent(touch('touchmove', 160))
+    await layoutScroll(el)
     expect(term.stickBottom).toBe(false)
+    wrapper.unmount()
+  })
+
+  // Bug: a tap counted as scroll input. Tapping a shell's prompt (inside the
+  // scroller) opens the soft keyboard, and the shrink that followed unpinned
+  // the view.
+  it('a tap, then the keyboard shrinking the view, stays pinned', async () => {
+    const { term, wrapper, el } = await pinned()
+    const text = el.querySelector('.ansi-stream')!
+    text.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    text.dispatchEvent(touch('touchstart', 300))
+    text.dispatchEvent(touch('touchmove', 303)) // a tap wobbles a few pixels
+    await layoutScroll(el)
+    expect(term.stickBottom).toBe(true)
+    expect(el.scrollTop).toBe(el.scrollHeight - CLIENT_H)
+    wrapper.unmount()
+  })
+
+  // Bug: any wheel, and every scroll event while following output, renewed
+  // the intent window, so a layout shrink during streaming read as a scroll up.
+  it('a downward wheel or following output at the bottom does not arm an unpin', async () => {
+    const { term, wrapper, el } = await pinned()
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: 100 })) // already at the bottom
+    await layoutScroll(el)
+    expect(term.stickBottom).toBe(true)
+
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })) // a nudge that stays at the bottom
+    for (let i = 0; i < 3; i++) { // output keeps the view moving there past the gesture
+      await new Promise((r) => setTimeout(r, 300))
+      el.scrollTop = el.scrollHeight
+      el.dispatchEvent(new Event('scroll'))
+    }
+    await layoutScroll(el)
+    expect(term.stickBottom).toBe(true)
     wrapper.unmount()
   })
 })

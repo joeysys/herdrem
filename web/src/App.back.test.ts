@@ -618,6 +618,34 @@ describe('system back in the installed PWA under Chrome history skipping', () =>
     teardown(chrome, wrapper);
   });
 
+  // Bug: the toast timed out after 2.5s while the back that showed it had
+  // spent the trap's last entry, so the next back left without a toast.
+  it('the exit toast stays until a tap; after the tap, back shows it again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { chrome, wrapper } = await setup();
+    try {
+      chrome.tap(wrapper.get('.agent-card').element);
+      await flush();
+      await chrome.systemBack(); // term → list
+      await chrome.systemBack(); // toast
+      expect(wrapper.find('.exit-toast').exists()).toBe(true);
+
+      vi.advanceTimersByTime(5000);
+      await flush();
+      expect(wrapper.find('.exit-toast').exists()).toBe(true); // still warning
+
+      chrome.tap(document.body); // refills the trap, so the warning can go
+      await flush();
+      expect(wrapper.find('.exit-toast').exists()).toBe(false);
+      await chrome.systemBack();
+      expect(chrome.exited).toBe(false);
+      expect(wrapper.find('.exit-toast').exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      teardown(chrome, wrapper);
+    }
+  });
+
   it('a terminal opened without a tap (e.g. a new pane) adds no entry of its own', async () => {
     const { chrome, wrapper } = await setup();
     chrome.tap(wrapper.get('.agent-card').element); // a tap fills the trap

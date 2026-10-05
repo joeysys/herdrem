@@ -53,6 +53,7 @@ export function useHistoryTrap() {
   // false from a back until the next tap / keypress: pushes made in between
   // would be taken as made without activation
   let fresh = true
+  let onRefill: (() => void) | null = null
 
   function onPop() {
     if (!armed || !handler) return
@@ -66,11 +67,19 @@ export function useHistoryTrap() {
    *  only while a fresh user activation makes them count. */
   function topUp() {
     if (!armed || !fresh || !hasActivation()) return
+    const was = credit
     const want = depthOf() + 1
     while (credit < want) {
       window.history.pushState({ herdremTrap: true }, '')
       credit++
     }
+    if (was === 0 && credit > 0) onRefill?.()
+  }
+
+  /** whether a back would still land on an entry the trap pushed; with none
+   *  left, the next system back leaves the app without a popstate. */
+  function hasCredit() {
+    return armed && credit > 0
   }
 
   // A tap ends on pointerup (touch only activates there); a keypress other
@@ -83,10 +92,12 @@ export function useHistoryTrap() {
 
   /** start intercepting back; cb returns true if it closed a layer, depth
    *  counts the backs the UI needs to reach its root (over-counting only
-   *  costs spare history entries). */
-  function arm(cb: () => boolean, depth?: () => number) {
+   *  costs spare history entries), refill runs when a tap pushes entries
+   *  again after the last one was spent. */
+  function arm(cb: () => boolean, depth?: () => number, refill?: () => void) {
     handler = cb
     if (depth) depthOf = depth
+    if (refill) onRefill = refill
     if (armed || !isStandalone()) return
     armed = true
     fresh = true
@@ -100,6 +111,7 @@ export function useHistoryTrap() {
     if (!armed) return
     armed = false
     handler = null
+    onRefill = null
     credit = 0
     window.removeEventListener('popstate', onPop)
     window.removeEventListener('pointerup', onInput, true)
@@ -110,5 +122,5 @@ export function useHistoryTrap() {
     return armed
   }
 
-  return { arm, disarm, isActive, topUp }
+  return { arm, disarm, isActive, topUp, hasCredit }
 }

@@ -89,6 +89,8 @@ export function isLinuxPlatform(): boolean {
   if (typeof navigator === 'undefined' || isMacPlatform()) return false
   const p = navigator.platform || ''
   const ua = navigator.userAgent || ''
+  // Android reports Linux in both, but its browser has no Alt+digit tab keys
+  if (/Android/.test(ua)) return false
   return /Linux|X11|CrOS/.test(p) || /Linux|X11|CrOS/.test(ua)
 }
 

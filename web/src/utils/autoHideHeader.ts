@@ -14,6 +14,10 @@
 //    alternating churn resets the accumulator on every reversal.
 //  - cooldown: never flip faster than the CSS transition (250ms).
 //  - lastSt resyncs on every event so the baseline can't go stale.
+//  - room after hiding: the hidden chrome's height goes to the scroller, so
+//    a list with little to spare would, once hidden, be "barely scrollable"
+//    (or clamp to the top) and show again at once — hide, show, hide while
+//    scrolling to the bottom. Only hide when the room left still counts.
 
 export interface AutoHideScroll {
   hidden: boolean
@@ -43,6 +47,8 @@ export function autoHideStep(
   maxScroll: number,
   now: number,
   dirty: boolean,
+  /** maxScroll once the header is hidden (defaults to maxScroll) */
+  roomHidden: number = maxScroll,
 ): void {
   const d = st - s.lastSt
   s.lastSt = st
@@ -72,7 +78,7 @@ export function autoHideStep(
   }
   s.acc += d
   if (now - s.lastToggleAt < AUTO_HIDE.cooldown) return
-  if (!s.hidden && s.acc >= AUTO_HIDE.hideAcc && st > AUTO_HIDE.hideBelow) {
+  if (!s.hidden && s.acc >= AUTO_HIDE.hideAcc && st > AUTO_HIDE.hideBelow && roomHidden >= AUTO_HIDE.minRoom) {
     s.hidden = true
     s.lastToggleAt = now
     s.dir = 0

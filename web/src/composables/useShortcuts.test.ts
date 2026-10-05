@@ -5,6 +5,7 @@ import {
   onShortcutKeydown,
   register,
   resetShortcutsForTests,
+  shortcutBlock,
   setShortcutContext,
   type ShortcutDef,
 } from './useShortcuts'
@@ -57,6 +58,25 @@ describe('useShortcuts', () => {
     Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
     expect(onShortcutKeydown(alt1())).toBe(true)
     expect(seen).toEqual(['1', '1', '1'])
+  })
+
+  it('Android is not a Linux tab: its browser does not take Alt+digit', () => {
+    const jump = bind({ id: 'jump', code: 'Digit1', alt: true, browserTab: 'linux-blocked', run: () => {} })
+    register(jump)
+    const ua = navigator.userAgent
+    Object.defineProperty(navigator, 'userAgent', {
+      value: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36',
+      configurable: true,
+    })
+    try {
+      for (const platform of ['Linux aarch64', '']) {
+        Object.defineProperty(navigator, 'platform', { value: platform, configurable: true })
+        expect(shortcutBlock(jump)).toBeNull()
+        expect(isShortcutActive('jump')).toBe(true)
+      }
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { value: ua, configurable: true })
+    }
   })
 
   it('matches Alt by e.code when Option rewrites e.key', () => {
