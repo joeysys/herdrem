@@ -67,7 +67,7 @@ func TestGitDiff_UnstagedAndCached(t *testing.T) {
 	initRepo(t, dir)
 	fs := NewFileService(rootsFor(dir), nil)
 
-	unstaged, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", false)
+	unstaged, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", "", false)
 	if err != nil {
 		t.Fatalf("unstaged diff: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestGitDiff_UnstagedAndCached(t *testing.T) {
 		t.Errorf("unstaged diff missing diff header:\n%s", unstaged)
 	}
 
-	cached, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", false)
+	cached, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", "", false)
 	if err != nil {
 		t.Fatalf("cached diff: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestGitDiff_Commit(t *testing.T) {
 	head := initRepo(t, dir)
 	fs := NewFileService(rootsFor(dir), nil)
 
-	out, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, head, false)
+	out, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, head, "", false)
 	if err != nil {
 		t.Fatalf("commit diff: %v", err)
 	}
@@ -110,8 +110,58 @@ func TestGitDiff_Commit(t *testing.T) {
 	}
 
 	// commit mode without a ref must error
-	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, "", false); err == nil {
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, "", "", false); err == nil {
 		t.Error("commit mode with empty ref should error")
+	}
+}
+
+func TestGitDiff_Range(t *testing.T) {
+	if !gitAvail(t) {
+		return
+	}
+	dir := t.TempDir()
+	first := initRepo(t, dir)
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("commit", "-m", "second commit")
+	secondCmd := exec.Command("git", "rev-parse", "HEAD")
+	secondCmd.Dir = dir
+	secondOut, err := secondCmd.Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	second := strings.TrimSpace(string(secondOut))
+	fs := NewFileService(rootsFor(dir), nil)
+
+	out, err := fs.GitDiff(context.Background(), "local", dir, GitDiffRange, first, second, false)
+	if err != nil {
+		t.Fatalf("range diff: %v", err)
+	}
+	if !strings.Contains(out, "b.txt") || !strings.Contains(out, "staged file") {
+		t.Errorf("range diff missing the second commit's file:\n%s", out)
+	}
+	if strings.Contains(out, "modified-unstaged") {
+		t.Errorf("range diff should compare the two trees, not the worktree:\n%s", out)
+	}
+
+	ns, err := fs.GitDiff(context.Background(), "local", dir, GitDiffRange, first, second, true)
+	if err != nil {
+		t.Fatalf("range name-status: %v", err)
+	}
+	if ns != "A\tb.txt\n" {
+		t.Errorf("range name-status = %q", ns)
+	}
+
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffRange, first, "", false); err == nil {
+		t.Error("range mode with one hash should error")
+	}
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffRange, first, "--output=/tmp/relay-owned", false); err == nil {
+		t.Error("range mode must reject a non-hash second ref")
 	}
 }
 
@@ -124,7 +174,7 @@ func TestGitDiff_NameStatus(t *testing.T) {
 	fs := NewFileService(rootsFor(dir), nil)
 	ctx := context.Background()
 
-	unstaged, err := fs.GitDiff(ctx, "local", dir, GitDiffUnstaged, "", true)
+	unstaged, err := fs.GitDiff(ctx, "local", dir, GitDiffUnstaged, "", "", true)
 	if err != nil {
 		t.Fatalf("unstaged name-status: %v", err)
 	}
@@ -132,7 +182,7 @@ func TestGitDiff_NameStatus(t *testing.T) {
 		t.Errorf("unstaged name-status = %q", unstaged)
 	}
 
-	cached, err := fs.GitDiff(ctx, "local", dir, GitDiffCached, "", true)
+	cached, err := fs.GitDiff(ctx, "local", dir, GitDiffCached, "", "", true)
 	if err != nil {
 		t.Fatalf("cached name-status: %v", err)
 	}
@@ -140,7 +190,7 @@ func TestGitDiff_NameStatus(t *testing.T) {
 		t.Errorf("cached name-status = %q", cached)
 	}
 
-	show, err := fs.GitDiff(ctx, "local", dir, GitDiffCommit, head, true)
+	show, err := fs.GitDiff(ctx, "local", dir, GitDiffCommit, head, "", true)
 	if err != nil {
 		t.Fatalf("commit name-status: %v", err)
 	}
@@ -167,7 +217,7 @@ func TestGitDiff_NameStatus(t *testing.T) {
 	run("add", "sub")
 	run("commit", "-m", "add sub")
 	run("mv", "sub/ふるい.txt", "sub/あたらしい.txt")
-	sub, err := fs.GitDiff(ctx, "local", dir+"/sub", GitDiffCached, "", true)
+	sub, err := fs.GitDiff(ctx, "local", dir+"/sub", GitDiffCached, "", "", true)
 	if err != nil {
 		t.Fatalf("subdir name-status: %v", err)
 	}
@@ -261,7 +311,7 @@ func TestGitDiff_OutsideRoots(t *testing.T) {
 	initRepo(t, dir)
 	other := t.TempDir()
 	fs := NewFileService(rootsFor(other), nil)
-	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", false); err == nil {
+	if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffUnstaged, "", "", false); err == nil {
 		t.Error("diff outside allowed roots should be rejected")
 	}
 }
@@ -347,7 +397,7 @@ func TestGitDiff_CommitRejectsOptionInjection(t *testing.T) {
 		"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", // not hex
 	}
 	for _, ref := range bad {
-		if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ref, false); err == nil {
+		if _, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCommit, ref, "", false); err == nil {
 			t.Errorf("commit ref %q should be rejected", ref)
 		}
 	}
@@ -377,7 +427,7 @@ func TestGitDiff_PathspecLimitsToCwd(t *testing.T) {
 
 	fs := NewFileService(rootsFor(dir), nil)
 	// Diff from the root should include both b.txt and sub/c.txt.
-	rootDiff, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", false)
+	rootDiff, err := fs.GitDiff(context.Background(), "local", dir, GitDiffCached, "", "", false)
 	if err != nil {
 		t.Fatalf("root cached diff: %v", err)
 	}
@@ -389,7 +439,7 @@ func TestGitDiff_PathspecLimitsToCwd(t *testing.T) {
 	}
 
 	// Diff from the subdirectory should only include sub/c.txt, not b.txt.
-	subDiff, err := fs.GitDiff(context.Background(), "local", sub, GitDiffCached, "", false)
+	subDiff, err := fs.GitDiff(context.Background(), "local", sub, GitDiffCached, "", "", false)
 	if err != nil {
 		t.Fatalf("sub cached diff: %v", err)
 	}

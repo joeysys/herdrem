@@ -105,6 +105,25 @@ describe('useDiffStore', () => {
     expect(lastSent.commit).toBe('aaa')
   })
 
+  it('range mode waits for both commits, then sends git diff A B', () => {
+    const diff = useDiffStore()
+    diff.openDiff('/repo', 'local', 'commit')
+    diff.setCommit('aaa')
+    vi.mocked(ws.send).mockClear()
+
+    diff.setMode('range')
+    expect(diff.state).toMatchObject({ mode: 'range', commit: '', commit2: 'aaa', loading: false })
+    expect(vi.mocked(ws.send).mock.calls.map((c) => (c[0] as { type: string }).type)).toEqual(['git_log'])
+
+    diff.setRangeCommit('from', 'bbb')
+    const sent = vi.mocked(ws.send).mock.lastCall?.[0] as { type: string; mode: string; commit: string; commit2: string }
+    expect(sent).toMatchObject({ type: 'git_diff', mode: 'range', commit: 'bbb', commit2: 'aaa' })
+
+    diff.swapRange()
+    const swapped = vi.mocked(ws.send).mock.lastCall?.[0] as { commit: string; commit2: string }
+    expect(swapped).toMatchObject({ commit: 'aaa', commit2: 'bbb' })
+  })
+
   it('setDiffError marks loading done and stores an error message', () => {
     const diff = useDiffStore()
     diff.openDiff('/repo', 'local')

@@ -98,11 +98,12 @@ type FileListing struct {
 type GitDiffContent struct {
 	Type    string `json:"type"` // "git_diff_content"
 	Cwd     string `json:"cwd"`
-	Mode    string `json:"mode"`             // "unstaged" | "cached" | "commit"
-	Commit  string `json:"commit,omitempty"` // echoed when mode == "commit"
-	Format  string `json:"format,omitempty"` // echoed from the request ("name-status"); empty for a patch
-	Content string `json:"content"`          // diff text (may be empty)
-	ReqID   string `json:"req_id,omitempty"` // echoed from the matching GitDiff
+	Mode    string `json:"mode"`              // "unstaged" | "cached" | "commit" | "range"
+	Commit  string `json:"commit,omitempty"`  // echoed when mode is commit or range
+	Commit2 string `json:"commit2,omitempty"` // echoed when mode == "range"
+	Format  string `json:"format,omitempty"`  // echoed from the request ("name-status"); empty for a patch
+	Content string `json:"content"`           // diff text (may be empty)
+	ReqID   string `json:"req_id,omitempty"`  // echoed from the matching GitDiff
 }
 
 // GitLogResult carries a list of recent commits for the selector.
@@ -250,11 +251,12 @@ type FileList struct {
 
 // GitDiff requests a git diff for a working directory.
 type GitDiff struct {
-	Type   string `json:"type"` // "git_diff"
-	Cwd    string `json:"cwd"`  // repo path (must be inside sandbox roots)
-	Host   string `json:"host,omitempty"`
-	Mode   string `json:"mode"`             // "unstaged" | "cached" | "commit"
-	Commit string `json:"commit,omitempty"` // required when mode == "commit"
+	Type    string `json:"type"` // "git_diff"
+	Cwd     string `json:"cwd"`  // repo path (must be inside sandbox roots)
+	Host    string `json:"host,omitempty"`
+	Mode    string `json:"mode"`              // "unstaged" | "cached" | "commit" | "range"
+	Commit  string `json:"commit,omitempty"`  // required when mode is commit or range
+	Commit2 string `json:"commit2,omitempty"` // required when mode == "range" (feature "git-range")
 	// Format is "" (patch) or "name-status" (feature "git-name-status").
 	Format string `json:"format,omitempty"`
 	ReqID  string `json:"req_id,omitempty"` // client-generated; echoed in the response

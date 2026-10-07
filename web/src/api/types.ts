@@ -128,8 +128,10 @@ export interface CommitEntry {
 export interface GitDiffContent {
   type: 'git_diff_content'
   cwd: string
-  mode: 'unstaged' | 'cached' | 'commit'
+  mode: 'unstaged' | 'cached' | 'commit' | 'range'
   commit?: string
+  /** second hash, echoed when mode is range */
+  commit2?: string
   /** echoed from the request; absent for a patch */
   format?: GitDiffFormat
   content: string
@@ -282,7 +284,7 @@ export interface FileList {
   req_id?: string
 }
 
-export type GitDiffMode = 'unstaged' | 'cached' | 'commit'
+export type GitDiffMode = 'unstaged' | 'cached' | 'commit' | 'range'
 /** `git diff --name-status` instead of the patch */
 export type GitDiffFormat = 'name-status'
 
@@ -355,7 +357,10 @@ export interface GitDiff {
   cwd: string
   host?: string
   mode: GitDiffMode
+  /** one hash for commit mode; the "from" hash for range mode */
   commit?: string
+  /** the "to" hash for range mode (feature "git-range") */
+  commit2?: string
   /** feature "git-name-status"; omitted for a patch */
   format?: GitDiffFormat
   req_id?: string

@@ -220,7 +220,7 @@ func (s *Service) handleGitDiff(ctx context.Context, conn *websocket.Conn, data 
 		s.sendErrorKeyReq(ctx, conn, "git_diff", "invalid diff format: "+msg.Format, "invalid", msg.ReqID)
 		return
 	}
-	content, err := s.files.GitDiff(ctx, msg.Host, msg.Cwd, mode, msg.Commit, msg.Format == "name-status")
+	content, err := s.files.GitDiff(ctx, msg.Host, msg.Cwd, mode, msg.Commit, msg.Commit2, msg.Format == "name-status")
 	if err != nil {
 		code := "git_error"
 		if isPermErr(err) {
@@ -234,6 +234,7 @@ func (s *Service) handleGitDiff(ctx context.Context, conn *websocket.Conn, data 
 		Cwd:     msg.Cwd,
 		Mode:    string(mode),
 		Commit:  msg.Commit,
+		Commit2: msg.Commit2,
 		Format:  msg.Format,
 		Content: content,
 		ReqID:   msg.ReqID,

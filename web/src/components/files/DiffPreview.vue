@@ -17,7 +17,8 @@ const { haptic } = useHaptic();
 const scrollEl = ref<HTMLElement | null>(null);
 
 const state = computed(() => diff.state);
-const showCommitList = ref(false);
+/** Which commit menu is open. commit = the single-commit tab; from/to = the range tab. */
+const openPicker = ref<null | 'commit' | 'from' | 'to'>(null);
 
 const cwdLabel = computed(() => {
   const cwd = state.value?.cwd || '';
@@ -188,32 +189,51 @@ function showPatch(path: string) {
   diff.showPatchFor(path);
 }
 
-// The commit dropdown button shows only the short hash; the dropdown items
-// still show hash + subject + author + date.
-const selectedCommitLabel = computed(() => {
+// A picker button shows only the short hash; the menu items still show
+// hash + subject + author + date.
+function slotHash(slot: 'commit' | 'from' | 'to'): string {
   const s = state.value;
-  if (!s || s.mode !== 'commit' || !s.commit) return '';
-  return s.commit.slice(0, 7);
-});
-
-const selectedCommitTitle = computed(() => {
-  const s = state.value;
-  if (!s || s.mode !== 'commit' || !s.commit) return '';
-  const c = s.commits.find((x) => x.hash === s.commit);
+  if (!s) return '';
+  return slot === 'to' ? s.commit2 : s.commit;
+}
+function slotLabel(slot: 'commit' | 'from' | 'to'): string {
+  const hash = slotHash(slot);
+  if (hash) return hash.slice(0, 7);
+  return slot === 'commit' ? 'pick commit…' : 'select…';
+}
+function slotTitle(slot: 'commit' | 'from' | 'to'): string {
+  const hash = slotHash(slot);
+  if (!hash) return slot === 'commit' ? 'Pick a commit' : `Pick the ${slot} commit`;
+  const c = state.value?.commits.find((x) => x.hash === hash);
   if (c) return `${c.hash.slice(0, 7)} ${c.subject} — ${c.author} · ${c.date}`;
-  return s.commit.slice(0, 7);
-});
+  return hash.slice(0, 7);
+}
+const rangePickers = [
+  { id: 'from' as const, caption: 'from' },
+  { id: 'to' as const, caption: 'to' },
+];
 
 function pickMode(mode: DiffViewMode) {
   haptic();
-  showCommitList.value = false;
+  openPicker.value = null;
   diff.setMode(mode);
 }
 
-function pickCommit(hash: string) {
+function togglePicker(slot: 'commit' | 'from' | 'to') {
+  openPicker.value = openPicker.value === slot ? null : slot;
+}
+
+function pickCommit(slot: 'commit' | 'from' | 'to', hash: string) {
   haptic();
-  showCommitList.value = false;
-  diff.setCommit(hash);
+  openPicker.value = null;
+  if (slot === 'commit') diff.setCommit(hash);
+  else diff.setRangeCommit(slot, hash);
+}
+
+function swapRange() {
+  haptic();
+  openPicker.value = null;
+  diff.swapRange();
 }
 
 function refresh() {
@@ -262,10 +282,10 @@ watch(
 );
 
 // Close the commit dropdown on outside click.
-watch(showCommitList, (open) => {
+watch(openPicker, (open) => {
   if (!open) return;
   const close = () => {
-    showCommitList.value = false;
+    openPicker.value = null;
     document.removeEventListener('click', close);
   };
   setTimeout(() => document.addEventListener('click', close), 0);
@@ -275,8 +295,21 @@ watch(showCommitList, (open) => {
 <template>
   <section v-if="state" class="diff-preview" aria-label="Git diff preview">
     <header class="dp-head">
-      <button class="dp-btn dp-close" aria-label="Close diff preview" title="Close" @click="diff.close()">×</button>
-      <span class="dp-cwd mono" :title="state.cwd">⎇ {{ cwdLabel }}</span>
+      <div class="dp-bar">
+        <button class="dp-btn dp-close" aria-label="Close diff preview" title="Close" @click="diff.close()">×</button>
+        <span class="dp-cwd mono" :title="state.cwd">⎇ {{ cwdLabel }}</span>
+        <button
+          class="dp-btn"
+          :class="{ active: diff.halfScreen }"
+          :aria-label="diff.halfScreen ? 'Expand to full screen' : 'Switch to half screen'"
+          :title="diff.halfScreen ? 'Full screen' : 'Half screen'"
+          :aria-pressed="diff.halfScreen"
+          @click="diff.toggleHalfScreen()"
+        >
+          ⇕
+        </button>
+        <button class="dp-btn" aria-label="Refresh diff" title="Refresh" @click="refresh">⟳</button>
+      </div>
 
       <div class="dp-modes" role="group" aria-label="Diff mode">
         <button
@@ -317,6 +350,16 @@ watch(showCommitList, (open) => {
           commit
         </button>
         <button
+          v-if="conn.hasFeature('git-range')"
+          class="dp-mode"
+          :class="{ active: state.mode === 'range' }"
+          :aria-pressed="state.mode === 'range'"
+          title="Diff two commits (git diff A B)"
+          @click="pickMode('range')"
+        >
+          range
+        </button>
+        <button
           v-if="conn.hasFeature('git-log-view')"
           class="dp-mode"
           :class="{ active: state.mode === 'log' }"
@@ -328,71 +371,109 @@ watch(showCommitList, (open) => {
         </button>
       </div>
 
-      <div v-if="state.mode === 'log'" class="dp-modes" role="group" aria-label="Log options">
-        <button
-          v-for="o in LOG_SWITCHES"
-          :key="o.key"
-          class="dp-mode"
-          :class="{ active: diff.logOptions[o.key] }"
-          :aria-pressed="diff.logOptions[o.key]"
-          :title="o.title"
-          @click="toggleLogOption(o.key)"
-        >
-          {{ o.label }}
-        </button>
-      </div>
-
-      <div v-if="state.mode === 'commit'" class="dp-commit-wrap">
-        <button
-          class="dp-commit-btn"
-          :aria-expanded="showCommitList"
-          aria-haspopup="listbox"
-          :title="selectedCommitTitle || 'Pick a commit'"
-          @click.stop="showCommitList = !showCommitList"
-        >
-          <span class="dp-commit-label">{{ selectedCommitLabel || 'pick commit…' }}</span>
-          <span class="dp-caret" aria-hidden="true">▾</span>
-        </button>
-        <div v-if="showCommitList" class="dp-commit-list" role="listbox" aria-label="Recent commits" @click.stop>
-          <div v-if="state.loadingCommits" class="dp-commit-empty">loading…</div>
-          <div v-else-if="state.commits.length === 0" class="dp-commit-empty">no commits</div>
+      <div
+        v-if="state.mode === 'log' || state.mode === 'commit' || state.mode === 'range' || canNameStatus"
+        class="dp-tools"
+      >
+        <div v-if="state.mode === 'log'" class="dp-modes" role="group" aria-label="Log options">
           <button
-            v-for="c in state.commits"
-            :key="c.hash"
-            class="dp-commit-item"
-            role="option"
-            :aria-selected="c.hash === state.commit"
-            :class="{ selected: c.hash === state.commit }"
-            @click="pickCommit(c.hash)"
+            v-for="o in LOG_SWITCHES"
+            :key="o.key"
+            class="dp-mode"
+            :class="{ active: diff.logOptions[o.key] }"
+            :aria-pressed="diff.logOptions[o.key]"
+            :title="o.title"
+            @click="toggleLogOption(o.key)"
           >
-            <span class="dp-ci-hash mono">{{ c.hash.slice(0, 7) }}</span>
-            <span class="dp-ci-subject">{{ c.subject }}</span>
-            <span class="dp-ci-meta mono">{{ c.author }} · {{ fmtCommitDate(c.date) }}</span>
+            {{ o.label }}
           </button>
         </div>
-      </div>
 
-      <button
-        v-if="canNameStatus"
-        class="dp-btn"
-        :class="{ active: diff.nameStatus }"
-        :aria-pressed="diff.nameStatus"
-        :title="diff.nameStatus ? 'Show the patch' : 'List changed files only (--name-status)'"
-        @click="toggleNameStatus"
-      >
-        name-status
-      </button>
-      <button
-        class="dp-btn"
-        :class="{ active: diff.halfScreen }"
-        :aria-label="diff.halfScreen ? 'Expand to full screen' : 'Switch to half screen'"
-        :title="diff.halfScreen ? 'Full screen' : 'Half screen'"
-        :aria-pressed="diff.halfScreen"
-        @click="diff.toggleHalfScreen()"
-      >
-        ⇕
-      </button>
-      <button class="dp-btn" aria-label="Refresh diff" title="Refresh" @click="refresh">⟳</button>
+        <div v-else-if="state.mode === 'commit'" class="dp-commit-wrap">
+          <button
+            class="dp-commit-btn"
+            :aria-expanded="openPicker === 'commit'"
+            aria-haspopup="listbox"
+            :title="slotTitle('commit')"
+            @click.stop="togglePicker('commit')"
+          >
+            <span class="dp-commit-label">{{ slotLabel('commit') }}</span>
+            <span class="dp-caret" aria-hidden="true">▾</span>
+          </button>
+          <div v-if="openPicker === 'commit'" class="dp-commit-list" role="listbox" aria-label="Recent commits" @click.stop>
+            <div v-if="state.loadingCommits" class="dp-commit-empty">loading…</div>
+            <div v-else-if="state.commits.length === 0" class="dp-commit-empty">no commits</div>
+            <button
+              v-for="c in state.commits"
+              :key="c.hash"
+              class="dp-commit-item"
+              role="option"
+              :aria-selected="c.hash === state.commit"
+              :class="{ selected: c.hash === state.commit }"
+              @click="pickCommit('commit', c.hash)"
+            >
+              <span class="dp-ci-hash mono">{{ c.hash.slice(0, 7) }}</span>
+              <span class="dp-ci-subject">{{ c.subject }}</span>
+              <span class="dp-ci-meta mono">{{ c.author }} · {{ fmtCommitDate(c.date) }}</span>
+            </button>
+          </div>
+        </div>
+
+        <template v-else-if="state.mode === 'range'">
+          <template v-for="(slot, i) in rangePickers" :key="slot.id">
+            <button
+              v-if="i === 1"
+              type="button"
+              class="dp-btn dp-swap"
+              aria-label="Swap the two commits"
+              title="Swap"
+              @click="swapRange"
+            >⇄</button>
+            <div class="dp-commit-wrap">
+              <button
+                class="dp-commit-btn"
+                :aria-expanded="openPicker === slot.id"
+                aria-haspopup="listbox"
+                :aria-label="`${slot.caption} commit`"
+                :title="slotTitle(slot.id)"
+                @click.stop="togglePicker(slot.id)"
+              >
+                <span class="dp-slot-name">{{ slot.caption }}</span>
+                <span class="dp-commit-label">{{ slotLabel(slot.id) }}</span>
+                <span class="dp-caret" aria-hidden="true">▾</span>
+              </button>
+              <div v-if="openPicker === slot.id" class="dp-commit-list" role="listbox" :aria-label="`${slot.caption} commit`" @click.stop>
+                <div v-if="state.loadingCommits" class="dp-commit-empty">loading…</div>
+                <div v-else-if="state.commits.length === 0" class="dp-commit-empty">no commits</div>
+                <button
+                  v-for="c in state.commits"
+                  :key="c.hash"
+                  class="dp-commit-item"
+                  role="option"
+                  :aria-selected="c.hash === slotHash(slot.id)"
+                  :class="{ selected: c.hash === slotHash(slot.id) }"
+                  @click="pickCommit(slot.id, c.hash)"
+                >
+                  <span class="dp-ci-hash mono">{{ c.hash.slice(0, 7) }}</span>
+                  <span class="dp-ci-subject">{{ c.subject }}</span>
+                  <span class="dp-ci-meta mono">{{ c.author }} · {{ fmtCommitDate(c.date) }}</span>
+                </button>
+              </div>
+            </div>
+          </template>
+        </template>
+
+        <button
+          v-if="canNameStatus"
+          class="dp-btn dp-ns-toggle"
+          :class="{ active: diff.nameStatus }"
+          :aria-pressed="diff.nameStatus"
+          :title="diff.nameStatus ? 'Show the patch' : 'List changed files only (--name-status)'"
+          @click="toggleNameStatus"
+        >
+          name-status
+        </button>
+      </div>
     </header>
 
     <div ref="scrollEl" class="dp-scroll">
@@ -418,6 +499,7 @@ watch(showCommitList, (open) => {
 
       <div v-else-if="!state.content" class="dp-empty">
         <span v-if="state.mode === 'commit' && !state.commit">pick a commit to show its diff</span>
+        <span v-else-if="state.mode === 'range' && (!state.commit || !state.commit2)">pick two commits to compare</span>
         <span v-else>no changes</span>
       </div>
 
@@ -487,13 +569,31 @@ watch(showCommitList, (open) => {
 }
 .dp-head {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
+}
+.dp-bar,
+.dp-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dp-tools {
   flex-wrap: wrap;
+}
+.dp-tools > .dp-modes {
+  flex: 1;
+}
+.dp-cwd {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
 }
 .dp-btn {
   font-family: var(--font-mono);
@@ -525,16 +625,26 @@ watch(showCommitList, (open) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 220px;
-  flex-shrink: 0;
 }
 
 .dp-modes {
-  display: inline-flex;
+  display: flex;
   gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+}
+.dp-slot-name {
+  color: var(--faint);
   flex-shrink: 0;
 }
+.dp-ns-toggle {
+  margin-left: auto;
+}
+.dp-swap {
+  padding-inline: 8px;
+}
 .dp-mode {
+  flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   color: var(--muted);
@@ -911,9 +1021,6 @@ watch(showCommitList, (open) => {
 }
 
 @media (max-width: 639px) {
-  .dp-cwd {
-    max-width: 120px;
-  }
   .dp-commit-btn {
     max-width: 160px;
   }
@@ -921,14 +1028,16 @@ watch(showCommitList, (open) => {
     max-width: 120px;
   }
   .dp-commit-list {
-    /* On mobile, position fixed relative to the viewport so the dropdown
-       spans the full screen width instead of being constrained by the
-       narrow .dp-commit-wrap parent. */
+    /* Span the screen instead of the narrow button. top must be reset:
+       the base `top: calc(100% + 4px)` is a percentage of the viewport
+       once position is fixed, which parks the whole menu below the screen. */
     position: fixed;
+    top: auto;
     left: 8px;
     right: 8px;
     min-width: 0;
     max-width: none;
+    max-height: min(60vh, calc(100dvh - 16px));
   }
 }
 </style>

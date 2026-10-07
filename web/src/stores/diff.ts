@@ -18,7 +18,7 @@ const MAX_MSG_BYTES = 24 * 1024;
 const MAX_COMMIT_MESSAGE_BYTES = 16 * 1024;
 const utf8Len = (s: string) => new TextEncoder().encode(s).length;
 
-/** The panel's tabs: the three diffs, git status (stage / commit) and git log. */
+/** The panel's tabs: working tree diffs, one commit, a two-commit range, status, and log. */
 export type DiffViewMode = GitDiffMode | 'status' | 'log';
 
 const LOG_OPTS_KEY = 'herdrem_git_log_opts';
@@ -50,7 +50,10 @@ export interface DiffState {
   cwd: string;
   host: string;
   mode: DiffViewMode;
+  /** commit mode's hash, or the range's older ("from") hash */
   commit: string;
+  /** range mode's newer ("to") hash */
+  commit2: string;
   content: string;
   /** what `content` holds: '' a patch, 'name-status' one line per file */
   format: '' | GitDiffFormat;
@@ -109,13 +112,14 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   /** Open the diff preview for a working directory. Defaults to unstaged. */
-  function openDiff(cwd: string, host: string, mode: DiffViewMode = 'unstaged', commit = '') {
+  function openDiff(cwd: string, host: string, mode: DiffViewMode = 'unstaged', commit = '', commit2 = '') {
     if (!cwd) return;
     state.value = {
       cwd,
       host: host || 'local',
       mode,
       commit,
+      commit2,
       content: '',
       format: '',
       commits: [],
@@ -133,6 +137,11 @@ export const useDiffStore = defineStore('diff', () => {
     }
     if (mode === 'log') {
       requestLogView();
+      return;
+    }
+    if (mode === 'range' && (!commit || !commit2)) {
+      state.value.loading = false;
+      requestLog();
       return;
     }
     requestDiff();
@@ -177,7 +186,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (nameStatus.value === on) return;
     nameStatus.value = on;
     const s = state.value;
-    if (!s || s.mode === 'status' || (s.mode === 'commit' && !s.commit)) return;
+    if (!s || s.mode === 'status' || s.mode === 'log' || (s.mode === 'commit' && !s.commit) || (s.mode === 'range' && (!s.commit || !s.commit2))) return;
     state.value = { ...s, content: '', loading: true, error: undefined };
     requestDiff();
   }
@@ -247,12 +256,13 @@ export const useDiffStore = defineStore('diff', () => {
 
   function setMode(mode: DiffViewMode) {
     if (!state.value) return;
-    if (state.value.mode === mode && (mode !== 'commit' || state.value.commit)) return;
+    if (state.value.mode === mode && (mode !== 'commit' || state.value.commit) && (mode !== 'range' || (state.value.commit && state.value.commit2))) return;
     if (mode === 'status') {
       state.value = { ...state.value, mode, loading: false, error: undefined };
       requestStatus();
       return;
     }
+    const prev = state.value.mode;
     state.value = { ...state.value, mode, content: '', loading: true, error: undefined };
     if (mode === 'log') {
       requestLogView();
@@ -267,6 +277,18 @@ export const useDiffStore = defineStore('diff', () => {
         return;
       }
     }
+    if (mode === 'range') {
+      // Coming from a single commit, keep it as the "to" end so the user only
+      // has to pick what to compare it with.
+      if (prev === 'commit' && state.value.commit && !state.value.commit2) {
+        state.value = { ...state.value, commit: '', commit2: state.value.commit };
+      }
+      if (!state.value.commits.length) requestLog();
+      if (!state.value.commit || !state.value.commit2) {
+        state.value.loading = false;
+        return;
+      }
+    }
     requestDiff();
   }
 
@@ -274,6 +296,25 @@ export const useDiffStore = defineStore('diff', () => {
     if (!state.value) return;
     state.value = { ...state.value, mode: 'commit', commit, content: '', loading: true, error: undefined };
     requestDiff();
+  }
+
+  /** Set one end of a two-commit diff. Nothing is fetched until both are set. */
+  function setRangeCommit(end: 'from' | 'to', hash: string) {
+    if (!state.value) return;
+    const commit = end === 'from' ? hash : state.value.commit;
+    const commit2 = end === 'to' ? hash : state.value.commit2;
+    const ready = !!(commit && commit2);
+    state.value = { ...state.value, mode: 'range', commit, commit2, content: '', loading: ready, error: undefined };
+    if (ready) requestDiff();
+    else if (!state.value.commits.length) requestLog();
+  }
+
+  function swapRange() {
+    const s = state.value;
+    if (!s || s.mode !== 'range') return;
+    const ready = !!(s.commit && s.commit2);
+    state.value = { ...s, commit: s.commit2, commit2: s.commit, content: '', loading: ready, error: undefined };
+    if (ready) requestDiff();
   }
 
   function refresh() {
@@ -286,7 +327,7 @@ export const useDiffStore = defineStore('diff', () => {
       requestLogView();
       return;
     }
-    if (state.value.mode === 'commit' && !state.value.commit) {
+    if ((state.value.mode === 'commit' && !state.value.commit) || (state.value.mode === 'range' && (!state.value.commit || !state.value.commit2))) {
       requestLog();
       return;
     }
@@ -296,6 +337,7 @@ export const useDiffStore = defineStore('diff', () => {
   function requestDiff() {
     const s = state.value;
     if (!s || s.mode === 'status' || s.mode === 'log') return;
+    if (s.mode === 'range' && (!s.commit || !s.commit2)) return;
     const reqId = newReqId();
     diffReqId.value = reqId;
     const msg: GitDiff = {
@@ -303,7 +345,8 @@ export const useDiffStore = defineStore('diff', () => {
       cwd: s.cwd,
       host: s.host,
       mode: s.mode,
-      commit: s.mode === 'commit' ? s.commit : undefined,
+      commit: s.mode === 'commit' || s.mode === 'range' ? s.commit : undefined,
+      ...(s.mode === 'range' ? { commit2: s.commit2 } : {}),
       ...(nameStatus.value ? { format: 'name-status' as const } : {}),
       req_id: reqId,
     };
@@ -332,6 +375,7 @@ export const useDiffStore = defineStore('diff', () => {
       format: msg.format === 'name-status' ? 'name-status' : '',
       mode: msg.mode,
       commit: msg.commit || s.commit,
+      commit2: msg.commit2 || s.commit2,
       loading: false,
       error: undefined,
     };
@@ -566,6 +610,8 @@ export const useDiffStore = defineStore('diff', () => {
     setLogViewError,
     setMode,
     setCommit,
+    setRangeCommit,
+    swapRange,
     refresh,
     setDiffContent,
     setLogResult,

@@ -40,6 +40,7 @@ const (
 	GitDiffUnstaged GitDiffMode = "unstaged" // git diff
 	GitDiffCached   GitDiffMode = "cached"   // git diff --cached
 	GitDiffCommit   GitDiffMode = "commit"   // git show <commit>
+	GitDiffRange    GitDiffMode = "range"    // git diff <commit> <commit2> (feature "git-range")
 )
 
 // GitDiff runs `git diff` (or --cached / show <commit>) inside cwd and
@@ -48,7 +49,8 @@ const (
 // preview respects the same sandbox boundary as the file browser.
 // nameStatus swaps the patch for `--name-status` (one "<status>\t<path>"
 // line per file; commit mode keeps the commit header above them).
-func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDiffMode, commit string, nameStatus bool) (string, error) {
+// commit2 is the second full hash for range mode (git diff commit commit2).
+func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDiffMode, commit, commit2 string, nameStatus bool) (string, error) {
 	if !fs.hostOK(host) {
 		return "", fmt.Errorf("unauthorized host %q", host)
 	}
@@ -76,6 +78,13 @@ func (fs *FileService) GitDiff(ctx context.Context, host, cwd string, mode GitDi
 		// `git show` includes the commit header + diff; use --format= to keep
 		// the subject line so the user sees what they picked, then the patch.
 		args = []string{"--no-pager", "show", "--no-color", "--format=fuller", "--no-ext-diff", "--no-textconv", "--relative", commit}
+	case GitDiffRange:
+		// Both ends are full hashes from the same selector as commit mode, so
+		// a value like --output=... never reaches git's argv.
+		if !commitRe.MatchString(commit) || !commitRe.MatchString(commit2) {
+			return "", fmt.Errorf("two full commit hashes required for range mode")
+		}
+		args = append(args, commit, commit2)
 	case GitDiffUnstaged, "":
 		// plain diff
 	default:
