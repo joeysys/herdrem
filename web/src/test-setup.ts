@@ -1,3 +1,8 @@
+// Node-environment tests (build-id) share this file and have no DOM.
+if (typeof window === 'undefined') {
+  // nothing to stub
+} else {
+
 // jsdom lacks matchMedia / scrollIntoView — provide stubs.
 // Tests can call (window as any).__setStandalone(v) to simulate PWA mode,
 // which toggles the '(display-mode: standalone)' media query.
@@ -39,3 +44,4 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
 // before test-file imports, so this takes effect for the whole suite.)
 Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 390 })
 Object.defineProperty(window, 'innerHeight', { writable: true, configurable: true, value: 800 })
+}

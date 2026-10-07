@@ -1,29 +1,30 @@
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
-import { execSync } from 'node:child_process'
+import { computeBuildId } from './build-id.ts'
 
-// Build ID plugin: generates a fresh ID on every rebuild via a virtual module.
-// In watch mode, the `load` hook re-runs on each rebuild, so the counter
-// increments and the page can tell whether it picked up the latest changes.
+// Dev/watch only. Production ids come from the git worktree (see build-id.ts);
+// a process-local counter would stay `.1` on every install.
 let buildCount = 0
+let withCounter = false
 
 function buildIdPlugin(): Plugin {
   const virtualId = 'virtual:build-id'
   const resolvedId = '\0' + virtualId
+  let root = process.cwd()
   return {
     name: 'build-id',
+    configResolved(config) {
+      root = config.root
+      withCounter = config.command === 'serve' || config.build.watch != null
+    },
     resolveId(id) {
       if (id === virtualId) return resolvedId
     },
     load(id) {
       if (id !== resolvedId) return
-      buildCount++
-      let gitId = 'dev'
-      try {
-        gitId = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim()
-      } catch { /* not a git repo */ }
-      return `export const buildId = ${JSON.stringify(`${gitId}.${buildCount}`)}`
+      const counter = withCounter ? ++buildCount : undefined
+      return `export const buildId = ${JSON.stringify(computeBuildId(root, counter))}`
     },
   }
 }
