@@ -307,4 +307,12 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
 .ep-close { width: 26px; height: 26px; font-size: 18px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
 .ep-body { flex: 1; min-height: 0; width: 100%; background: #ffffff; }
 .ep-iframe { width: 100%; height: 100%; border: none; }
+
+@media (max-width: 639px) {
+  /* Side-by-side columns push "Access Control Mode" off the left edge. */
+  .tunnel-panel-backdrop { padding: 12px; }
+  .tp-create { padding: 14px 16px; }
+  .tp-form-row { flex-direction: column; align-items: stretch; }
+  .tp-submit-btn { width: 100%; height: auto; }
+}
 </style>
