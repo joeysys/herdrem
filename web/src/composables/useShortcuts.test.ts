@@ -7,6 +7,9 @@ import {
   resetShortcutsForTests,
   shortcutBlock,
   setShortcutContext,
+  registerTopLayer,
+  closeTopRegisteredLayer,
+  overlayNow,
   type ShortcutDef,
 } from './useShortcuts'
 
@@ -213,5 +216,36 @@ describe('useShortcuts', () => {
     Object.defineProperty(ev, 'target', { value: input })
     expect(onShortcutKeydown(ev)).toBe(false)
     expect(ev.defaultPrevented).toBe(false)
+  })
+
+  it('manages top layer stack and reports overlayNow', () => {
+    expect(overlayNow()).toBe(false)
+    expect(closeTopRegisteredLayer()).toBe(false)
+
+    const events: string[] = []
+    const unregister1 = registerTopLayer(() => {
+      events.push('layer1')
+      return true
+    })
+    expect(overlayNow()).toBe(true)
+
+    const unregister2 = registerTopLayer(() => {
+      events.push('layer2')
+      return true
+    })
+    expect(overlayNow()).toBe(true)
+
+    // Topmost layer (layer2) closes first
+    expect(closeTopRegisteredLayer()).toBe(true)
+    expect(events).toEqual(['layer2'])
+
+    unregister2()
+    // Now layer1 is topmost
+    expect(closeTopRegisteredLayer()).toBe(true)
+    expect(events).toEqual(['layer2', 'layer1'])
+
+    unregister1()
+    expect(overlayNow()).toBe(false)
+    expect(closeTopRegisteredLayer()).toBe(false)
   })
 })

@@ -51,6 +51,7 @@ let overlayOpen = () => false
 let terminalActive = () => false
 let listening = false
 const overlaySources = new Set<() => boolean>()
+const topLayerClosers: Array<() => boolean> = []
 
 /** A mounted surface (file preview, …) that should count as an overlay even
  *  when App has not installed its own context — unit tests mount it alone. */
@@ -59,9 +60,25 @@ export function addOverlaySource(get: () => boolean): () => void {
   return () => { overlaySources.delete(get) }
 }
 
-function overlayNow(): boolean {
+export function registerTopLayer(close: () => boolean): () => void {
+  topLayerClosers.push(close)
+  return () => {
+    const idx = topLayerClosers.indexOf(close)
+    if (idx >= 0) topLayerClosers.splice(idx, 1)
+  }
+}
+
+export function closeTopRegisteredLayer(): boolean {
+  for (let i = topLayerClosers.length - 1; i >= 0; i--) {
+    if (topLayerClosers[i]()) return true
+  }
+  return false
+}
+
+export function overlayNow(): boolean {
   if (overlayOpen()) return true
   for (const get of overlaySources) if (get()) return true
+  if (topLayerClosers.length > 0) return true
   return false
 }
 
@@ -110,6 +127,7 @@ export function register(def: ShortcutDef): () => void {
 export function resetShortcutsForTests() {
   bindings.clear()
   overlaySources.clear()
+  topLayerClosers.length = 0
   shellEnsured = false
   helpEnsured = false
   overlayOpen = () => false

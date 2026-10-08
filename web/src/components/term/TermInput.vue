@@ -18,8 +18,10 @@ import {
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
 import type { Pane } from '../../api/types'
+import { useKeyRowConfig } from '../../composables/useKeyRowConfig'
 import ArrowPad from './ArrowPad.vue'
 import HistorySuggest from './HistorySuggest.vue'
+import KeyRowConfigModal from './KeyRowConfigModal.vue'
 
 const props = defineProps<{ pane: Pane | null }>()
 const emit = defineEmits<{ edit: []; history: [] }>()
@@ -189,13 +191,14 @@ function approve(opt: ApproveOption) {
 }
 
 // --- keys & input ---
-const AGENT_KEYS: Array<{ label: string; key: string; danger?: boolean; repeat?: boolean }> = [
-  { label: 'Enter', key: 'Enter' },
-  { label: 'Esc', key: 'Escape' },
-  { label: '^C', key: 'Ctrl+c', danger: true, repeat: true },
-  { label: '^D', key: 'Ctrl+d', danger: true, repeat: true },
-]
-const SPECIAL_KEYS = computed(() => AGENT_KEYS)
+const { visibleItems: keyRowItems } = useKeyRowConfig('agent')
+const showConfig = ref(false)
+
+function openConfig() {
+  qp.close()
+  showArrows.value = false
+  showConfig.value = true
+}
 
 // Two-phase send: first click fills text into term (no Enter),
 // second click sends Enter to execute.
@@ -384,74 +387,94 @@ const suggest = useHistorySuggest({
     </div>
 
     <div class="key-row">
-      <div class="qp-wrap" @mouseleave="qp.hoverClose()">
+      <template v-for="item in keyRowItems" :key="item.id">
+        <div v-if="item.id === 'skills'" class="qp-wrap" @mouseleave="qp.hoverClose()">
+          <button
+            :ref="(el) => { if (el) qpBtnSkillsEl = el as HTMLElement }"
+            type="button"
+            class="key qp-btn skills"
+            :class="{ on: qp.open.value === 'skills' }"
+            :disabled="!qp.skillItems.value.length"
+            aria-label="Skills"
+            title="Skills"
+            @click.stop="openSkills"
+            @pointerdown.prevent
+            @mouseenter="hoverSkills"
+          ><svg class="skill-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
+        </div>
+        <div v-else-if="item.id === 'agentCmds'" class="qp-wrap" @mouseleave="qp.hoverClose()">
+          <button
+            :ref="(el) => { if (el) qpBtnCmdsEl = el as HTMLElement }"
+            type="button"
+            class="key qp-btn cmds"
+            :class="{ on: qp.open.value === 'agentCmds' }"
+            :disabled="!qp.agentCmdItems.value.length"
+            aria-label="Agent commands"
+            title="Agent commands"
+            @click.stop="openCmds"
+            @pointerdown.prevent
+            @mouseenter="hoverCmds"
+          >▶</button>
+        </div>
         <button
-          ref="qpBtnSkillsEl"
+          v-else-if="item.id === 'history'"
           type="button"
-          class="key qp-btn skills"
-          :class="{ on: qp.open.value === 'skills' }"
-          :disabled="!qp.skillItems.value.length"
-          aria-label="Skills"
-          title="Skills"
-          @click.stop="openSkills"
+          class="key"
+          aria-label="Input history"
+          :title="historyTitle"
+          @click="emit('history')"
           @pointerdown.prevent
-          @mouseenter="hoverSkills"
-        ><svg class="skill-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
-      </div>
-      <div class="qp-wrap" @mouseleave="qp.hoverClose()">
+        >⏱</button>
         <button
-          ref="qpBtnCmdsEl"
+          v-else-if="item.id === 'arrows'"
+          :ref="(el) => { if (el) arrowBtnEl = el as HTMLElement }"
           type="button"
-          class="key qp-btn cmds"
-          :class="{ on: qp.open.value === 'agentCmds' }"
-          :disabled="!qp.agentCmdItems.value.length"
-          aria-label="Agent commands"
-          title="Agent commands"
-          @click.stop="openCmds"
+          class="key arrows"
+          :class="{ active: showArrows }"
+          aria-label="Arrow pad"
+          title="Arrow keys pad"
+          @click="toggleArrows"
           @pointerdown.prevent
-          @mouseenter="hoverCmds"
-        >▶</button>
-      </div>
+        >⌖</button>
+        <button
+          v-else-if="item.id === 'ctrl'"
+          type="button"
+          class="key ctrl"
+          :class="{ active: ctrlActive }"
+          aria-label="Ctrl modifier"
+          :aria-pressed="ctrlActive"
+          title="Ctrl modifier (next key sent as Ctrl+key)"
+          @click="toggleCtrl"
+        >ctrl</button>
+        <button
+          v-else-if="item.key"
+          type="button"
+          class="key"
+          :class="{ danger: item.danger }"
+          :aria-label="item.key"
+          :title="item.key"
+          @pointerdown="pressSpecial(item as { key: string; repeat?: boolean })"
+          @pointerup="stop"
+          @pointerleave="stop"
+        >{{ item.label }}</button>
+      </template>
       <button
         type="button"
-        class="key"
-        aria-label="Input history"
-        :title="historyTitle"
-        @click="emit('history')"
+        class="key config-btn"
+        aria-label="Customize keys"
+        title="Customize shortcut keys"
+        @click="openConfig"
         @pointerdown.prevent
-      >⏱</button>
-      <button
-        ref="arrowBtnEl"
-        type="button"
-        class="key arrows"
-        :class="{ active: showArrows }"
-        aria-label="Arrow pad"
-        title="Arrow keys pad"
-        @click="toggleArrows"
-        @pointerdown.prevent
-      >⌖</button>
-      <button
-        v-for="k in SPECIAL_KEYS"
-        :key="k.key"
-        type="button"
-        class="key"
-        :class="{ danger: k.danger }"
-        :aria-label="k.key"
-        :title="k.key"
-        @pointerdown="pressSpecial(k)"
-        @pointerup="stop"
-        @pointerleave="stop"
-      >{{ k.label }}</button>
-      <button
-        type="button"
-        class="key ctrl"
-        :class="{ active: ctrlActive }"
-        aria-label="Ctrl modifier"
-        :aria-pressed="ctrlActive"
-        title="Ctrl modifier (next key sent as Ctrl+key)"
-        @click="toggleCtrl"
-      >ctrl</button>
+      >⚙</button>
     </div>
+
+    <Teleport to="body">
+      <KeyRowConfigModal
+        v-if="showConfig"
+        type="agent"
+        @close="showConfig = false"
+      />
+    </Teleport>
 
     <Teleport to="body">
       <div v-if="qp.open.value === 'skills'" class="qp-pop" :style="{ left: qp.pos.value.left + 'px', bottom: qp.pos.value.bottom + 'px' }" @click.stop @mouseenter="qp.cancelClose()" @mouseleave="qp.hoverClose()">
@@ -606,6 +629,13 @@ const suggest = useHistorySuggest({
   color: var(--blue);
   background: var(--blue-soft);
   border-color: rgba(96, 165, 250, 0.5);
+}
+.key.config-btn {
+  color: var(--muted);
+  padding: 5px 8px;
+}
+.key.config-btn:hover {
+  color: var(--text);
 }
 
 .input-row {

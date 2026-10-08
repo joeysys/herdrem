@@ -35,6 +35,7 @@ import {
   shortcutVersion,
   shortcutChord,
   isShortcutActive,
+  closeTopRegisteredLayer,
 } from './composables/useShortcuts';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
@@ -183,6 +184,7 @@ function currentStateName(): string {
 
 /** closes a topmost overlay (non-view) layer; returns true if something closed */
 function closeTopLayer(): boolean {
+  if (closeTopRegisteredLayer()) return true;
   if (showHelp.value) {
     showHelp.value = false;
     return true;

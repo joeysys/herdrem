@@ -27,11 +27,15 @@ const blockedPane = {
   option_labels: ['approve', 'deny'],
 }
 
+import { resetKeyRowState } from '../../composables/useKeyRowConfig'
+
 const setStandalone = (v: boolean) => (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(v)
 
 beforeEach(() => {
   safeStorage.removeItem('herdrem_cmd_history')
   safeStorage.removeItem('herdrem_history_agents')
+  safeStorage.removeItem('herdrem_key_row_agent')
+  resetKeyRowState('agent')
   setActivePinia(createPinia())
 })
 
@@ -325,5 +329,67 @@ describe('TermInput prompt history', () => {
     term.requestFill('from history', 'replace')
     await nextTick()
     expect((w.get('textarea.cmd').element as HTMLInputElement).value).toBe('from history')
+  })
+
+  it('renders Tab key after Esc and sends Tab to term on click', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendKey = vi.spyOn(term, 'sendKey').mockReturnValue(true)
+    const wrapper = mount(TermInput, { props: { pane } })
+
+    const buttons = wrapper.findAll('.key-row .key')
+    const labels = buttons.map((b) => b.text())
+    const escIndex = labels.indexOf('Esc')
+    const tabIndex = labels.indexOf('Tab')
+    expect(escIndex).toBeGreaterThan(-1)
+    expect(tabIndex).toBe(escIndex + 1)
+
+    const tabBtn = wrapper.find('button[aria-label="Tab"]')
+    expect(tabBtn.exists()).toBe(true)
+    await tabBtn.trigger('pointerdown')
+    expect(sendKey).toHaveBeenCalledWith('Tab')
+  })
+
+  it('opens KeyRowConfigModal when customize button is clicked', async () => {
+    const wrapper = mount(TermInput, { props: { pane } })
+    const configBtn = wrapper.find('button.config-btn')
+    expect(configBtn.exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(false)
+
+    await configBtn.trigger('click')
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(true)
+  })
+
+  it('closes arrows when customize button is clicked', async () => {
+    const wrapper = mount(TermInput, { props: { pane } })
+    const arrowBtn = wrapper.find('button[aria-label="Arrow pad"]')
+    expect(arrowBtn.exists()).toBe(true)
+    await arrowBtn.trigger('click')
+    expect(document.body.querySelector('.arrow-pop')).not.toBeNull()
+
+    const configBtn = wrapper.find('button.config-btn')
+    await configBtn.trigger('click')
+    expect(document.body.querySelector('.arrow-pop')).toBeNull()
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(true)
+  })
+
+  it('respects customized key row order and hidden keys', async () => {
+    const customConfig = [
+      { id: 'Tab', visible: true },
+      { id: 'Enter', visible: true },
+      { id: 'Escape', visible: false },
+    ]
+    safeStorage.setItem('herdrem_key_row_agent', JSON.stringify(customConfig))
+    resetKeyRowState('agent')
+
+    const wrapper = mount(TermInput, { props: { pane } })
+    const buttons = wrapper.findAll('.key-row .key')
+    const labels = buttons.map((b) => b.text())
+
+    // Tab is first
+    expect(labels[0]).toBe('Tab')
+    expect(labels[1]).toBe('Enter')
+    // Esc is hidden
+    expect(labels.includes('Esc')).toBe(false)
   })
 })

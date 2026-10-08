@@ -15,9 +15,14 @@ vi.mock('../../api/ws', () => ({
   },
 }))
 
+import { safeStorage } from '../../utils/storage'
+import { resetKeyRowState } from '../../composables/useKeyRowConfig'
+
 beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
+  safeStorage.removeItem('herdrem_key_row_shell')
+  resetKeyRowState('shell')
 })
 
 describe('ShellKeys', () => {
@@ -100,5 +105,48 @@ describe('ShellKeys', () => {
     box.element.dispatchEvent(enter)
     expect(enter.defaultPrevented).toBe(true)
     expect(sendText).toHaveBeenCalledWith('echo aecho b', true)
+  })
+
+  it('opens KeyRowConfigModal when customize button is clicked', async () => {
+    const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    const configBtn = wrapper.find('button.config-btn')
+    expect(configBtn.exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(false)
+
+    await configBtn.trigger('click')
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(true)
+  })
+
+  it('closes arrows when customize button is clicked', async () => {
+    const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    const arrowBtn = wrapper.find('button[aria-label="Arrow pad"]')
+    expect(arrowBtn.exists()).toBe(true)
+    await arrowBtn.trigger('click')
+    expect(document.body.querySelector('.arrow-pop')).not.toBeNull()
+
+    const configBtn = wrapper.find('button.config-btn')
+    await configBtn.trigger('click')
+    expect(document.body.querySelector('.arrow-pop')).toBeNull()
+    expect(wrapper.findComponent({ name: 'KeyRowConfigModal' }).exists()).toBe(true)
+  })
+
+  it('respects customized key row order and hidden keys', async () => {
+    const customConfig = [
+      { id: 'Tab', visible: true },
+      { id: 'Enter', visible: true },
+      { id: 'Escape', visible: false },
+    ]
+    safeStorage.setItem('herdrem_key_row_shell', JSON.stringify(customConfig))
+    resetKeyRowState('shell')
+
+    const wrapper = mount(ShellKeys, { props: { pane: { pane_id: 'p1', status: 'idle' } } })
+    const buttons = wrapper.findAll('.key-row .key')
+    const labels = buttons.map((b) => b.text())
+
+    // Tab is first
+    expect(labels[0]).toBe('Tab')
+    expect(labels[1]).toBe('Enter')
+    // Esc is hidden
+    expect(labels.includes('Esc')).toBe(false)
   })
 })

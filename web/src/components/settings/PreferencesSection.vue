@@ -6,12 +6,20 @@ import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { usePrefsStore } from '../../stores/prefs'
 import { useAgentsStore } from '../../stores/connection'
 import { useSaveFeedback } from '../../composables/useSaveFeedback'
+import KeyRowConfigModal from '../term/KeyRowConfigModal.vue'
 
 const { theme, themes, setTheme } = useTheme()
 const { preference, setPreference } = useLayoutMode()
 const { previewWidth, previewWidths, setPreviewWidth } = usePreviewWidth()
 const prefs = usePrefsStore()
 const agents = useAgentsStore()
+
+const showKeysModal = ref(false)
+const keysModalType = ref<'agent' | 'shell'>('agent')
+function openKeysConfig(type: 'agent' | 'shell') {
+  keysModalType.value = type
+  showKeysModal.value = true
+}
 
 const props = defineProps<{ focusSection?: 'shell_cmds' | 'skills' | 'agent_cmds' | null }>()
 
@@ -246,6 +254,23 @@ function clearStale() {
         >{{ w === 'none' ? 'no wrap' : w }}</button>
       </div>
     </section>
+
+    <section class="ps-block">
+      <h3>shortcut keys</h3>
+      <p class="ps-hint">customize and reorder quick buttons for agent and shell panes</p>
+      <div class="layout-toggle" role="group" aria-label="Customize shortcut keys">
+        <button type="button" @click="openKeysConfig('agent')">agent pane…</button>
+        <button type="button" @click="openKeysConfig('shell')">shell pane…</button>
+      </div>
+    </section>
+
+    <Teleport to="body">
+      <KeyRowConfigModal
+        v-if="showKeysModal"
+        :type="keysModalType"
+        @close="showKeysModal = false"
+      />
+    </Teleport>
 
     <section class="ps-block">
       <h3>shell commands</h3>

@@ -13,7 +13,9 @@ import {
 import { safeStorage } from '../../utils/storage'
 import { whereOf } from '../../utils/cmdHistory'
 import type { Pane } from '../../api/types'
+import { useKeyRowConfig } from '../../composables/useKeyRowConfig'
 import ArrowPad from './ArrowPad.vue'
+import KeyRowConfigModal from './KeyRowConfigModal.vue'
 
 const props = defineProps<{ pane: Pane | null; modelValue?: string }>()
 const emit = defineEmits<{
@@ -199,20 +201,14 @@ function onBoxKeydown(e: KeyboardEvent) {
 }
 
 // --- special keys ---
-const SHELL_KEYS: Array<{ label: string; key: string; danger?: boolean; repeat?: boolean }> = [
-  { label: 'Enter', key: 'Enter' },
-  { label: 'Esc', key: 'Escape' },
-  { label: 'Tab', key: 'Tab' },
-  { label: '^C', key: 'Ctrl+c', danger: true, repeat: true },
-  { label: '^D', key: 'Ctrl+d' },
-  { label: '^Z', key: 'Ctrl+z' },
-  { label: '^L', key: 'Ctrl+l' },
-  { label: '^R', key: 'Ctrl+r' },
-  { label: '^A', key: 'Ctrl+a' },
-  { label: '^E', key: 'Ctrl+e' },
-  { label: '^W', key: 'Ctrl+w' },
-]
-const SPECIAL_KEYS = computed(() => SHELL_KEYS)
+const { visibleItems: keyRowItems } = useKeyRowConfig('shell')
+const showConfig = ref(false)
+
+function openConfig() {
+  qp.close()
+  showArrows.value = false
+  showConfig.value = true
+}
 
 function sendKey(key: string) {
   haptic(8)
@@ -245,62 +241,82 @@ function onArrowKey(key: string) {
     </div>
 
     <div class="key-row">
-      <button
-        type="button"
-        class="key input-toggle"
-        :class="{ active: showInput }"
-        aria-label="Toggle input box"
-        :aria-pressed="showInput"
-        title="Input box"
-        @click="toggleInput"
-        @pointerdown.prevent
-      >❯</button>
-      <div class="qp-wrap" @mouseleave="qp.hoverClose()">
+      <template v-for="item in keyRowItems" :key="item.id">
         <button
-          ref="qpBtnCmdsEl"
+          v-if="item.id === 'input'"
           type="button"
-          class="key qp-btn cmds"
-          :class="{ on: qp.open.value === 'shellCmds' }"
-          :disabled="!qp.shellCmdItems.value.length"
-          aria-label="Shell commands"
-          title="Shell commands"
-          @click.stop="openCmds"
+          class="key input-toggle"
+          :class="{ active: showInput }"
+          aria-label="Toggle input box"
+          :aria-pressed="showInput"
+          title="Input box"
+          @click="toggleInput"
           @pointerdown.prevent
-          @mouseenter="hoverCmds"
-        >▶</button>
-      </div>
+        >❯</button>
+        <div v-else-if="item.id === 'shellCmds'" class="qp-wrap" @mouseleave="qp.hoverClose()">
+          <button
+            :ref="(el) => { if (el) qpBtnCmdsEl = el as HTMLElement }"
+            type="button"
+            class="key qp-btn cmds"
+            :class="{ on: qp.open.value === 'shellCmds' }"
+            :disabled="!qp.shellCmdItems.value.length"
+            aria-label="Shell commands"
+            title="Shell commands"
+            @click.stop="openCmds"
+            @pointerdown.prevent
+            @mouseenter="hoverCmds"
+          >▶</button>
+        </div>
+        <button
+          v-else-if="item.id === 'arrows'"
+          :ref="(el) => { if (el) arrowBtnEl = el as HTMLElement }"
+          type="button"
+          class="key arrows"
+          :class="{ active: showArrows }"
+          aria-label="Arrow pad"
+          title="Arrow keys pad"
+          @click="toggleArrows"
+          @pointerdown.prevent
+        >⌖</button>
+        <button
+          v-else-if="item.id === 'ctrl'"
+          type="button"
+          class="key ctrl"
+          :class="{ active: ctrlActive }"
+          aria-label="Ctrl modifier"
+          :aria-pressed="ctrlActive"
+          title="Ctrl modifier (next key sent as Ctrl+key)"
+          @click="toggleCtrl"
+        >ctrl</button>
+        <button
+          v-else-if="item.key"
+          type="button"
+          class="key"
+          :class="{ danger: item.danger }"
+          :aria-label="item.key"
+          :title="item.key"
+          @pointerdown="pressSpecial(item as { key: string; repeat?: boolean })"
+          @pointerup="stop"
+          @pointerleave="stop"
+        >{{ item.label }}</button>
+      </template>
       <button
-        ref="arrowBtnEl"
         type="button"
-        class="key arrows"
-        :class="{ active: showArrows }"
-        aria-label="Arrow pad"
-        title="Arrow keys pad"
-        @click="toggleArrows"
+        class="key config-btn"
+        aria-label="Customize keys"
+        title="Customize shortcut keys"
+        @click="openConfig"
         @pointerdown.prevent
-      >⌖</button>
-      <button
-        v-for="k in SPECIAL_KEYS"
-        :key="k.key"
-        type="button"
-        class="key"
-        :class="{ danger: k.danger }"
-        :aria-label="k.key"
-        :title="k.key"
-        @pointerdown="pressSpecial(k)"
-        @pointerup="stop"
-        @pointerleave="stop"
-      >{{ k.label }}</button>
-      <button
-        type="button"
-        class="key ctrl"
-        :class="{ active: ctrlActive }"
-        aria-label="Ctrl modifier"
-        :aria-pressed="ctrlActive"
-        title="Ctrl modifier (next key sent as Ctrl+key)"
-        @click="toggleCtrl"
-      >ctrl</button>
+      >⚙</button>
     </div>
+
+    <Teleport to="body">
+      <KeyRowConfigModal
+        v-if="showConfig"
+        type="shell"
+        @close="showConfig = false"
+      />
+    </Teleport>
 
     <form v-if="showInput" class="input-row" @submit.prevent="submitInput">
       <span class="prompt" aria-hidden="true">❯</span>
@@ -421,6 +437,13 @@ function onArrowKey(key: string) {
   color: var(--blue);
   background: var(--blue-soft);
   border-color: rgba(96, 165, 250, 0.5);
+}
+.key.config-btn {
+  color: var(--muted);
+  padding: 5px 8px;
+}
+.key.config-btn:hover {
+  color: var(--text);
 }
 
 .input-row {
