@@ -26,7 +26,10 @@ type Service struct {
 	historyStore *store.HistoryStore
 	commitMu     sync.Mutex
 	committing   map[string]bool         // commitKey → a commit is running
+	syncing      map[string]string       // commitKey → fetch, pull, or push action in flight
+	staging      map[string]bool         // commitKey → stage or discard is running
 	lastCommit   map[string]commitRecord // commitKey → the last finished commit
+	lastSync     map[string]syncRecord   // commitKey → the last finished sync
 	files        *FileService
 	tunnels      *TunnelService
 	hub          *hub.Hub
@@ -189,6 +192,10 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleGitStage(ctx, conn, data)
 	case "git_commit":
 		s.handleGitCommit(ctx, conn, data)
+	case "git_sync":
+		s.handleGitSync(ctx, conn, data)
+	case "git_discard":
+		s.handleGitDiscard(ctx, conn, data)
 	case "prefs_get":
 		s.handlePrefsGet(ctx, conn)
 	case "prefs_set":

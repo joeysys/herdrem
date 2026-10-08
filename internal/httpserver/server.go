@@ -956,7 +956,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Features: []string{
 			"agents", "terminal", "todo", "blocked", "multi-host",
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
-			"pane-create", "incremental-terminal", "git-diff", "git-commit", "git-name-status", "git-log-view", "git-range", "send-text-paste",
+			"pane-create", "incremental-terminal", "git-diff", "git-commit", "git-sync", "git-name-status", "git-log-view", "git-range", "send-text-paste",
 		},
 	}
 	if s.tunnels != nil && s.tunnels.DirectAllowed() {

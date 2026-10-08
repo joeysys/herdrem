@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useDiffStore } from '../../stores/diff';
 import { useFilesStore } from '../../stores/files';
 import { usePrefsStore } from '../../stores/prefs';
+import { useConnectionStore } from '../../stores/connection';
 import { useHaptic } from '../../composables/useHaptic';
 import type { GitStatusEntry } from '../../api/types';
 
@@ -12,6 +13,7 @@ import type { GitStatusEntry } from '../../api/types';
 const diff = useDiffStore();
 const files = useFilesStore();
 const prefs = usePrefsStore();
+const conn = useConnectionStore();
 const { haptic } = useHaptic();
 
 const st = computed(() => diff.status);
@@ -72,6 +74,68 @@ function unstageAll() {
   haptic();
   diff.stageAll(true);
 }
+
+const canSync = computed(() => conn.hasFeature('git-sync'));
+const busy = computed(() => !!diff.syncing || diff.committing || diff.staging);
+const canPush = computed(() => {
+  const s = st.value;
+  if (!s || !canSync.value || busy.value) return false;
+  if (s.detached || s.initial || !s.upstream) return false;
+  return s.ahead > 0 && s.behind === 0;
+});
+const canPull = computed(() => {
+  const s = st.value;
+  if (!s || !canSync.value || busy.value) return false;
+  if (s.detached || s.initial || !s.upstream) return false;
+  if (s.ahead !== 0 || s.behind < 1) return false;
+  return clean.value && !s.staged_outside;
+});
+const canFetch = computed(() => canSync.value && !busy.value);
+function canDiscard(e: GitStatusEntry): boolean {
+  return canSync.value && e.status !== '?' && e.status.length === 1;
+}
+
+function doPush() {
+  const s = st.value;
+  if (!s || !canPush.value) return;
+  const n = s.ahead;
+  const ok = window.confirm(
+    `Push ${n} commit${n === 1 ? '' : 's'} to ${s.upstream}?\n\nThis pushes the whole branch, not just this folder.`,
+  );
+  if (!ok) return;
+  haptic(18);
+  diff.sync('push');
+}
+function doFetch() {
+  if (!canFetch.value) return;
+  haptic();
+  diff.sync('fetch');
+}
+function doPull() {
+  const s = st.value;
+  if (!s || !canPull.value) return;
+  const n = s.behind;
+  const ok = window.confirm(
+    `Pull ${n} commit${n === 1 ? '' : 's'} from ${s.upstream}?\n\nFast-forward only. This updates the whole branch, not just this folder.`,
+  );
+  if (!ok) return;
+  haptic(18);
+  diff.sync('pull');
+}
+function discardOne(path: string) {
+  if (busy.value) return;
+  const ok = window.confirm(`Discard unstaged changes in ${path}?\n\nThis cannot be undone.`);
+  if (!ok) return;
+  haptic(18);
+  diff.discard(path);
+}
+
+const syncText = computed(() => {
+  const o = diff.syncOutcome;
+  if (!o) return '';
+  if (!o.ok) return `✗ ${o.error || `${o.action} failed`}`;
+  return `✓ ${o.action}`;
+});
 
 // Click a file: its diff (staged → cached view); a new file has no diff yet,
 // so preview it instead (or browse it, for an untracked folder).
@@ -177,7 +241,24 @@ function clearCmd() {
         <span v-if="st.ahead" class="gs-ab mono" :title="`${st.ahead} commit(s) to push`">↑{{ st.ahead }}</span>
         <span v-if="st.behind" class="gs-ab mono" :title="`${st.behind} commit(s) to pull`">↓{{ st.behind }}</span>
         <span v-if="st.initial" class="gs-dim">no commits yet</span>
-        <span v-if="diff.statusLoading || diff.staging" class="gs-dim" aria-live="polite">updating…</span>
+        <span v-if="diff.statusLoading || diff.staging || diff.syncing" class="gs-dim" aria-live="polite">updating…</span>
+      </div>
+
+      <div v-if="canSync" class="gs-sync" role="group" aria-label="Remote">
+        <button type="button" class="gs-btn" :disabled="!canPush" :title="canPush ? `Push ${st?.ahead} commit(s) to ${st?.upstream}` : 'Push is available when this branch is ahead of its upstream and not behind'" @click="doPush">
+          {{ diff.syncing === 'push' ? 'pushing…' : (st?.ahead ? `push ${st.ahead}` : 'push') }}
+        </button>
+        <button type="button" class="gs-btn" :disabled="!canFetch" title="Fetch from the upstream remote. Does not merge." @click="doFetch">
+          {{ diff.syncing === 'fetch' ? 'fetching…' : 'fetch' }}
+        </button>
+        <button type="button" class="gs-btn" :disabled="!canPull" :title="canPull ? `Fast-forward ${st?.behind} commit(s) from ${st?.upstream}` : 'Pull is available when the branch is strictly behind and the working tree is clean'" @click="doPull">
+          {{ diff.syncing === 'pull' ? 'pulling…' : (st?.behind ? `pull ${st.behind}` : 'pull') }}
+        </button>
+        <p class="gs-note">push and pull affect the whole branch, not just this folder.</p>
+        <div v-if="diff.syncOutcome" class="gs-outcome" :class="{ ok: diff.syncOutcome.ok, err: !diff.syncOutcome.ok }" role="status">
+          <div class="gs-outcome-line">{{ syncText }}</div>
+          <pre v-if="diff.syncOutcome.output" class="gs-output mono">{{ diff.syncOutcome.output }}</pre>
+        </div>
       </div>
 
       <p v-if="clean" class="gs-clean">nothing to commit, working tree clean</p>
@@ -214,6 +295,15 @@ function clearCmd() {
             />
             <span class="gs-badge" :class="badgeClass(e.status)" :title="statusLabel(e.status)" :aria-label="statusLabel(e.status)">{{ badge(e.status) }}</span>
             <button type="button" class="gs-path mono" :title="e.status === '?' ? `Preview ${e.path}` : `Show diff of ${e.path}`" @click="openEntry(e, false)">{{ e.path }}</button>
+            <button
+              v-if="canDiscard(e)"
+              type="button"
+              class="gs-mini"
+              :aria-label="`Discard unstaged changes in ${e.path}`"
+              title="Discard unstaged changes"
+              :disabled="busy"
+              @click="discardOne(e.path)"
+            >×</button>
             <button type="button" class="gs-mini" :aria-label="`Add ${e.path}`" title="git add" :disabled="diff.staging" @click="stageOne(e.path)">+</button>
           </li>
         </ul>
@@ -311,6 +401,8 @@ function clearCmd() {
 .gs-branch-name { font-weight: 700; color: var(--text); }
 .gs-dim { color: var(--faint); font-size: var(--text-2xs); }
 .gs-ab { color: var(--orange); font-size: var(--text-2xs); }
+.gs-sync { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gs-sync .gs-note, .gs-sync .gs-outcome { flex-basis: 100%; }
 
 .gs-sec { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .gs-sec-head {

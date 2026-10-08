@@ -6,6 +6,7 @@ import GitStatusView from './GitStatusView.vue'
 import { useDiffStore } from '../../stores/diff'
 import { useFilesStore } from '../../stores/files'
 import { usePrefsStore } from '../../stores/prefs'
+import { useConnectionStore } from '../../stores/connection'
 import { ws } from '../../api/ws'
 import type { GitStatusData } from '../../api/types'
 
@@ -221,6 +222,77 @@ describe('GitStatusView', () => {
       await w.findAll('.gs-cmd-row .gs-btn').find((b) => b.text() === 'clear')!.trigger('click')
       expect(last()).toMatchObject({ type: 'prefs_set', section: 'git', data: { commit_cmd: '' } })
     })
+  })
+
+  it('offers fetch, a fast-forward pull, and push only when the relay supports them', async () => {
+    const plain = setup({ upstream: 'origin/main', ahead: 2, behind: 0 })
+    expect(plain.find('[aria-label="Remote"]').exists()).toBe(false)
+    plain.unmount()
+
+    useConnectionStore().setHello('t', ['git-sync'])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const w = setup({ upstream: 'origin/main', ahead: 2, behind: 0 })
+    const remote = w.get('[aria-label="Remote"]')
+    const btn = (label: string) => remote.findAll('.gs-btn').find((b) => b.text() === label)!
+    expect(btn('push 2').attributes('disabled')).toBeUndefined()
+    expect(btn('pull').attributes('disabled')).toBeDefined()
+    expect(btn('fetch').attributes('disabled')).toBeUndefined()
+    expect(remote.text()).toContain('whole branch')
+
+    await btn('push 2').trigger('click')
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Push 2 commits to origin/main'))
+    expect(confirm.mock.calls[0][0]).toContain('whole branch')
+    expect(last()).toMatchObject({ type: 'git_sync', action: 'push', cwd: '/repo' })
+    confirm.mockReturnValue(false)
+    w.unmount()
+
+    const again = setup({ upstream: 'origin/main', ahead: 2, behind: 0 })
+    vi.mocked(ws.send).mockClear()
+    await again.get('[aria-label="Remote"]').findAll('.gs-btn').find((b) => b.text() === 'push 2')!.trigger('click')
+    expect(sent()).toEqual([])
+  })
+
+  it('pulls only when strictly behind a clean tree, and fetches without asking', async () => {
+    useConnectionStore().setHello('t', ['git-sync'])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const dirty = setup({
+      upstream: 'origin/main', ahead: 0, behind: 1,
+      unstaged: [{ path: 'a.go', status: 'M' }],
+    })
+    const dirtyPull = dirty.get('[aria-label="Remote"]').findAll('.gs-btn').find((b) => b.text() === 'pull 1')!
+    expect(dirtyPull.attributes('disabled')).toBeDefined()
+    dirty.unmount()
+
+    const w = setup({ upstream: 'origin/main', ahead: 0, behind: 1 })
+    const remote = w.get('[aria-label="Remote"]')
+    const pullBtn = remote.findAll('.gs-btn').find((b) => b.text() === 'pull 1')!
+    expect(pullBtn.attributes('disabled')).toBeUndefined()
+    await pullBtn.trigger('click')
+    expect(confirm.mock.calls[0][0]).toContain('Fast-forward only')
+    expect(last()).toMatchObject({ type: 'git_sync', action: 'pull' })
+    w.unmount()
+
+    confirm.mockClear()
+    const fetched = setup({ upstream: 'origin/main', ahead: 0, behind: 1 })
+    await fetched.get('[aria-label="Remote"]').findAll('.gs-btn').find((b) => b.text() === 'fetch')!.trigger('click')
+    expect(confirm).not.toHaveBeenCalled()
+    expect(last()).toMatchObject({ type: 'git_sync', action: 'fetch' })
+  })
+
+  it('discards one unstaged file after confirmation, and not new files', async () => {
+    useConnectionStore().setHello('t', ['git-sync'])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const w = setup(BASIC)
+    expect(w.find('[aria-label="Discard unstaged changes in src/a.go"]').exists()).toBe(true)
+    expect(w.find('[aria-label="Discard unstaged changes in old.txt"]').exists()).toBe(true)
+    expect(w.find('[aria-label="Discard unstaged changes in new.txt"]').exists()).toBe(false)
+    await w.get('[aria-label="Discard unstaged changes in src/a.go"]').trigger('click')
+    expect(sent().some((m) => m.type === 'git_discard')).toBe(false)
+
+    confirm.mockReturnValue(true)
+    await w.get('[aria-label="Discard unstaged changes in src/a.go"]').trigger('click')
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('src/a.go'))
+    expect(last()).toMatchObject({ type: 'git_discard', path: 'src/a.go', cwd: '/repo' })
   })
 
   it('shows a status error', () => {

@@ -295,12 +295,6 @@ func TestGitLogView_Switches(t *testing.T) {
 	if all := view(GitLogOptions{Oneline: true, All: true}); !strings.Contains(all, "unmerged branch") {
 		t.Errorf("--all should list every branch:\n%s", all)
 	}
-	if fp := view(GitLogOptions{Oneline: true, FirstParent: true}); strings.Contains(fp, "side work") || !strings.Contains(fp, "merge side") {
-		t.Errorf("--first-parent should skip the merged branch's commits:\n%s", fp)
-	}
-	if nm := view(GitLogOptions{Oneline: true, NoMerges: true}); strings.Contains(nm, "merge side") || !strings.Contains(nm, "side work") {
-		t.Errorf("--no-merges should drop only the merge commit:\n%s", nm)
-	}
 }
 
 func TestGitDiff_OutsideRoots(t *testing.T) {

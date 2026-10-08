@@ -267,5 +267,53 @@ describe('diff store — git status', () => {
     d.close()
     expect(d.status).toBeNull()
     expect(d.commitOutcome).toBeNull()
+    expect(d.syncing).toBe('')
+    expect(d.syncOutcome).toBeNull()
+  })
+
+  it('picks up a sync still running after panel opened, and its result', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.setStatusResult(statusMsg(last().req_id as string, { sync_running: 'pull' }))
+    expect(d.syncing).toBe('pull')
+    d.sync('fetch')
+    expect(sent().filter((m) => m.type === 'git_sync')).toHaveLength(0)
+
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(3000)
+    expect(sent().map((m) => m.type)).toEqual(['git_status'])
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_sync: { type: 'git_sync_result', cwd: '/repo', req_id: 'other-page', action: 'pull', ok: true },
+    }))
+    expect(d.syncing).toBe('')
+    expect(d.syncOutcome).toMatchObject({ ok: true, action: 'pull' })
+  })
+
+  it('settles its own sync from the status when the reply was lost (reconnect)', () => {
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    d.sync('pull')
+    const id = last().req_id as string
+
+    // a status taken before the relay registered the sync settles nothing
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_sync: { type: 'git_sync_result', cwd: '/repo', req_id: 'older', action: 'fetch', ok: true },
+    }))
+    expect(d.syncing).toBe('pull')
+    expect(d.syncOutcome).toBeNull()
+
+    // the reply went to the dropped connection; the poll still asks
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(3000)
+    expect(sent().map((m) => m.type)).toEqual(['git_status'])
+    d.setStatusResult(statusMsg(last().req_id as string, {
+      last_sync: { type: 'git_sync_result', cwd: '/repo', req_id: id, action: 'pull', ok: true },
+    }))
+    expect(d.syncing).toBe('')
+    expect(d.syncOutcome).toMatchObject({ ok: true, action: 'pull' })
+
+    vi.mocked(ws.send).mockClear()
+    vi.advanceTimersByTime(10_000)
+    expect(sent()).toHaveLength(0) // settled: polling stops
   })
 })

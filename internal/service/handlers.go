@@ -256,11 +256,9 @@ func (s *Service) handleGitLogView(ctx context.Context, conn *websocket.Conn, da
 		return
 	}
 	content, truncated, err := s.files.GitLogView(ctx, msg.Host, msg.Cwd, GitLogOptions{
-		Oneline:     msg.Oneline,
-		Graph:       msg.Graph,
-		All:         msg.All,
-		FirstParent: msg.FirstParent,
-		NoMerges:    msg.NoMerges,
+		Oneline: msg.Oneline,
+		Graph:   msg.Graph,
+		All:     msg.All,
 	})
 	if err != nil {
 		code := "git_error"

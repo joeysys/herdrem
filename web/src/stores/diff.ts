@@ -7,6 +7,7 @@ import type {
   GitDiff, GitLog, GitDiffMode, GitDiffFormat, CommitEntry, GitDiffContent, GitLogResult,
   GitLogOptions, GitLogViewReq, GitLogViewResult,
   GitStatusData, GitStatusResultMsg, GitCommitResultMsg, GitStageReq, GitCommitReq,
+  GitSyncAction, GitSyncReq, GitSyncResultMsg, GitDiscardReq,
 } from '../api/types';
 
 // The relay drops WebSocket frames over 32 KiB (its read limit) — an oversized
@@ -22,7 +23,7 @@ const utf8Len = (s: string) => new TextEncoder().encode(s).length;
 export type DiffViewMode = GitDiffMode | 'status' | 'log';
 
 const LOG_OPTS_KEY = 'herdrem_git_log_opts';
-const DEFAULT_LOG_OPTS: GitLogOptions = { oneline: true, graph: true, all: false, first_parent: false, no_merges: false };
+const DEFAULT_LOG_OPTS: GitLogOptions = { oneline: true, graph: true, all: false };
 
 function loadLogOptions(): GitLogOptions {
   try {
@@ -90,6 +91,10 @@ export const useDiffStore = defineStore('diff', () => {
   const staging = ref(false);
   const committing = ref(false);
   const commitOutcome = ref<CommitOutcome | null>(null);
+  /** which fetch / pull / push is in flight, or '' */
+  const syncing = ref<'' | GitSyncAction>('');
+  const syncOutcome = ref<GitSyncResultMsg | null>(null);
+  const syncReqId = ref('');
   /** file to scroll to once a diff loads (opened from the status list) */
   const focusPath = ref('');
   const statusReqId = ref('');
@@ -106,6 +111,11 @@ export const useDiffStore = defineStore('diff', () => {
   // status taken before the relay registered the commit.
   const COMMIT_RESULT_WAIT_MS = 15000;
   let commitSentAt = 0;
+  let seenSyncReq = '';
+  let syncPollTimer: ReturnType<typeof setTimeout> | null = null;
+  const SYNC_POLL_MS = 3000;
+  const SYNC_RESULT_WAIT_MS = 15000;
+  let syncSentAt = 0;
 
   function newReqId(): string {
     return uid();
@@ -167,12 +177,18 @@ export const useDiffStore = defineStore('diff', () => {
     staging.value = false;
     committing.value = false;
     commitOutcome.value = null;
+    syncing.value = '';
+    syncOutcome.value = null;
+    syncReqId.value = '';
     focusPath.value = '';
     statusReqId.value = '';
     commitReqId.value = '';
     commitSentAt = 0;
     if (commitPollTimer) clearTimeout(commitPollTimer);
     commitPollTimer = null;
+    syncSentAt = 0;
+    if (syncPollTimer) clearTimeout(syncPollTimer);
+    syncPollTimer = null;
   }
 
   /** Drop all state — used when switching relays. */
@@ -448,6 +464,56 @@ export const useDiffStore = defineStore('diff', () => {
     }
   }
 
+  /** fetch, fast-forward pull, or push the current branch to its upstream. */
+  function sync(action: GitSyncAction) {
+    const s = state.value;
+    if (!s || syncing.value || committing.value || staging.value) return;
+    const reqId = newReqId();
+    const msg: GitSyncReq = { type: 'git_sync', cwd: s.cwd, host: s.host, action, req_id: reqId };
+    syncReqId.value = reqId;
+    syncing.value = action;
+    syncSentAt = Date.now();
+    syncOutcome.value = null;
+    const sent = ws.send(msg);
+    if (!sent) {
+      syncing.value = '';
+      syncOutcome.value = { type: 'git_sync_result', cwd: s.cwd, action, ok: false, error: 'not connected' };
+      return;
+    }
+    watchSync();
+  }
+
+  function setSyncResult(msg: GitSyncResultMsg) {
+    const s = state.value;
+    if (!s || msg.cwd !== s.cwd) return;
+    if (msg.req_id && syncReqId.value && msg.req_id !== syncReqId.value) return;
+    showSyncResult(msg);
+    requestStatus();
+  }
+
+  function setSyncError(reqId: string | undefined, message: string) {
+    if (!state.value) return;
+    if (reqId && syncReqId.value && reqId !== syncReqId.value) return;
+    const action = syncing.value || 'fetch';
+    syncing.value = '';
+    syncOutcome.value = { type: 'git_sync_result', cwd: state.value.cwd, action, ok: false, error: message || 'git sync failed' };
+  }
+
+  /** Restore one tracked path's unstaged worktree changes. */
+  function discard(path: string) {
+    const s = state.value;
+    if (!s || staging.value || syncing.value || committing.value || !path) return;
+    const reqId = newReqId();
+    const msg: GitDiscardReq = { type: 'git_discard', cwd: s.cwd, host: s.host, path, req_id: reqId };
+    statusReqId.value = reqId;
+    staging.value = true;
+    statusError.value = '';
+    if (!ws.send(msg)) {
+      staging.value = false;
+      statusError.value = 'not connected';
+    }
+  }
+
   /** Commit the index with a message, or (useCommand) run the configured command. */
   function commit(opts: { message?: string; useCommand?: boolean }) {
     const s = state.value;
@@ -489,12 +555,13 @@ export const useDiffStore = defineStore('diff', () => {
     const s = state.value;
     if (!s || msg.cwd !== s.cwd) return;
     if (msg.req_id && statusReqId.value && msg.req_id !== statusReqId.value) return;
-    const { type: _t, cwd: _c, req_id: _r, commit_running, last_commit, ...data } = msg;
+    const { type: _t, cwd: _c, req_id: _r, commit_running, last_commit, sync_running, last_sync, ...data } = msg;
     status.value = data;
     statusLoading.value = false;
     staging.value = false;
     statusError.value = '';
     syncCommitState(!!commit_running, last_commit);
+    syncSyncState(sync_running, last_sync);
   }
 
   // The commit reply only reaches the connection that asked for it, and
@@ -528,6 +595,28 @@ export const useDiffStore = defineStore('diff', () => {
     if (last?.req_id && last.req_id !== seenCommitReq) showCommitResult(last);
   }
 
+  function syncSyncState(running?: GitSyncAction, last?: GitSyncResultMsg) {
+    if (syncReqId.value && syncing.value) {
+      if (!running && last?.req_id === syncReqId.value) {
+        showSyncResult(last);
+        return;
+      }
+      if (!running && syncSentAt > 0 && Date.now() - syncSentAt >= SYNC_RESULT_WAIT_MS) {
+        syncing.value = '';
+        syncOutcome.value = { type: 'git_sync_result', cwd: state.value?.cwd ?? '', action: 'fetch', ok: false, error: 'sync result was not confirmed — check git status' };
+        return;
+      }
+      return;
+    }
+    if (running) {
+      syncing.value = running;
+      watchSync();
+      return;
+    }
+    syncing.value = '';
+    if (last?.req_id && last.req_id !== seenSyncReq) showSyncResult(last);
+  }
+
   // While a commit is busy, re-read the status every few seconds until it
   // settles: nothing else asks for one after a reconnect. Skipped while a
   // stage is in flight, whose reply is the status it is waiting for.
@@ -541,12 +630,28 @@ export const useDiffStore = defineStore('diff', () => {
     }, COMMIT_POLL_MS);
   }
 
+  function watchSync() {
+    if (syncPollTimer) return;
+    syncPollTimer = setTimeout(() => {
+      syncPollTimer = null;
+      if (!syncing.value || !state.value) return;
+      if (state.value.mode === 'status' && !staging.value) requestStatus();
+      watchSync();
+    }, SYNC_POLL_MS);
+  }
+
   function showCommitResult(msg: GitCommitResultMsg) {
     committing.value = false;
     if (msg.req_id) seenCommitReq = msg.req_id;
     commitOutcome.value = {
       ok: msg.ok, hash: msg.hash, subject: msg.subject, output: msg.output, error: msg.error, command: msg.command,
     };
+  }
+
+  function showSyncResult(msg: GitSyncResultMsg) {
+    syncing.value = '';
+    if (msg.req_id) seenSyncReq = msg.req_id;
+    syncOutcome.value = msg;
   }
 
   function setStatusError(reqId: string | undefined, message: string) {
@@ -623,6 +728,10 @@ export const useDiffStore = defineStore('diff', () => {
     staging,
     committing,
     commitOutcome,
+    syncing,
+    syncOutcome,
+    sync,
+    discard,
     focusPath,
     requestStatus,
     stage,
@@ -631,6 +740,8 @@ export const useDiffStore = defineStore('diff', () => {
     setStatusResult,
     setStatusError,
     setCommitResult,
+    setSyncResult,
+    setSyncError,
     showFileDiff,
     clearFocus,
   };

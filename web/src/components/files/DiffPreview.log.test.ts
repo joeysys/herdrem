@@ -50,7 +50,7 @@ describe('DiffPreview log tab', () => {
     // the name-status switch is a diff thing
     expect(w.findAll('.dp-btn').some((b) => b.text() === 'name-status')).toBe(false)
     expect(switches(w).findAll('.dp-mode').map((b) => [b.text(), b.attributes('aria-pressed')])).toEqual([
-      ['oneline', 'true'], ['graph', 'true'], ['all', 'false'], ['first-parent', 'false'], ['no-merges', 'false'],
+      ['oneline', 'true'], ['graph', 'true'], ['all', 'false'],
     ])
 
     reply(LOG)

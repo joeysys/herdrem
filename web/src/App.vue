@@ -856,7 +856,9 @@ onMounted(() => {
     if (msg.type === 'git_log_view_result') diff.setLogViewResult(msg);
     if (msg.type === 'git_status_result') diff.setStatusResult(msg);
     if (msg.type === 'git_commit_result') diff.setCommitResult(msg);
-    if (msg.type === 'error' && (msg.op === 'git_status' || msg.op === 'git_stage')) diff.setStatusError(msg.req_id, msg.message);
+    if (msg.type === 'git_sync_result') diff.setSyncResult(msg);
+    if (msg.type === 'error' && (msg.op === 'git_status' || msg.op === 'git_stage' || msg.op === 'git_discard')) diff.setStatusError(msg.req_id, msg.message);
+    if (msg.type === 'error' && msg.op === 'git_sync') diff.setSyncError(msg.req_id, msg.message);
     if (msg.type === 'error' && msg.op === 'file_list') files.setListError(msg.req_id);
     // A term link may point at a directory: the relay reports key "is_dir"
     // and the pending preview becomes a directory-panel open instead.

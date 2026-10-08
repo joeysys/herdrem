@@ -210,3 +210,67 @@ func TestGitStatusErrorsAreKeyed(t *testing.T) {
 		t.Fatalf("got %v", m)
 	}
 }
+
+func TestGitStatusReportsSyncState(t *testing.T) {
+	r := newGitRig(t)
+	m := r.ask(map[string]any{"type": "git_status", "cwd": r.dir})
+	if _, ok := m["last_sync"]; ok {
+		t.Fatalf("no sync yet, but last_sync = %v", m["last_sync"])
+	}
+
+	r.svc.commitMu.Lock()
+	r.svc.syncing = map[string]string{commitKey("", r.dir): "pull"}
+	r.svc.commitMu.Unlock()
+	m = r.ask(map[string]any{"type": "git_status", "cwd": r.dir, "host": "local"})
+	if m["sync_running"] != "pull" {
+		t.Fatalf("running sync not reported: %v", m)
+	}
+	r.svc.commitMu.Lock()
+	r.svc.syncing = nil
+	r.svc.commitMu.Unlock()
+}
+
+func TestGitWriteMutualExclusion(t *testing.T) {
+	r := newGitRig(t)
+	key := commitKey("", r.dir)
+
+	// When committing, stage and discard and sync are rejected
+	r.svc.commitMu.Lock()
+	r.svc.committing = map[string]bool{key: true}
+	r.svc.commitMu.Unlock()
+
+	m := r.ask(map[string]any{"type": "git_stage", "cwd": r.dir, "all": true})
+	if m["type"] != "error" || !strings.Contains(m["message"].(string), "already running") {
+		t.Fatalf("stage during commit was not rejected: %v", m)
+	}
+
+	m = r.ask(map[string]any{"type": "git_discard", "cwd": r.dir, "path": "tracked.txt"})
+	if m["type"] != "error" || !strings.Contains(m["message"].(string), "already running") {
+		t.Fatalf("discard during commit was not rejected: %v", m)
+	}
+
+	m = r.ask(map[string]any{"type": "git_sync", "cwd": r.dir, "action": "fetch"})
+	if m["type"] != "git_sync_result" || !strings.Contains(m["error"].(string), "already running") {
+		t.Fatalf("sync during commit was not rejected: %v", m)
+	}
+
+	// When staging, commit and sync are rejected
+	r.svc.commitMu.Lock()
+	r.svc.committing = nil
+	r.svc.staging = map[string]bool{key: true}
+	r.svc.commitMu.Unlock()
+
+	m = r.ask(map[string]any{"type": "git_commit", "cwd": r.dir, "message": "msg"})
+	if m["type"] != "git_commit_result" || !strings.Contains(m["error"].(string), "already running") {
+		t.Fatalf("commit during stage was not rejected: %v", m)
+	}
+
+	m = r.ask(map[string]any{"type": "git_sync", "cwd": r.dir, "action": "fetch"})
+	if m["type"] != "git_sync_result" || !strings.Contains(m["error"].(string), "already running") {
+		t.Fatalf("sync during stage was not rejected: %v", m)
+	}
+
+	r.svc.commitMu.Lock()
+	r.svc.staging = nil
+	r.svc.commitMu.Unlock()
+}

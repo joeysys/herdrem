@@ -137,11 +137,9 @@ const maxLogViewCommits = 300
 // GitLogOptions are the log view's switches. They map to fixed flags only;
 // nothing from the client reaches git's argv as text.
 type GitLogOptions struct {
-	Oneline     bool
-	Graph       bool
-	All         bool
-	FirstParent bool
-	NoMerges    bool
+	Oneline bool
+	Graph   bool
+	All     bool
 }
 
 // GitLogView runs `git log` for the log view and returns git's own text, at
@@ -168,12 +166,6 @@ func (fs *FileService) GitLogView(ctx context.Context, host, cwd string, o GitLo
 	}
 	if o.All {
 		args = append(args, "--all")
-	}
-	if o.FirstParent {
-		args = append(args, "--first-parent")
-	}
-	if o.NoMerges {
-		args = append(args, "--no-merges")
 	}
 	out, err := fs.runGit(ctx, host, cwd, args...)
 	if err != nil {
@@ -269,7 +261,8 @@ var remoteGitCommand = func(ctx context.Context, host, cwd string, args ...strin
 	if isLocal(host) {
 		gitArgs := append([]string{"-C", cwd}, args...)
 		cmd := exec.CommandContext(ctx, "git", gitArgs...)
-		cmd.Env = gitSafeEnv()
+		// Never block the relay on a credential prompt.
+		cmd.Env = append(gitSafeEnv(), "GIT_TERMINAL_PROMPT=0")
 		return cmd
 	}
 	// For SSH remotes, OpenSSH concatenates all args after the host into a
@@ -282,7 +275,7 @@ var remoteGitCommand = func(ctx context.Context, host, cwd string, args ...strin
 		remoteCmd.WriteString(n)
 		remoteCmd.WriteString(" ")
 	}
-	remoteCmd.WriteString("git ")
+	remoteCmd.WriteString("GIT_TERMINAL_PROMPT=0 git ")
 	remoteCmd.WriteString(shellQuote("-C"))
 	remoteCmd.WriteString(" ")
 	remoteCmd.WriteString(shellQuote(cwd))

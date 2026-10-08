@@ -152,8 +152,6 @@ const LOG_SWITCHES: { key: keyof GitLogOptions; label: string; title: string }[]
   { key: 'oneline', label: 'oneline', title: '--oneline: one line per commit' },
   { key: 'graph', label: 'graph', title: '--graph: draw the branch lines' },
   { key: 'all', label: 'all', title: '--all: every branch and tag, not just HEAD' },
-  { key: 'first_parent', label: 'first-parent', title: '--first-parent: follow only the first parent of a merge' },
-  { key: 'no_merges', label: 'no-merges', title: '--no-merges: hide merge commits' },
 ];
 const logLines = computed(() => {
   const s = state.value;

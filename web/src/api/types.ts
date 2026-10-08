@@ -321,6 +321,10 @@ export interface GitStatusResultMsg extends GitStatusData {
   commit_running?: boolean
   /** the last finished commit's reply, kept by the relay for a few minutes */
   last_commit?: GitCommitResultMsg
+  /** a sync operation is running in this repo */
+  sync_running?: GitSyncAction
+  /** the last finished sync's reply, kept by the relay for a few minutes */
+  last_sync?: GitSyncResultMsg
 }
 export interface GitCommitResultMsg {
   type: 'git_commit_result'
@@ -351,6 +355,30 @@ export interface GitCommitReq {
   use_command?: boolean
   req_id?: string
 }
+export type GitSyncAction = 'fetch' | 'pull' | 'push'
+export interface GitSyncReq {
+  type: 'git_sync'
+  cwd: string
+  host?: string
+  action: GitSyncAction
+  req_id?: string
+}
+export interface GitSyncResultMsg {
+  type: 'git_sync_result'
+  cwd: string
+  req_id?: string
+  action: GitSyncAction
+  ok: boolean
+  output?: string
+  error?: string
+}
+export interface GitDiscardReq {
+  type: 'git_discard'
+  cwd: string
+  host?: string
+  path: string
+  req_id?: string
+}
 
 export interface GitDiff {
   type: 'git_diff'
@@ -378,8 +406,6 @@ export interface GitLogOptions {
   oneline: boolean
   graph: boolean
   all: boolean
-  first_parent: boolean
-  no_merges: boolean
 }
 
 export interface GitLogViewReq extends Partial<GitLogOptions> {
@@ -498,6 +524,7 @@ export interface HistoryImport { type: 'history_import'; entries: HistoryWireEnt
 export type ServerMessage =
   | GitStatusResultMsg
   | GitCommitResultMsg
+  | GitSyncResultMsg
   | HistorySnapshotMsg
   | HistoryAddedMsg
   | HistoryRemovedMsg
@@ -523,6 +550,8 @@ export type ClientMessage =
   | GitStatusReq
   | GitStageReq
   | GitCommitReq
+  | GitSyncReq
+  | GitDiscardReq
   | HistoryRecord
   | HistoryRemove
   | HistoryClear

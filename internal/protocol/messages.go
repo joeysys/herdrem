@@ -273,15 +273,13 @@ type GitLog struct {
 // GitLogView requests `git log` text for the log view (feature
 // "git-log-view"). Each switch maps to one fixed git flag.
 type GitLogView struct {
-	Type        string `json:"type"` // "git_log_view"
-	Cwd         string `json:"cwd"`
-	Host        string `json:"host,omitempty"`
-	Oneline     bool   `json:"oneline,omitempty"`
-	Graph       bool   `json:"graph,omitempty"`
-	All         bool   `json:"all,omitempty"`
-	FirstParent bool   `json:"first_parent,omitempty"`
-	NoMerges    bool   `json:"no_merges,omitempty"`
-	ReqID       string `json:"req_id,omitempty"`
+	Type    string `json:"type"` // "git_log_view"
+	Cwd     string `json:"cwd"`
+	Host    string `json:"host,omitempty"`
+	Oneline bool   `json:"oneline,omitempty"`
+	Graph   bool   `json:"graph,omitempty"`
+	All     bool   `json:"all,omitempty"`
+	ReqID   string `json:"req_id,omitempty"`
 }
 
 // AgentEvent is an optional push event.
@@ -469,6 +467,39 @@ type GitCommit struct {
 	Message    string `json:"message,omitempty"`
 	UseCommand bool   `json:"use_command,omitempty"`
 	ReqID      string `json:"req_id,omitempty"`
+}
+
+// GitSync runs fetch, a fast-forward pull, or a push of the current branch
+// to its existing upstream (feature "git-sync"). The client names the action
+// only — never a remote, a ref, or flags.
+type GitSync struct {
+	Type   string `json:"type"` // "git_sync"
+	Cwd    string `json:"cwd"`
+	Host   string `json:"host,omitempty"`
+	Action string `json:"action"` // "fetch", "pull", or "push"
+	ReqID  string `json:"req_id,omitempty"`
+}
+
+// GitSyncResult reports a fetch, pull, or push (type "git_sync_result").
+type GitSyncResult struct {
+	Type   string `json:"type"`
+	Cwd    string `json:"cwd"`
+	ReqID  string `json:"req_id,omitempty"`
+	Action string `json:"action"`
+	OK     bool   `json:"ok"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// GitDiscard restores one tracked path's unstaged worktree changes
+// (git restore --worktree). The index and untracked files are left alone.
+// Replies with a fresh git_status_result.
+type GitDiscard struct {
+	Type  string `json:"type"` // "git_discard"
+	Cwd   string `json:"cwd"`
+	Host  string `json:"host,omitempty"`
+	Path  string `json:"path"`
+	ReqID string `json:"req_id,omitempty"`
 }
 
 // GitCommitResult reports a commit attempt (type "git_commit_result").
