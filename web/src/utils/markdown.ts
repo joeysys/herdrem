@@ -1,6 +1,6 @@
 // markdown.ts — lightweight custom Markdown renderer (no external dep).
 //
-// Supports headings, bold/italic/inline-code, links, images, ul/ol, task lists,
+// Supports headings, bold/italic/inline-code, links, images, nested ul/ol, task lists,
 // fenced code blocks, tables, hr, and YAML frontmatter (rendered as a kv table).
 // Output is sanitized HTML (input is escaped first).
 
@@ -101,7 +101,7 @@ export function renderMarkdown(md: string): string {
   const lines = text.split('\n')
   const out: string[] = []
   let i = 0
-  let listStack: string[] = []
+  let listStack: { tag: 'ul' | 'ol'; indent: number; task: boolean }[] = []
   let para: string[] = []
 
   const flushPara = () => {
@@ -110,8 +110,50 @@ export function renderMarkdown(md: string): string {
       para = []
     }
   }
+  // A nested list sits inside the parent <li>, so that <li> stays open until
+  // the nested list ends. Close it by appending </li> when it is still the
+  // last chunk, otherwise emit a separate closer after the nested markup.
+  const closeLi = () => {
+    const last = out[out.length - 1]
+    if (last?.startsWith('<li')) out[out.length - 1] = `${last}</li>`
+    else out.push('</li>')
+  }
   const flushList = () => {
-    while (listStack.length) out.push(`</${listStack.pop()}>`)
+    while (listStack.length) {
+      closeLi()
+      out.push(`</${listStack.pop()!.tag}>`)
+    }
+  }
+  const listIndent = (ws: string) => {
+    let n = 0
+    for (const ch of ws) n += ch === '\t' ? 4 : 1
+    return n
+  }
+  const pushItem = (tag: 'ul' | 'ol', indent: number, task: boolean, inner: string, liAttrs = '') => {
+    flushPara()
+    const top = () => listStack[listStack.length - 1]
+    const same = (f: { tag: 'ul' | 'ol'; indent: number; task: boolean }) =>
+      f.tag === tag && f.indent === indent && f.task === task
+    if (!listStack.length || indent > top().indent) {
+      out.push(task ? `<${tag} class="md-task">` : `<${tag}>`)
+      listStack.push({ tag, indent, task })
+    } else {
+      while (listStack.length && top().indent > indent) {
+        closeLi()
+        out.push(`</${listStack.pop()!.tag}>`)
+      }
+      if (!listStack.length || !same(top())) {
+        if (listStack.length) {
+          closeLi()
+          out.push(`</${listStack.pop()!.tag}>`)
+        }
+        out.push(task ? `<${tag} class="md-task">` : `<${tag}>`)
+        listStack.push({ tag, indent, task })
+      } else {
+        closeLi()
+      }
+    }
+    out.push(`<li${liAttrs}>${inner}`)
   }
 
   while (i < lines.length) {
@@ -164,32 +206,32 @@ export function renderMarkdown(md: string): string {
     }
 
     // task list
-    const task = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/)
+    const task = line.match(/^([ \t]*)[-*+]\s+\[([ xX])\]\s+(.*)$/)
     if (task) {
-      flushPara()
-      if (listStack[listStack.length - 1] !== 'ul') { flushList(); out.push('<ul class="md-task">'); listStack.push('ul') }
-      const checked = task[1].toLowerCase() === 'x'
-      out.push(`<li class="md-task-item${checked ? ' done' : ''}"><input type="checkbox" disabled${checked ? ' checked' : ''} /> ${inlineMd(task[2])}</li>`)
+      const checked = task[2].toLowerCase() === 'x'
+      pushItem(
+        'ul',
+        listIndent(task[1]),
+        true,
+        `<input type="checkbox" disabled${checked ? ' checked' : ''} /> ${inlineMd(task[3])}`,
+        ` class="md-task-item${checked ? ' done' : ''}"`,
+      )
       i++
       continue
     }
 
-    // unordered list
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/)
+    // unordered list. Indent opens a nested list instead of another sibling.
+    const ul = line.match(/^([ \t]*)[-*+]\s+(.*)$/)
     if (ul) {
-      flushPara()
-      if (listStack[listStack.length - 1] !== 'ul') { flushList(); out.push('<ul>'); listStack.push('ul') }
-      out.push(`<li>${inlineMd(ul[1])}</li>`)
+      pushItem('ul', listIndent(ul[1]), false, inlineMd(ul[2]))
       i++
       continue
     }
 
     // ordered list
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/)
+    const ol = line.match(/^([ \t]*)\d+\.\s+(.*)$/)
     if (ol) {
-      flushPara()
-      if (listStack[listStack.length - 1] !== 'ol') { flushList(); out.push('<ol>'); listStack.push('ol') }
-      out.push(`<li>${inlineMd(ol[1])}</li>`)
+      pushItem('ol', listIndent(ol[1]), false, inlineMd(ol[2]))
       i++
       continue
     }

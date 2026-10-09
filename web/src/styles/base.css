@@ -154,6 +154,10 @@ code, pre { font-family: var(--font-mono); }
 }
 .topbar.dropdown-open {
   overflow: visible;
+  /* backdrop-filter already traps .new-pane-pop / .relay-pop (z-index 50)
+     inside this bar. The file preview paints at 75, so the open bar itself
+     has to sit just above it. Stay under modal overlays (80+). */
+  z-index: 76;
 }
 .topbar.hide-mobile { display: flex; }
 @media (max-width: 899px) {

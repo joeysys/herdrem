@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
+import { useTunnelsStore } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
 import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { renderMarkdown } from '../../utils/markdown'
@@ -15,6 +16,7 @@ import { addOverlaySource, isShortcutActive, register, shortcutChord, shortcutVe
 const files = useFilesStore()
 const conn = useConnectionStore()
 const term = useTerminalStore()
+const tunnels = useTunnelsStore()
 const { haptic } = useHaptic()
 const props = defineProps<{ directoryOpen: boolean }>()
 const emit = defineEmits<{
@@ -27,6 +29,13 @@ const preview = computed(() => files.preview)
 const isMd = computed(() => /\.(md|markdown)$/i.test(preview.value?.path || ''))
 const isHtml = computed(() => /\.(html|htm)$/i.test(preview.value?.path || ''))
 const isSvg = computed(() => /\.svg$/i.test(preview.value?.path || ''))
+const hasScripts = computed(() => {
+  if (!isHtml.value) return false
+  if (preview.value?.truncated) return true
+  const c = preview.value?.content
+  if (!c) return false
+  return /<script\b|\bon[a-z]{3,}\s*=|javascript\s*:/i.test(c)
+})
 
 const copyStatus = ref<'idle' | 'copied' | 'error'>('idle')
 let copyTimer: ReturnType<typeof setTimeout> | null = null
@@ -249,6 +258,101 @@ const previewAuthUrl = computed(() => {
   const params = new URLSearchParams({ host: preview.value?.host || 'local' })
   return `${base}/preview-auth?${params.toString()}`
 })
+
+const fileTunnel = computed(() => {
+  if (!preview.value?.path) return null
+  return tunnels.getFileTunnel(preview.value.path, preview.value.host || 'local')
+})
+
+const fullTunnelUrl = computed(() => {
+  if (!fileTunnel.value?.public_url) return ''
+  if (fileTunnel.value.auth_mode === 'token_gate' && fileTunnel.value.token) {
+    const sep = fileTunnel.value.public_url.includes('?') ? '&' : '?'
+    return `${fileTunnel.value.public_url}${sep}token=${encodeURIComponent(fileTunnel.value.token)}`
+  }
+  return fileTunnel.value.public_url
+})
+
+const tunnelStarting = ref(false)
+const copiedTunnelUrl = ref(false)
+const tunnelCreateError = ref<string | null>(null)
+let tunnelStartingTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearTunnelStartingTimer() {
+  if (tunnelStartingTimer) {
+    clearTimeout(tunnelStartingTimer)
+    tunnelStartingTimer = null
+  }
+}
+
+function startTunnelPreview() {
+  haptic()
+  if (!preview.value?.path) return
+  if (fileTunnel.value?.status === 'active') {
+    if (fullTunnelUrl.value) {
+      window.open(fullTunnelUrl.value, '_blank')
+    }
+    return
+  }
+  tunnelCreateError.value = null
+  tunnelStarting.value = true
+  clearTunnelStartingTimer()
+  tunnelStartingTimer = setTimeout(() => {
+    tunnelStarting.value = false
+  }, 15000)
+  tunnels.createFileTunnel(preview.value.path, preview.value.host || 'local', 'token_gate')
+}
+
+function dismissTunnelError() {
+  tunnelCreateError.value = null
+  if (fileTunnel.value?.id) {
+    tunnels.dismissTunnel(fileTunnel.value.id)
+  }
+}
+
+async function copyTunnelUrl() {
+  haptic()
+  if (!fullTunnelUrl.value) return
+  try {
+    await navigator.clipboard.writeText(fullTunnelUrl.value)
+    copiedTunnelUrl.value = true
+    setTimeout(() => {
+      copiedTunnelUrl.value = false
+    }, 2000)
+  } catch {
+    copiedTunnelUrl.value = false
+  }
+}
+
+watch(
+  () => fileTunnel.value?.status,
+  (status) => {
+    if (status === 'active' || status === 'error') {
+      tunnelStarting.value = false
+      clearTunnelStartingTimer()
+    }
+  },
+)
+
+watch(
+  () => tunnels.lastCreateError,
+  (err) => {
+    if (err && tunnelStarting.value) {
+      tunnelStarting.value = false
+      clearTunnelStartingTimer()
+      tunnelCreateError.value = err.message
+    }
+  },
+)
+
+watch(
+  () => preview.value?.path,
+  () => {
+    tunnelStarting.value = false
+    tunnelCreateError.value = null
+    clearTunnelStartingTimer()
+  },
+)
 
 // Mint the preview capability before loading the iframe.
 // Gate iframe rendering on authReady to avoid a capability race.
@@ -545,6 +649,23 @@ function fmtSize(bytes: number): string {
 
       <!-- Viewport controls for HTML preview -->
       <template v-if="isHtml && htmlRendered">
+        <a
+          v-if="previewUrl"
+          :href="previewUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="fp-btn"
+          title="Open HTML in a new tab"
+          aria-label="Open HTML in a new tab"
+        >↗</a>
+        <button
+          v-if="conn.hasFeature('tunnels')"
+          class="fp-btn"
+          :class="{ active: fileTunnel?.status === 'active' }"
+          :title="fileTunnel?.status === 'active' ? 'Show tunnel preview' : 'Publish a public tunnel preview'"
+          aria-label="Publish a public tunnel preview"
+          @click="startTunnelPreview"
+        >⚡</button>
         <button
           class="fp-btn vp-btn"
           :class="{ active: viewportWidth === '375px' }"
@@ -615,6 +736,48 @@ function fmtSize(bytes: number): string {
 
       <!-- HTML Sandboxed Iframe Preview -->
       <div v-else-if="isHtml && htmlRendered" class="fp-iframe-container">
+        <!-- Sandbox tip & Tunnel banner -->
+        <div class="fp-sandbox-tip" :class="{ 'has-scripts': hasScripts }">
+          <div v-if="hasScripts" class="fp-tip-msg">
+            <span class="fp-tip-icon">ℹ</span>
+            <span class="fp-tip-text">
+              Preview is sandboxed (JavaScript disabled). Start a tunnel preview to run scripts.
+            </span>
+          </div>
+          <div class="fp-tip-actions">
+            <a v-if="previewUrl" :href="previewUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn">Open in new tab ↗</a>
+            <template v-if="conn.hasFeature('tunnels')">
+              <div v-if="tunnelCreateError" class="fp-tunnel-status">
+                <span class="fp-tunnel-badge error" :title="tunnelCreateError">Failed to start: {{ tunnelCreateError }}</span>
+                <button class="fp-tip-btn" @click="startTunnelPreview">Retry</button>
+                <button class="fp-tip-btn danger" @click="dismissTunnelError">Dismiss</button>
+              </div>
+              <button
+                v-else-if="!fileTunnel || fileTunnel.status === 'closed'"
+                class="fp-tip-btn primary"
+                :disabled="tunnelStarting"
+                @click="startTunnelPreview"
+              >
+                {{ tunnelStarting ? 'Starting…' : '⚡ Public tunnel preview' }}
+              </button>
+              <div v-else class="fp-tunnel-status">
+                <span v-if="fileTunnel.status === 'starting'" class="fp-tunnel-badge starting">Starting tunnel…</span>
+                <template v-else-if="fileTunnel.status === 'error'">
+                  <span class="fp-tunnel-badge error" :title="fileTunnel.error">Failed to start: {{ fileTunnel.error }}</span>
+                  <button class="fp-tip-btn" @click="startTunnelPreview">Retry</button>
+                  <button class="fp-tip-btn danger" @click="dismissTunnelError">Dismiss</button>
+                </template>
+                <template v-else-if="fileTunnel.status === 'active'">
+                  <span class="fp-tunnel-badge active">Public URL ready</span>
+                  <a :href="fullTunnelUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn primary">Open public URL ↗</a>
+                  <button class="fp-tip-btn" title="Copy public URL" @click="copyTunnelUrl">{{ copiedTunnelUrl ? 'Copied' : 'Copy link' }}</button>
+                  <button class="fp-tip-btn danger" title="Close tunnel" @click="tunnels.closeTunnel(fileTunnel.id)">Close</button>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+
         <iframe
           v-if="authReady"
           ref="iframeRef"
@@ -717,14 +880,129 @@ function fmtSize(bytes: number): string {
 .fp-btn.active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .fp-scroll { flex: 1; min-height: 0; overflow: auto; background: var(--term-bg); }
 .fp-scroll.fp-html-wrap { display: flex; flex-direction: column; overflow: hidden; background: #1e1e1e; }
-.fp-iframe-container { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; justify-content: center; background: #121212; }
+.fp-iframe-container { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; background: #121212; }
+.fp-sandbox-tip {
+  padding: 8px 12px;
+  background: var(--surface-2, #1c1d22);
+  border-bottom: 1px solid var(--border, #2d3139);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--text-xs, 12px);
+  color: var(--text, #e2e8f0);
+}
+.fp-sandbox-tip:not(.has-scripts) {
+  justify-content: flex-end;
+  padding: 4px 12px;
+}
+.fp-tip-msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 240px;
+}
+.fp-tip-icon {
+  color: var(--amber, #f59e0b);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.fp-tip-text {
+  color: var(--muted, #94a3b8);
+  line-height: 1.4;
+}
+.fp-tip-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fp-tip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius, 4px);
+  border: 1px solid var(--border-strong, #3b4252);
+  background: var(--surface, #242933);
+  color: var(--text, #e2e8f0);
+  font-size: var(--text-xs, 11px);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+.fp-tip-btn:hover:not(:disabled) {
+  background: var(--surface-2, #2e3440);
+  border-color: var(--border-strong, #3b4252);
+  color: var(--text, #e2e8f0);
+}
+.fp-tip-btn.primary {
+  background: var(--blue-soft);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  color: var(--blue);
+  font-weight: 600;
+}
+.fp-tip-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 22%, transparent);
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.fp-tip-btn.danger {
+  color: var(--red);
+  background: var(--red-soft, rgba(239, 68, 68, 0.12));
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+}
+.fp-tip-btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-color: var(--red);
+  color: var(--red);
+}
+.fp-tunnel-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fp-tunnel-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.fp-tunnel-badge.active {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--green, #22c55e);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.fp-tunnel-badge.starting {
+  background: rgba(234, 179, 8, 0.15);
+  color: var(--amber, #eab308);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+.fp-tunnel-badge.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--red, #ef4444);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.fp-iframe {
+  flex: 1;
+  min-height: 0;
+  margin: 0 auto;
+  border: none;
+  background: #ffffff;
+  transition: width 0.2s ease;
+  box-shadow: 0 0 20px rgba(0,0,0,0.5);
+}
 .fp-auth-error {
   padding: 16px; color: #e88; font-family: var(--font-mono); font-size: var(--text-xs);
   background: #2a1810; border-bottom: 1px solid #4a2820; line-height: 1.6;
   display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
 }
 .fp-auth-error-text { max-width: 70ch; }
-.fp-iframe { height: 100%; border: none; background: #ffffff; transition: width 0.2s ease; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
 .fp-loading { padding: 30px; text-align: center; color: var(--faint); font-family: var(--font-mono); font-size: var(--text-xs); }
 .fp-error { padding: 40px 24px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .fp-error-icon { font-size: 28px; color: var(--orange); }

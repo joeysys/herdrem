@@ -289,10 +289,12 @@ type AgentEvent struct {
 	PaneID string `json:"pane_id,omitempty"`
 }
 
-// TunnelInfo represents one forwarded port tunnel state.
+// TunnelInfo represents one forwarded port or file tunnel state.
 type TunnelInfo struct {
 	ID         string `json:"id"`
-	Port       int    `json:"port"`
+	Port       int    `json:"port,omitempty"`
+	FilePath   string `json:"file_path,omitempty"`
+	Host       string `json:"host,omitempty"`
 	TargetHost string `json:"target_host,omitempty"`
 	PublicURL  string `json:"public_url"`
 	Status     string `json:"status"`    // "starting" | "active" | "error" | "closed"
@@ -302,10 +304,12 @@ type TunnelInfo struct {
 	CreatedAt  int64  `json:"created_at"` // unix timestamp (seconds)
 }
 
-// TunnelCreate requests creating a new port tunnel.
+// TunnelCreate requests creating a new port or file tunnel.
 type TunnelCreate struct {
 	Type     string `json:"type"`
-	Port     int    `json:"port"`
+	Port     int    `json:"port,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
+	Host     string `json:"host,omitempty"`
 	AuthMode string `json:"auth_mode,omitempty"` // "token_gate" | "basic_auth" | "direct"
 	Pin      string `json:"pin,omitempty"`
 }

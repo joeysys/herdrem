@@ -37,4 +37,15 @@ export const safeStorage = {
       /* localStorage blocked / SecurityError */
     }
   },
+
+  clear(): void {
+    memStore.clear()
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.clear()
+      }
+    } catch {
+      /* localStorage blocked / SecurityError */
+    }
+  },
 }

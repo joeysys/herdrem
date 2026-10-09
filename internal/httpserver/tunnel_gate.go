@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -196,11 +197,20 @@ func (s *Server) dispatchTunnelGate(w http.ResponseWriter, r *http.Request, id s
 		}
 	case "direct":
 		// Direct pass-through, no auth required
+		if info.FilePath != "" {
+			http.Error(w, "Forbidden: file tunnels cannot use direct auth", http.StatusForbidden)
+			return
+		}
 	default:
 		// Default to token_gate for safety
 		if !s.checkTokenGate(w, r, info, id, subPath) {
 			return
 		}
+	}
+
+	if info.FilePath != "" {
+		s.serveFileTunnel(w, r, info, subPath)
+		return
 	}
 
 	// Handle WebSocket upgrade vs HTTP Reverse Proxy
@@ -210,6 +220,51 @@ func (s *Server) dispatchTunnelGate(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	s.proxyHTTP(w, r, info.Port, subPath, info.AuthMode)
+}
+
+func (s *Server) serveFileTunnel(w http.ResponseWriter, r *http.Request, info *protocol.TunnelInfo, subPath string) {
+	if s.files == nil {
+		http.Error(w, "files service not available", http.StatusServiceUnavailable)
+		return
+	}
+	host := info.Host
+	if host == "" {
+		host = "local"
+	}
+	targetFile := info.FilePath
+	dir := filepath.Dir(info.FilePath)
+	cleanSub := strings.TrimPrefix(subPath, "/")
+	if cleanSub != "" {
+		targetFile = filepath.Clean(filepath.Join(dir, cleanSub))
+		cleanDir := filepath.Clean(dir)
+		if !strings.HasPrefix(targetFile, cleanDir+string(filepath.Separator)) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		// Reject any dotfile or dot-directory segments (.env, .git, etc.)
+		rel, err := filepath.Rel(cleanDir, targetFile)
+		if err != nil {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+			if strings.HasPrefix(seg, ".") {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+		}
+	}
+
+	// Defense in depth: if accessed locally via /api/tunnel-gate/ rather than host-routing,
+	// enforce sandbox CSP to prevent relay-origin XSS.
+	if strings.HasPrefix(r.URL.Path, "/api/tunnel-gate/") {
+		w.Header().Set("Content-Security-Policy", "sandbox")
+	}
+
+	if err := s.files.ServeStream(w, r, host, targetFile); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
 }
 
 func (s *Server) checkBasicAuth(r *http.Request, info *protocol.TunnelInfo) bool {
@@ -264,9 +319,12 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 
 	authed := false
 	redirectSent := false // explicit flag instead of guessing form field
+	presented := false    // a credential was offered, as opposed to a bare login-page view
+	explicitReject := false
 
 	// Check query param ?token=...
 	tokenQ := r.URL.Query().Get("token")
+	queryPresent := r.URL.Query().Has("token")
 	if info.Token != "" && subtle.ConstantTimeCompare([]byte(tokenQ), []byte(info.Token)) == 1 {
 		s.setTunnelCookie(w, info.Token)
 		// Do not proxy a request that still carries the gate token in its
@@ -283,13 +341,20 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 			return false
 		}
 		authed = true
+	} else if queryPresent {
+		presented = true
+		explicitReject = true
 	}
 
 	// Check Cookie herdrem_tunnel_auth
 	if !authed {
-		if cookie, err := r.Cookie(tunnelCookieName); err == nil && info.Token != "" &&
-			subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(info.Token)) == 1 {
-			authed = true
+		if cookie, err := r.Cookie(tunnelCookieName); err == nil && cookie.Value != "" {
+			if info.Token != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(info.Token)) == 1 {
+				authed = true
+			} else {
+				// A wrong cookie is an attempt, but not something the visitor just typed.
+				presented = true
+			}
 		}
 	}
 
@@ -300,11 +365,16 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 		submittedToken := r.FormValue("token")
 		tokenMatch := info.Token != "" && subtle.ConstantTimeCompare([]byte(submittedToken), []byte(info.Token)) == 1
 		pinMatch := info.Token != "" && subtle.ConstantTimeCompare([]byte(submittedPin), []byte(info.Token)) == 1
+		if submittedPin != "" || submittedToken != "" {
+			presented = true
+		}
 		if tokenMatch || pinMatch {
 			s.setTunnelCookie(w, info.Token)
 			http.Redirect(w, r, r.URL.Path, http.StatusFound)
 			redirectSent = true
 			authed = true
+		} else if submittedPin != "" || submittedToken != "" {
+			explicitReject = true
 		}
 	}
 
@@ -320,26 +390,35 @@ func (s *Server) checkTokenGate(w http.ResponseWriter, r *http.Request, info *pr
 		return true
 	}
 
-	// Record failed attempt for ALL auth paths (GET query, cookie, POST),
-	// not just POST. This prevents bypassing rate limiting via GET ?token=guess.
-	if s.gateLimiter != nil {
+	// Count a presented credential only. A bare GET of the login page — the
+	// embedded preview, or the redirect after a cookie the browser dropped —
+	// is not a guess and must not burn the 5-try budget. Wrong ?token=,
+	// cookie, or POST still count.
+	if presented && s.gateLimiter != nil {
 		s.gateLimiter.recordFailure(clientIP)
 	}
 
 	// Render PIN Login Form Page
-	renderPinPage(w, info, id)
+	renderPinPage(w, info, explicitReject)
 	return false
 }
 
-// setTunnelCookie sets the tunnel auth cookie with Secure attribute.
+// setTunnelCookie sets the tunnel auth cookie.
+//
+// SameSite=None; Secure; Partitioned, not Lax. The embedded preview is a
+// third-party iframe (the tunnel host framed by the relay UI). Browsers
+// drop a Lax cookie there, so the PIN form posted, redirected, and came
+// back to the same form — it looked like submit did nothing. Partitioned
+// keeps that cookie out of other top-level sites. Secure is required.
 func (s *Server) setTunnelCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     tunnelCookieName,
-		Value:    token,
-		Path:     "/",
-		SameSite: http.SameSiteLaxMode,
-		HttpOnly: true,
-		Secure:   true, // Always set Secure — tunnel URLs are HTTPS via cloudflared
+		Name:        tunnelCookieName,
+		Value:       token,
+		Path:        "/",
+		SameSite:    http.SameSiteNoneMode,
+		HttpOnly:    true,
+		Secure:      true,
+		Partitioned: true,
 	})
 }
 
@@ -544,9 +623,18 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPo
 	<-errCh
 }
 
-func renderPinPage(w http.ResponseWriter, info *protocol.TunnelInfo, id string) {
+func renderPinPage(w http.ResponseWriter, info *protocol.TunnelInfo, rejected bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
+	// File tunnels have no port. Showing "Port 0" on that login page is noise.
+	badge := ""
+	if info.Port > 0 {
+		badge = fmt.Sprintf(`<div class="badge">Port %d</div>`, info.Port)
+	}
+	alert := ""
+	if rejected {
+		alert = `<p class="err">That token was not accepted. Check it and try again.</p>`
+	}
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -558,6 +646,7 @@ func renderPinPage(w http.ResponseWriter, info *protocol.TunnelInfo, id string) 
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 32px; width: 100%%; max-width: 380px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); text-align: center; }
     h2 { font-size: 20px; font-weight: 700; margin: 0 0 8px; color: #38bdf8; }
     p { font-size: 13px; color: #94a3b8; margin: 0 0 24px; line-height: 1.5; }
+    .err { font-size: 13px; color: #fca5a5; margin: -8px 0 16px; line-height: 1.4; }
     input { width: 100%%; box-sizing: border-box; background: #0f172a; border: 1px solid #475569; border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 15px; color: #f8fafc; margin-bottom: 16px; outline: none; text-align: center; }
     input:focus { border-color: #38bdf8; }
     button { width: 100%%; background: #0284c7; border: none; border-radius: 6px; padding: 10px; font-size: 14px; font-weight: 600; color: #ffffff; cursor: pointer; }
@@ -567,15 +656,16 @@ func renderPinPage(w http.ResponseWriter, info *protocol.TunnelInfo, id string) 
 </head>
 <body>
   <div class="card">
-    <div class="badge">Port %d</div>
+    %s
     <h2>Herdr Tunnel Gate</h2>
     <p>This Cloudflare tunnel is protected by Herdr Remote. Please enter your PIN or Access Token to continue.</p>
+    %s
     <form method="POST">
       <input type="password" name="token" placeholder="Enter Token or PIN" autofocus required />
       <button type="submit">Verify & Access</button>
     </form>
   </div>
 </body>
-</html>`, info.Port)
+</html>`, badge, alert)
 	_, _ = w.Write([]byte(html))
 }

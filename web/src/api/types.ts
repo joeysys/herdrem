@@ -434,7 +434,9 @@ export interface KindOverrideClear {
 
 export interface TunnelInfo {
   id: string
-  port: number
+  port?: number
+  file_path?: string
+  host?: string
   target_host?: string
   public_url: string
   status: 'starting' | 'active' | 'error' | 'closed'
@@ -456,7 +458,9 @@ export interface TunnelUpdated {
 
 export interface TunnelCreate {
   type: 'tunnel_create'
-  port: number
+  port?: number
+  file_path?: string
+  host?: string
   auth_mode?: 'token_gate' | 'basic_auth' | 'direct'
   pin?: string
 }

@@ -223,6 +223,14 @@ export function isTextInput(el: EventTarget | null): boolean {
   return el.isContentEditable
 }
 
+/** Controls whose unmodified keys are native: typing, caret, pickers, sliders.
+ *  A focused one owns arrows/Home/etc., so no unmodified shortcut may fire. */
+function consumesPlainKeys(el: EventTarget | null): boolean {
+  if (isTextInput(el)) return true
+  if (el instanceof HTMLSelectElement) return true
+  return el instanceof HTMLInputElement && (el.type === 'range' || el.type === 'radio')
+}
+
 function modifiersMatch(e: KeyboardEvent, def: ShortcutDef): boolean {
   const wantMod = !!def.mod
   if (wantMod) {
@@ -267,7 +275,10 @@ function allowed(def: ShortcutDef, scopes: ShortcutScope[], e: KeyboardEvent): b
     if (scopes.includes('overlay') || scopes.includes('global') || scopes.includes('input')) return true
   }
   if (!scopes.includes(def.scope)) return false
-  if (isTextInput(e.target) && isBareCharacter(def)) return false
+  // Focus isolation (inside a text control): a control that consumes plain keys owns
+  // every unmodified key — letters and arrows alike. Only real chords
+  // (Ctrl/⌘/Alt) and Esc (which blurs) may still dispatch.
+  if (consumesPlainKeys(e.target) && !def.mod && !def.ctrl && !def.alt && !def.meta && def.key !== 'Escape') return false
   return true
 }
 

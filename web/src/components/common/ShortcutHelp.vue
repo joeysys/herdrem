@@ -44,7 +44,7 @@ const unavailable = computed(() => listed.value.filter((s) => s.unavailable))
           <ul>
             <li v-for="s in unavailable" :key="s.def.id">
               <kbd>{{ s.chord }}</kbd>
-              <span>{{ s.def.label }}。{{ s.unavailable }}</span>
+              <span>{{ s.def.label }}. {{ s.unavailable }}</span>
             </li>
           </ul>
         </section>

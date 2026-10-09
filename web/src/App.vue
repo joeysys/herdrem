@@ -890,6 +890,10 @@ onMounted(() => {
     if (msg.type === 'error' && msg.op === 'pane_create') {
       notify.push({ message: `failed to create pane: ${msg.message}`, type: 'info' });
     }
+    if (msg.type === 'error' && msg.op === 'tunnel_create') {
+      tunnelsStore.handleCreateError(msg.message);
+      notify.push({ message: `failed to create tunnel: ${msg.message}`, type: 'info' });
+    }
   });
   notify.ensurePermission();
   // PWA: lock portrait on first gesture + intercept back button

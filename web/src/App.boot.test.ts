@@ -25,11 +25,13 @@ vi.mock('./api/ws', () => ({
   },
 }));
 
+import { safeStorage } from './utils/storage';
+
 let fetchMock: MockInstance<typeof fetch>;
 
 beforeEach(() => {
   setActivePinia(createPinia());
-  localStorage.clear();
+  safeStorage.clear();
   sessionStorage.clear();
   fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
 });
@@ -70,6 +72,7 @@ describe('App boot splash', () => {
     await nextTick();
     expect(wrapper.find('.boot-splash').exists()).toBe(false);
     expect(wrapper.find('.app').exists()).toBe(true);
+    wrapper.unmount();
   });
 
   it('goes splash → token page when the session cookie is dead', async () => {
@@ -86,6 +89,7 @@ describe('App boot splash', () => {
     // The prompt names the relay being authenticated — same-origin here.
     expect(wrapper.find('.relay-auth-url').text()).toContain(location.host);
     expect(localStorage.getItem('herdrem_session')).toBeNull();
+    wrapper.unmount();
   });
 
   it('can switch to another relay from the token page', async () => {

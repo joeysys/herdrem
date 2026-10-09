@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
@@ -127,18 +129,137 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 		return nil, fmt.Errorf("custom pin must be at least 8 characters for adequate entropy")
 	}
 
-	ts.mu.Lock()
-	// Check if active tunnel already exists for this port
-	for _, item := range ts.tunnels {
-		if item.Info.Port == targetPort && (item.Info.Status == "active" || item.Info.Status == "starting") {
-			// Reject reuse if auth_mode or pin doesn't match.
-			if item.Info.AuthMode != authMode || (pin != "" && item.Info.Token != pin) {
-				ts.mu.Unlock()
-				return nil, fmt.Errorf("port %d already has an active tunnel with different auth_mode or credentials", targetPort)
+	// Credential generation must fail closed. A silent entropy failure
+	// would publish a predictable token on a public gate, so propagate the
+	// error and do not start cloudflared.
+	idSuffix, err := randomHex(4)
+	if err != nil {
+		return nil, fmt.Errorf("generate tunnel id: %w", err)
+	}
+	id := fmt.Sprintf("tun-%d-%s", targetPort, idSuffix)
+	token := pin
+	if token == "" {
+		// Use high-entropy default token instead of 6-digit PIN.
+		// A 16-byte hex token (128 bits) makes brute-force infeasible.
+		token, err = randomHex(16)
+		if err != nil {
+			return nil, fmt.Errorf("generate tunnel token: %w", err)
+		}
+	}
+
+	info := protocol.TunnelInfo{
+		ID:         id,
+		Port:       targetPort,
+		TargetHost: "localhost",
+		Status:     "starting",
+		AuthMode:   authMode,
+		Token:      token,
+		CreatedAt:  time.Now().Unix(),
+	}
+
+	findExisting := func(items map[string]*TunnelItem) (*protocol.TunnelInfo, error) {
+		for _, item := range items {
+			if item.Info.Port == targetPort && (item.Info.Status == "active" || item.Info.Status == "starting") {
+				// Reject reuse if auth_mode or pin doesn't match.
+				if item.Info.AuthMode != authMode || (pin != "" && item.Info.Token != pin) {
+					return nil, fmt.Errorf("port %d already has an active tunnel with different auth_mode or credentials", targetPort)
+				}
+				infoCopy := item.Info
+				return &infoCopy, nil
 			}
-			infoCopy := item.Info
+		}
+		return nil, nil
+	}
+
+	return ts.startTunnel(info, findExisting, authMode == "direct")
+}
+
+// CreateFileTunnel starts a cloudflared tunnel for an HTML or static file preview.
+func (ts *TunnelService) CreateFileTunnel(host, filePath, authMode, pin string) (*protocol.TunnelInfo, error) {
+	filePath = filepath.Clean(filePath)
+	if filePath == "" || filePath == "." {
+		return nil, fmt.Errorf("file path cannot be empty")
+	}
+	if host == "" {
+		host = "local"
+	}
+	if host == "local" {
+		if fi, err := os.Stat(filePath); err == nil && fi.IsDir() {
+			return nil, fmt.Errorf("cannot create tunnel for directory %q", filePath)
+		}
+	}
+
+	if authMode == "" {
+		authMode = "token_gate"
+	}
+	if authMode == "direct" {
+		return nil, fmt.Errorf("direct auth mode is not allowed for file tunnels; use token_gate or basic_auth")
+	}
+	if authMode != "token_gate" && authMode != "basic_auth" {
+		return nil, fmt.Errorf("invalid auth_mode %q", authMode)
+	}
+	if pin != "" && len(pin) < 8 {
+		return nil, fmt.Errorf("custom pin must be at least 8 characters for adequate entropy")
+	}
+
+	idSuffix, err := randomHex(4)
+	if err != nil {
+		return nil, fmt.Errorf("generate tunnel id: %w", err)
+	}
+	id := fmt.Sprintf("tun-file-%s", idSuffix)
+	token := pin
+	if token == "" {
+		token, err = randomHex(16)
+		if err != nil {
+			return nil, fmt.Errorf("generate tunnel token: %w", err)
+		}
+	}
+
+	info := protocol.TunnelInfo{
+		ID:         id,
+		FilePath:   filePath,
+		Host:       host,
+		TargetHost: "localhost",
+		Status:     "starting",
+		AuthMode:   authMode,
+		Token:      token,
+		CreatedAt:  time.Now().Unix(),
+	}
+
+	findExisting := func(items map[string]*TunnelItem) (*protocol.TunnelInfo, error) {
+		for _, item := range items {
+			if item.Info.FilePath == filePath && item.Info.Host == host && (item.Info.Status == "active" || item.Info.Status == "starting") {
+				if item.Info.AuthMode != authMode || (pin != "" && item.Info.Token != pin) {
+					return nil, fmt.Errorf("file %q already has an active tunnel with different auth_mode or credentials", filepath.Base(filePath))
+				}
+				infoCopy := item.Info
+				return &infoCopy, nil
+			}
+		}
+		return nil, nil
+	}
+
+	return ts.startTunnel(info, findExisting, false)
+}
+
+// startTunnel holds ts.mu continuously from checking existing tunnels to inserting the new item,
+// completely eliminating TOCTOU races between concurrent creation requests.
+func (ts *TunnelService) startTunnel(
+	info protocol.TunnelInfo,
+	findExisting func(map[string]*TunnelItem) (*protocol.TunnelInfo, error),
+	isDirect bool,
+) (*protocol.TunnelInfo, error) {
+	ts.mu.Lock()
+
+	if findExisting != nil {
+		existing, err := findExisting(ts.tunnels)
+		if err != nil {
 			ts.mu.Unlock()
-			return &infoCopy, nil
+			return nil, err
+		}
+		if existing != nil {
+			ts.mu.Unlock()
+			return existing, nil
 		}
 	}
 
@@ -157,42 +278,12 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 		return nil, fmt.Errorf("too many tunnels (max %d); close one first or raise HERDREM_TUNNEL_MAX", maxActive)
 	}
 
-	// Credential generation must fail closed. A silent entropy failure
-	// would publish a predictable token on a public gate, so propagate the
-	// error and do not start cloudflared.
-	idSuffix, err := randomHex(4)
-	if err != nil {
-		ts.mu.Unlock()
-		return nil, fmt.Errorf("generate tunnel id: %w", err)
-	}
-	id := fmt.Sprintf("tun-%d-%s", targetPort, idSuffix)
-	token := pin
-	if token == "" {
-		// Use high-entropy default token instead of 6-digit PIN.
-		// A 16-byte hex token (128 bits) makes brute-force infeasible.
-		token, err = randomHex(16)
-		if err != nil {
-			ts.mu.Unlock()
-			return nil, fmt.Errorf("generate tunnel token: %w", err)
-		}
-	}
-
-	info := protocol.TunnelInfo{
-		ID:         id,
-		Port:       targetPort,
-		TargetHost: "localhost",
-		Status:     "starting",
-		AuthMode:   authMode,
-		Token:      token,
-		CreatedAt:  time.Now().Unix(),
-	}
-
 	// Check cloudflared binary
 	binPath, err := exec.LookPath("cloudflared")
 	if err != nil {
 		info.Status = "error"
 		info.Error = "cloudflared binary not found in PATH. Please install cloudflared first."
-		ts.logger.Error("cloudflared binary missing", "port", targetPort, "err", err)
+		ts.logger.Error("cloudflared binary missing", "id", info.ID, "err", err)
 		ts.mu.Unlock()
 		if ts.onUpdate != nil {
 			ts.onUpdate(info)
@@ -202,14 +293,14 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var cmd *exec.Cmd
-	if authMode == "direct" {
+	if isDirect {
 		// Direct mode: point cloudflared directly to targetPort
-		targetURL := fmt.Sprintf("http://localhost:%d", targetPort)
+		targetURL := fmt.Sprintf("http://localhost:%d", info.Port)
 		cmd = exec.CommandContext(ctx, binPath, "tunnel", "--url", targetURL)
 	} else {
 		// Gate mode: point cloudflared to Relay port with custom Host header for tunnel ID identification
 		relayURL := fmt.Sprintf("http://localhost:%d", ts.relayPort)
-		hostHeader := fmt.Sprintf("%s.tunnel.local", id)
+		hostHeader := fmt.Sprintf("%s.tunnel.local", info.ID)
 		cmd = exec.CommandContext(ctx, binPath, "tunnel", "--url", relayURL, "--http-host-header", hostHeader)
 	}
 
@@ -228,7 +319,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 		cancel: cancel,
 		waited: make(chan struct{}),
 	}
-	ts.tunnels[id] = item
+	ts.tunnels[info.ID] = item
 	infoCopy := item.Info
 	ts.mu.Unlock()
 
@@ -253,7 +344,7 @@ func (ts *TunnelService) CreateTunnel(targetPort int, authMode string, pin strin
 
 	// Read stderr in background to parse Public URL. This goroutine also owns
 	// the single cmd.Wait() for this process.
-	go ts.monitorTunnelStderr(id, item, stderr)
+	go ts.monitorTunnelStderr(info.ID, item, stderr)
 
 	return &infoCopy, nil
 }
@@ -269,7 +360,7 @@ func (ts *TunnelService) monitorTunnelStderr(id string, item *TunnelItem, stderr
 			if ok && item.Info.Status == "starting" {
 				item.Info.PublicURL = url
 				item.Info.Status = "active"
-				ts.logger.Info("cloudflared tunnel established", "id", id, "url", url, "port", item.Info.Port)
+				ts.logger.Info("cloudflared tunnel established", "id", id, "url", url, "port", item.Info.Port, "file", item.Info.FilePath)
 				infoCopy := item.Info
 				updateInfo = &infoCopy
 			}

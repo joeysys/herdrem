@@ -62,6 +62,12 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<ul>')
     expect(html).toContain('<li>one</li>')
   })
+  it('nests indented lists instead of flattening them', () => {
+    const html = renderMarkdown('- ERP\n  - Base data\n    - [Enterprise](./a.md)\n- next')
+    expect(html.match(/<ul>/g)).toHaveLength(3)
+    expect(html).toContain('<li>ERP\n<ul>\n<li>Base data\n<ul>\n<li><a href="./a.md"')
+    expect(html).toContain('Enterprise</a></li>\n</ul>\n</li>\n</ul>\n</li>\n<li>next</li>')
+  })
   it('renders task list', () => {
     const html = renderMarkdown('- [x] done\n- [ ] todo')
     expect(html).toContain('checked')

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,3 +185,167 @@ func TestCreateTunnelCapsConcurrent(t *testing.T) {
 		t.Errorf("reuse id = %q, want %q", again.ID, a.ID)
 	}
 }
+
+func TestCreateFileTunnel(t *testing.T) {
+	fakeBin := writeFakeCloudflared(t)
+	originalPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", originalPath) })
+	os.Setenv("PATH", filepath.Dir(fakeBin)+":"+originalPath)
+
+	svc := NewTunnelService(8080, nil, nil)
+	filePath := "/tmp/test.html"
+	info, err := svc.CreateFileTunnel("local", filePath, "token_gate", "12345678")
+	if err != nil {
+		t.Fatalf("unexpected error creating file tunnel: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = svc.CloseTunnel(info.ID)
+	})
+
+	if info.FilePath != filePath {
+		t.Errorf("expected filePath %s, got %s", filePath, info.FilePath)
+	}
+	if !strings.HasPrefix(info.ID, "tun-file-") {
+		t.Errorf("expected ID prefix tun-file-, got %s", info.ID)
+	}
+	if info.AuthMode != "token_gate" {
+		t.Errorf("expected auth_mode token_gate, got %s", info.AuthMode)
+	}
+
+	// Reusing same file returns existing tunnel
+	again, err := svc.CreateFileTunnel("local", filePath, "token_gate", "12345678")
+	if err != nil {
+		t.Fatalf("reuse file tunnel: %v", err)
+	}
+	if again.ID != info.ID {
+		t.Errorf("reuse id = %q, want %q", again.ID, info.ID)
+	}
+}
+
+func TestCreateFileTunnelRejectsDirectory(t *testing.T) {
+	svc := NewTunnelService(8080, nil, nil)
+	dir := t.TempDir()
+	if _, err := svc.CreateFileTunnel("local", dir, "token_gate", "12345678"); err == nil {
+		t.Fatal("expected error creating tunnel for directory, got nil")
+	} else if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("error = %v, want mention of directory", err)
+	}
+}
+
+func TestCreateFileTunnelRejectsDirectAuth(t *testing.T) {
+	svc := NewTunnelService(8080, nil, nil)
+	if _, err := svc.CreateFileTunnel("local", "/tmp/a.html", "direct", "12345678"); err == nil {
+		t.Fatal("expected error for direct auth mode on file tunnel, got nil")
+	} else if !strings.Contains(err.Error(), "direct auth mode is not allowed") {
+		t.Errorf("error = %v, want direct auth rejection", err)
+	}
+}
+
+func TestConcurrentCreateTunnelDeduplication(t *testing.T) {
+	fakeBin := writeFakeCloudflared(t)
+	originalPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", originalPath) })
+	os.Setenv("PATH", filepath.Dir(fakeBin)+":"+originalPath)
+
+	const concurrency = 16
+	for round := 0; round < 5; round++ {
+		svc := NewTunnelService(8080, nil, nil)
+		results := make([]*protocol.TunnelInfo, concurrency)
+		errs := make([]error, concurrency)
+
+		var wg sync.WaitGroup
+		wg.Add(concurrency)
+		startGate := make(chan struct{})
+
+		for i := 0; i < concurrency; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				<-startGate
+				info, err := svc.CreateTunnel(5173, "token_gate", "")
+				results[idx] = info
+				errs[idx] = err
+			}()
+		}
+
+		close(startGate)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d goroutine %d failed: %v", round, i, err)
+			}
+		}
+
+		firstID := results[0].ID
+		for i := 1; i < concurrency; i++ {
+			if results[i].ID != firstID {
+				t.Fatalf("round %d goroutine %d returned ID %s, expected %s", round, i, results[i].ID, firstID)
+			}
+		}
+
+		tunnels := svc.ListTunnels()
+		if len(tunnels) != 1 {
+			t.Fatalf("round %d expected exactly 1 active/starting tunnel, got %d", round, len(tunnels))
+		}
+		_ = svc.CloseTunnel(firstID)
+	}
+}
+
+func TestConcurrentCreateFileTunnelDeduplication(t *testing.T) {
+	fakeBin := writeFakeCloudflared(t)
+	originalPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", originalPath) })
+	os.Setenv("PATH", filepath.Dir(fakeBin)+":"+originalPath)
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "preview.html")
+	if err := os.WriteFile(filePath, []byte("<h1>test</h1>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	const concurrency = 16
+	for round := 0; round < 5; round++ {
+		svc := NewTunnelService(8080, nil, nil)
+		results := make([]*protocol.TunnelInfo, concurrency)
+		errs := make([]error, concurrency)
+
+		var wg sync.WaitGroup
+		wg.Add(concurrency)
+		startGate := make(chan struct{})
+
+		for i := 0; i < concurrency; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				<-startGate
+				info, err := svc.CreateFileTunnel("local", filePath, "token_gate", "")
+				results[idx] = info
+				errs[idx] = err
+			}()
+		}
+
+		close(startGate)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d goroutine %d failed: %v", round, i, err)
+			}
+		}
+
+		firstID := results[0].ID
+		for i := 1; i < concurrency; i++ {
+			if results[i].ID != firstID {
+				t.Fatalf("round %d goroutine %d returned ID %s, expected %s", round, i, results[i].ID, firstID)
+			}
+		}
+
+		tunnels := svc.ListTunnels()
+		if len(tunnels) != 1 {
+			t.Fatalf("round %d expected exactly 1 active/starting tunnel, got %d", round, len(tunnels))
+		}
+		_ = svc.CloseTunnel(firstID)
+	}
+}
+

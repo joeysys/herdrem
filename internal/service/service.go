@@ -573,7 +573,21 @@ func (s *Service) handleTunnelCreate(ctx context.Context, conn *websocket.Conn, 
 		s.sendError(ctx, conn, "tunnel_create", "invalid message: "+err.Error())
 		return
 	}
-	info, err := s.tunnels.CreateTunnel(msg.Port, msg.AuthMode, msg.Pin)
+	var info *protocol.TunnelInfo
+	var err error
+	if msg.FilePath != "" {
+		host := msg.Host
+		if host == "" {
+			host = "local"
+		}
+		if s.files != nil && !s.files.IsFile(ctx, host, msg.FilePath) {
+			s.sendError(ctx, conn, "tunnel_create", "file not found, is a directory, or outside sandbox roots")
+			return
+		}
+		info, err = s.tunnels.CreateFileTunnel(host, msg.FilePath, msg.AuthMode, msg.Pin)
+	} else {
+		info, err = s.tunnels.CreateTunnel(msg.Port, msg.AuthMode, msg.Pin)
+	}
 	if err != nil {
 		s.sendError(ctx, conn, "tunnel_create", err.Error())
 		return

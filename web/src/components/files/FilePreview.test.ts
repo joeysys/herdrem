@@ -318,3 +318,194 @@ describe('FilePreview line width setting', () => {
     wrapper.unmount()
   })
 })
+
+describe('FilePreview HTML sandbox notice and tunnel preview', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response(null, { status: 204 }))
+    )
+  })
+
+  it('displays sandbox tip, open-in-new-tab link, and tunnel preview button for HTML', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['tunnels']
+    const { ws } = await import('../../api/ws')
+    files.openPath('/workspace/test.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/test.html',
+      content: '<h1>Hello</h1><script>console.log("script");</script>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 53,
+    })
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+
+    // Sandbox tip should be visible in HTML preview mode
+    const tip = wrapper.find('.fp-sandbox-tip')
+    expect(tip.exists()).toBe(true)
+    expect(tip.text()).toContain('sandboxed')
+    expect(tip.classes()).toContain('has-scripts')
+
+    // Open in new tab link
+    const newTabLink = tip.find('a[target="_blank"]')
+    expect(newTabLink.exists()).toBe(true)
+    expect(newTabLink.text()).toContain('Open in new tab')
+
+    // Tunnel preview button
+    const tunnelBtn = tip.find('.fp-tip-tunnel-btn, .fp-tip-btn.primary')
+    expect(tunnelBtn.exists()).toBe(true)
+    expect(tunnelBtn.text()).toContain('Public tunnel preview')
+
+    // Trigger tunnel creation
+    await tunnelBtn.trigger('click')
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tunnel_create',
+        file_path: '/workspace/test.html',
+        auth_mode: 'token_gate',
+      })
+    )
+
+    wrapper.unmount()
+  })
+
+  it('does not render sandboxed/js warning when HTML contains no scripts', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['tunnels']
+
+    files.openPath('/workspace/static.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/static.html',
+      content: '<h1>Pure HTML</h1><p>No scripts here.</p>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 41,
+    })
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+
+    const tip = wrapper.find('.fp-sandbox-tip')
+    expect(tip.exists()).toBe(true)
+    expect(tip.classes()).not.toContain('has-scripts')
+    expect(wrapper.find('.fp-tip-msg').exists()).toBe(false)
+    expect(tip.text()).not.toContain('sandboxed')
+    expect(tip.text()).not.toContain('JavaScript')
+
+    // Actions are still accessible
+    expect(tip.find('a[target="_blank"]').exists()).toBe(true)
+    expect(tip.find('.fp-tip-btn.primary').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('renders active tunnel actions when tunnel is established', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    const { useTunnelsStore } = await import('../../stores/tunnels')
+    const tunnels = useTunnelsStore()
+    conn.features = ['tunnels']
+
+    files.openPath('/workspace/flow.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/flow.html',
+      content: '<h1>Flow</h1>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 13,
+    })
+
+    tunnels.setTunnels([
+      {
+        id: 'tun-file-flow',
+        file_path: '/workspace/flow.html',
+        host: 'local',
+        public_url: 'https://test-flow.trycloudflare.com',
+        status: 'active',
+        auth_mode: 'token_gate',
+        token: 'secret123',
+        created_at: Date.now(),
+      },
+    ])
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+
+    const tip = wrapper.find('.fp-sandbox-tip')
+    expect(tip.exists()).toBe(true)
+    expect(tip.text()).toContain('Public URL ready')
+
+    const publicLink = tip.find('a[href*="test-flow.trycloudflare.com"]')
+    expect(publicLink.exists()).toBe(true)
+    expect(publicLink.attributes('href')).toBe('https://test-flow.trycloudflare.com?token=secret123')
+
+    wrapper.unmount()
+  })
+
+  it('handles tunnel create error and allows dismiss / retry', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    const { useTunnelsStore } = await import('../../stores/tunnels')
+    const tunnels = useTunnelsStore()
+    conn.features = ['tunnels']
+
+    files.openPath('/workspace/error.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/error.html',
+      content: '<h1>Error</h1><script>console.log(1)</script>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 44,
+    })
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+
+    const startBtn = wrapper.find('.fp-tip-btn.primary')
+    await startBtn.trigger('click')
+    await nextTick()
+    expect(wrapper.text()).toContain('Starting…')
+
+    // Simulate backend rejection
+    tunnels.handleCreateError('file not found or outside sandbox roots')
+    await nextTick()
+
+    expect(wrapper.text()).not.toContain('Starting…')
+    expect(wrapper.text()).toContain('Failed to start: file not found or outside sandbox roots')
+    expect(wrapper.find('button.danger').text()).toBe('Dismiss')
+
+    // Dismiss the error
+    await wrapper.find('button.danger').trigger('click')
+    await nextTick()
+
+    expect(wrapper.text()).not.toContain('Failed to start')
+    expect(wrapper.find('.fp-tip-btn.primary').text()).toContain('Public tunnel preview')
+
+    wrapper.unmount()
+  })
+})

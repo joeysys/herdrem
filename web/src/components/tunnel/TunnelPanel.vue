@@ -57,15 +57,16 @@ function getFullUrlWithToken(t: { public_url: string; token?: string; auth_mode:
   return t.public_url
 }
 
-function previewTunnel(t: { public_url: string; token?: string; auth_mode: string; port: number }) {
+function previewTunnel(t: { public_url: string; token?: string; auth_mode: string; port?: number; file_path?: string }) {
   haptic()
   // The embedded iframe must not carry the gate token in its src: the URL
   // lives in the DOM and browser history, and a sandboxed previewed page
-  // could otherwise read it. The clean URL lands on the tunnel's PIN/login
-  // page, which works inside the iframe; the "open in new tab" link still
-  // carries the token for one-click auth.
+  // could otherwise read it. The clean URL lands on the PIN page. The gate
+  // sets a Partitioned SameSite=None cookie so that form works inside this
+  // cross-site iframe; the "open in new tab" link still carries the token.
   if (t.public_url) {
-    tunnels.openPreview(t.public_url, `Local Port :${t.port}`)
+    const title = t.file_path ? `File: ${t.file_path.split('/').pop()}` : `Local Port :${t.port}`
+    tunnels.openPreview(t.public_url, title)
   }
 }
 </script>
@@ -87,7 +88,7 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
 
       <!-- Port Forwarding Creation Form -->
       <div class="tp-create">
-        <div class="tp-form-row">
+        <div class="tp-form-row tp-form-row-top">
           <div class="tp-field flex-1">
             <label>Port</label>
             <input v-model.number="inputPort" type="number" min="1" max="65535" placeholder="5173" />
@@ -99,16 +100,16 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
               <option value="basic_auth">🔑 Basic Auth (Native Browser Popup)</option>
               <option v-if="conn.hasFeature('tunnel-direct')" value="direct">⚠ No Auth — public, anyone with the URL</option>
             </select>
-            <p class="tp-sub" style="margin-top:6px">
-              Allowed ports: 5173, 3000, 8080, 4173 (plus <code>HERDREM_TUNNEL_PORTS</code> singles or ranges like <code>8000-8100</code>; ports below 1024 are blocked).
-            </p>
-            <p v-if="authMode === 'direct'" class="tp-danger-note">
-              This publishes <code>localhost:{{ inputPort }}</code> to the public internet
-              with <strong>no authentication</strong>. It does not use Cloudflare Access.
-              Anyone who obtains the URL gets full access to that port.
-            </p>
           </div>
         </div>
+        <p class="tp-sub tp-hint">
+          Allowed ports: 5173, 3000, 8080, 4173 (plus <code>HERDREM_TUNNEL_PORTS</code> singles or ranges like <code>8000-8100</code>; ports below 1024 are blocked).
+        </p>
+        <p v-if="authMode === 'direct'" class="tp-danger-note">
+          This publishes <code>localhost:{{ inputPort }}</code> to the public internet
+          with <strong>no authentication</strong>. It does not use Cloudflare Access.
+          Anyone who obtains the URL gets full access to that port.
+        </p>
         <div class="tp-form-row">
           <div class="tp-field flex-1">
             <label>Custom PIN / Token (Optional)</label>
@@ -130,7 +131,7 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
           <div class="tp-card-head">
             <div class="tp-card-info">
               <span class="tp-status-dot" :class="t.status"></span>
-              <span class="tp-port mono">localhost:{{ t.port }}</span>
+              <span class="tp-port mono" :title="t.file_path || `localhost:${t.port}`">{{ t.file_path ? `📄 ${t.file_path.split('/').pop()}` : `localhost:${t.port}` }}</span>
               <span class="tp-auth-tag mono">{{ t.auth_mode }}</span>
             </div>
             <button class="tp-card-close" title="Close Tunnel" @click="tunnels.closeTunnel(t.id)">×</button>
@@ -223,7 +224,7 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
 }
 
 .tp-danger-note {
-  margin: 8px 0 0; padding: 8px 10px; border-radius: 6px;
+  margin: 0; padding: 8px 10px; border-radius: 6px;
   background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35);
   color: #fca5a5; font-size: var(--text-2xs); line-height: 1.5;
 }
@@ -231,6 +232,10 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
 
 .tp-create { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--bg-deep); display: flex; flex-direction: column; gap: 12px; }
 .tp-form-row { display: flex; gap: 12px; align-items: flex-end; }
+/* Port and Access Control are one control each. Top-align them so the taller
+   help text (a sibling below this row) cannot leave a gap above Port. */
+.tp-form-row-top { align-items: flex-start; }
+.tp-hint { margin: 0; line-height: 1.5; }
 .flex-1 { flex: 1; min-width: 0; }
 .flex-2 { flex: 2; min-width: 0; }
 .tp-field label { display: block; font-size: var(--text-2xs); font-weight: 600; color: var(--muted); margin-bottom: 5px; }

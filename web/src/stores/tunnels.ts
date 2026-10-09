@@ -44,7 +44,49 @@ export const useTunnelsStore = defineStore('tunnels', () => {
     ws.send(msg)
   }
 
+  const lastCreateError = ref<{ message: string; timestamp: number } | null>(null)
+
+  function handleCreateError(message: string) {
+    lastCreateError.value = { message, timestamp: Date.now() }
+  }
+
+  function dismissTunnel(id: string) {
+    const idx = tunnels.value.findIndex((t) => t.id === id)
+    if (idx >= 0) {
+      tunnels.value.splice(idx, 1)
+    }
+  }
+
+  function createFileTunnel(filePath: string, host = 'local', authMode: 'token_gate' | 'basic_auth' | 'direct' = 'token_gate', pin?: string) {
+    // Purge any existing error entry for this file so retry starts clean
+    tunnels.value = tunnels.value.filter(
+      (t) => !(t.file_path === filePath && (t.host || 'local') === host && t.status === 'error')
+    )
+    lastCreateError.value = null
+    const msg: TunnelCreate = {
+      type: 'tunnel_create',
+      file_path: filePath,
+      host,
+      auth_mode: authMode,
+      pin,
+    }
+    ws.send(msg)
+  }
+
+  function getFileTunnel(filePath: string, host = 'local') {
+    const matches = tunnels.value.filter(
+      (t) => t.file_path === filePath && (t.host || 'local') === host && t.status !== 'closed'
+    )
+    if (matches.length === 0) return undefined
+    // Prefer active/starting tunnel over older error entries
+    const live = matches.find((t) => t.status === 'active' || t.status === 'starting')
+    if (live) return live
+    // Otherwise return latest entry
+    return matches[matches.length - 1]
+  }
+
   function closeTunnel(id: string) {
+    dismissTunnel(id)
     const msg: TunnelClose = {
       type: 'tunnel_close',
       id,
@@ -88,7 +130,12 @@ export const useTunnelsStore = defineStore('tunnels', () => {
     updateTunnel,
     fetchTunnels,
     createTunnel,
+    createFileTunnel,
+    getFileTunnel,
     closeTunnel,
+    dismissTunnel,
+    lastCreateError,
+    handleCreateError,
     togglePanel,
     openPreview,
     closePreview,

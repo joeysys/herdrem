@@ -199,6 +199,58 @@ describe('useShortcuts', () => {
     expect(seen).toEqual(['esc'])
   })
 
+  it('isolates unmodified keys in a text input — arrows included, Esc excepted', () => {
+    const seen: string[] = []
+    register(bind({ id: 'down', key: 'ArrowDown', run: () => { seen.push('down') } }))
+    register(bind({ id: 'home', key: 'Home', run: () => { seen.push('home') } }))
+    register(bind({ id: 'back', key: 'Escape', run: () => { seen.push('esc') } }))
+    register(bind({ id: 'blur', key: 'Escape', scope: 'input', run: (e) => { (e.target as HTMLElement).blur() } }))
+    register(bind({ id: 'find', key: 'f', mod: true, run: () => { seen.push('find') } }))
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    input.focus()
+    const at = (init: KeyboardEventInit, target: EventTarget = input) => {
+      const ev = key(init)
+      Object.defineProperty(ev, 'target', { value: target })
+      return ev
+    }
+    expect(onShortcutKeydown(at({ key: 'ArrowDown' }))).toBe(false)
+    expect(onShortcutKeydown(at({ key: 'ArrowUp' }))).toBe(false)
+    expect(onShortcutKeydown(at({ key: 'Home' }))).toBe(false)
+    expect(onShortcutKeydown(at({ key: 'f', ctrlKey: true }))).toBe(true)
+    expect(seen).toEqual(['find'])
+    // Esc still blurs the field first
+    expect(onShortcutKeydown(at({ key: 'Escape' }))).toBe(true)
+    expect(document.activeElement).not.toBe(input)
+    // With focus outside inputs the same keys dispatch again
+    expect(onShortcutKeydown(key({ key: 'ArrowDown' }))).toBe(true)
+    expect(onShortcutKeydown(key({ key: 'Home' }))).toBe(true)
+    expect(seen).toEqual(['find', 'down', 'home'])
+  })
+
+  it('isolates unmodified keys in selects and arrow-driven inputs too', () => {
+    const seen: string[] = []
+    register(bind({ id: 'down', key: 'ArrowDown', run: () => { seen.push('down') } }))
+    const select = document.createElement('select')
+    const range = document.createElement('input')
+    range.type = 'range'
+    const radio = document.createElement('input')
+    radio.type = 'radio'
+    const box = document.createElement('input')
+    box.type = 'checkbox' // arrows are not native to a checkbox: nav still fires
+    document.body.append(select, range, radio, box)
+    const at = (t: EventTarget) => {
+      const ev = key({ key: 'ArrowDown' })
+      Object.defineProperty(ev, 'target', { value: t })
+      return ev
+    }
+    expect(onShortcutKeydown(at(select))).toBe(false)
+    expect(onShortcutKeydown(at(range))).toBe(false)
+    expect(onShortcutKeydown(at(radio))).toBe(false)
+    expect(onShortcutKeydown(at(box))).toBe(true)
+    expect(seen).toEqual(['down'])
+  })
+
   it('ignores a key that is still composing', () => {
     const seen: string[] = []
     register(bind({ id: 'down', key: 'j', run: () => { seen.push('j') } }))

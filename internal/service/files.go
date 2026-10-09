@@ -493,6 +493,34 @@ func (fs *FileService) Exists(ctx context.Context, host, path string) bool {
 	return cmd.Run() == nil
 }
 
+// IsFile checks if a path points to a regular file (not a directory) within the sandbox.
+func (fs *FileService) IsFile(ctx context.Context, host, path string) bool {
+	if !fs.hostOK(host) {
+		return false
+	}
+	roots := fs.roots(host)
+	if isLocal(host) {
+		f, err := openWithinRoots(path, roots)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil || info.IsDir() {
+			return false
+		}
+		return true
+	}
+	if err := isSafePath(path, roots); err != nil {
+		return false
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+		host, remoteResolveScript(path, roots)+` test -f "$r"`)
+	return cmd.Run() == nil
+}
+
 // remoteIsDirExit is the sentinel exit code the remote read command uses to
 // report "path is a directory" — deterministic across remote shells, unlike
 // matching stderr text.
