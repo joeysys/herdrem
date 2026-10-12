@@ -280,3 +280,62 @@ func TestRemoteResolveScript(t *testing.T) {
 		t.Fatalf("path outside roots was not blocked: %q", out)
 	}
 }
+
+// The scope dir is resolved on the remote side, so a symlink inside it that
+// reaches a sibling allowed root cannot widen the capability's scope —
+// this is the authoritative check behind the preview capability dir.
+func TestRemoteResolveScriptScopedBlocksOutsideScope(t *testing.T) {
+	root := t.TempDir()
+	scope := filepath.Join(root, "site")
+	sibling := filepath.Join(root, "other")
+	if err := os.Mkdir(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scope, "index.html"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Symlink inside the scope pointing at a sibling that is still within
+	// roots — lexical checks would allow it; remote resolution must not.
+	if err := os.Symlink(sibling, filepath.Join(scope, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(path string) (string, error) {
+		script := remoteResolveScriptScoped(path, []string{root}, scope) + ` cat "$r"`
+		out, err := exec.Command("sh", "-c", script).CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := run(filepath.Join(scope, "index.html")); err != nil || strings.TrimSpace(out) != "ok" {
+		t.Fatalf("in-scope file should resolve and read: out=%q err=%v", out, err)
+	}
+	if out, err := run(filepath.Join(scope, "linkdir", "secret.txt")); err == nil {
+		t.Fatalf("scope symlink escape was not blocked: %q", out)
+	}
+	if out, err := run(filepath.Join(sibling, "secret.txt")); err == nil {
+		t.Fatalf("in-roots path outside scope was not blocked: %q", out)
+	}
+}
+
+// A missing resource under a symlinked dir must resolve through its parent:
+// resolving the leaf fails, so the parent resolves and the base rejoins —
+// otherwise such files get a wrong verdict (and a 401 instead of 404).
+func TestPathWithinDirMissingFileUnderSymlinkDir(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if !PathWithinDir(link, filepath.Join(link, "missing.css")) {
+		t.Fatal("missing file under symlinked dir should be judged inside")
+	}
+	if PathWithinDir(link, filepath.Join(real, "..", "escape")) {
+		t.Fatal("escape above dir should stay outside")
+	}
+}

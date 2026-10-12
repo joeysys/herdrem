@@ -258,9 +258,75 @@ func (fs *FileService) Read(ctx context.Context, host, path string) (*FileReadRe
 	return res, nil
 }
 
+// PathWithinDir reports whether path stays inside dir after resolving
+// symlinks where possible, so a symlink inside dir cannot reach a file
+// outside it. A path that does not exist is resolved through its parent
+// and rejoined with its base name, so a missing resource under a
+// symlinked dir is still judged correctly. An empty dir matches
+// everything (unscoped).
+func PathWithinDir(dir, path string) bool {
+	if dir == "" {
+		return true
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		realDir = filepath.Clean(dir)
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if pd, perr := filepath.EvalSymlinks(filepath.Dir(path)); perr == nil {
+			realPath = filepath.Join(pd, filepath.Base(path))
+		} else {
+			realPath = filepath.Clean(path)
+		}
+	}
+	return relWithin(realDir, realPath)
+}
+
+// PathWithinDirLexical is the purely lexical variant for remote paths,
+// which cannot be resolved on this filesystem — the authoritative check
+// for remote hosts runs inside the SSH command in remoteResolveScriptScoped.
+func PathWithinDirLexical(dir, path string) bool {
+	if dir == "" {
+		return true
+	}
+	return relWithin(filepath.Clean(dir), filepath.Clean(path))
+}
+
+func relWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// HasDotSegment reports whether any path component starts with a dot —
+// .env, .git/config, and friends. Dir-scoped preview capabilities deny
+// these, matching the file tunnel, because a run-mode script can leak its
+// capability URL and the holder is not the user.
+func HasDotSegment(path string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(path), "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// DirWithinRoots reports whether dir resolves inside the host's allowed
+// roots. Remote paths fall back to lexical checks because the filesystem
+// is not local; the serve-time check in remoteResolveScript is authoritative.
+func (fs *FileService) DirWithinRoots(host, dir string) bool {
+	if !fs.hostOK(host) {
+		return false
+	}
+	return isSafePath(dir, fs.roots(host)) == nil
+}
+
 // ServeStream streams a file to http.ResponseWriter using http.ServeContent (local) or byte stream (remote).
-// Safe-path checked. Bypasses 1 MiB maxFileRead truncation.
-func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host, path string) error {
+// Safe-path checked. Bypasses 1 MiB maxFileRead truncation. A non-empty
+// scopeDir additionally requires the resolved file to stay inside that
+// directory; the check applies to the opened FD locally and to the remote
+// symlink resolution over SSH, not just to the client-supplied path.
+func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host, path, scopeDir string) error {
 	if !fs.hostOK(host) {
 		return fmt.Errorf("unauthorized host %q", host)
 	}
@@ -275,7 +341,7 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 		// large asset — which HTML previews fetch automatically via relative
 		// URLs — could OOM the Relay. `cat` + io.Copy keeps memory at the
 		// copy-buffer size regardless of file size.
-		return fs.serveRemoteStream(w, r, host, path, roots)
+		return fs.serveRemoteStream(w, r, host, path, roots, scopeDir)
 	}
 
 	f, err := openWithinRoots(path, roots)
@@ -283,6 +349,20 @@ func (fs *FileService) ServeStream(w http.ResponseWriter, r *http.Request, host,
 		return err
 	}
 	defer f.Close()
+
+	// Re-check the opened FD against scopeDir: the capability grants a
+	// directory narrower than the roots, and checking the FD (not the
+	// request path) keeps a symlink swap after openWithinRoots from
+	// escaping the scope — or from landing on a dotfile.
+	if scopeDir != "" {
+		resolved, err := fdPath(f)
+		if err != nil {
+			return err
+		}
+		if !PathWithinDir(scopeDir, resolved) || HasDotSegment(resolved) {
+			return fmt.Errorf("path %q outside preview scope", resolved)
+		}
+	}
 
 	info, err := f.Stat()
 	if err != nil {
@@ -322,6 +402,10 @@ const maxStderrBytes = 8 << 10
 // Resolution is POSIX-portable (cd -P + leaf readlink) because BSD remotes
 // lack `realpath`/`readlink -f`.
 func remoteResolveScript(path string, roots []string) string {
+	return remoteResolveScriptScoped(path, roots, "")
+}
+
+func remoteResolveScriptScoped(path string, roots []string, scopeDir string) string {
 	var b strings.Builder
 	b.WriteString("p=")
 	b.WriteString(shellQuote(path))
@@ -332,14 +416,25 @@ func remoteResolveScript(path string, roots []string) string {
 		b.WriteString(shellQuote(filepath.Clean(root)))
 	}
 	b.WriteString(`; do RR=$(cd -P "$R" 2>/dev/null && pwd -P) || RR=$R; case "$r" in "$RR"|"$RR"/*) ok=1;; esac; done; [ "$ok" = 1 ] || { echo "path outside allowed roots" >&2; exit 1; };`)
+	if scopeDir != "" {
+		// The capability dir lives on the remote, so resolve it there too:
+		// a symlink inside the dir pointing at a sibling allowed root must
+		// not widen the scope.
+		b.WriteString(` sd=$(cd -P `)
+		b.WriteString(shellQuote(scopeDir))
+		b.WriteString(` 2>/dev/null && pwd -P) || exit 1; case "$r" in "$sd"|"$sd"/*) ;; *) echo "path outside preview scope" >&2; exit 1;; esac;`)
+		// Same dotfile denial as the local FD check: the resolved path may
+		// hide a dot component behind a symlink.
+		b.WriteString(` case "$r" in */./*|*/.*) echo "dotfiles not in preview scope" >&2; exit 1;; esac;`)
+	}
 	return b.String()
 }
 
 // remoteCatCommand builds the command that streams a remote file to stdout.
 // Indirected through a var so tests can substitute a local process.
-var remoteCatCommand = func(ctx context.Context, host, path string, roots []string) *exec.Cmd {
+var remoteCatCommand = func(ctx context.Context, host, path string, roots []string, scopeDir string) *exec.Cmd {
 	return exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-		host, remoteResolveScript(path, roots)+` cat -- "$r"`)
+		host, remoteResolveScriptScoped(path, roots, scopeDir)+` cat -- "$r"`)
 }
 
 // boundedWriter keeps at most limit bytes and silently discards the rest. It
@@ -373,10 +468,10 @@ func (b *boundedWriter) String() string { return b.buf.String() }
 // writing into a full pipe. Calling cmd.Wait() in that state waits for a
 // process that can never exit, so the context must be cancelled (killing the
 // child) *before* reaping. Getting this backwards deadlocks the request.
-func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request, host, path string, roots []string) error {
+func (fs *FileService) serveRemoteStream(w http.ResponseWriter, r *http.Request, host, path string, roots []string, scopeDir string) error {
 	ctx, cancel := context.WithCancel(r.Context())
 
-	cmd := remoteCatCommand(ctx, host, path, roots)
+	cmd := remoteCatCommand(ctx, host, path, roots, scopeDir)
 	stderr := &boundedWriter{limit: maxStderrBytes}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()

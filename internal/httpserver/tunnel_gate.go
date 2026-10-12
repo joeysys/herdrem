@@ -261,7 +261,7 @@ func (s *Server) serveFileTunnel(w http.ResponseWriter, r *http.Request, info *p
 		w.Header().Set("Content-Security-Policy", "sandbox")
 	}
 
-	if err := s.files.ServeStream(w, r, host, targetFile); err != nil {
+	if err := s.files.ServeStream(w, r, host, targetFile, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}

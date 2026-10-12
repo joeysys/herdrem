@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import FilePreview from './FilePreview.vue'
@@ -330,7 +330,7 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
   it('displays sandbox tip, open-in-new-tab link, and tunnel preview button for HTML', async () => {
     const files = useFilesStore()
     const conn = (await import('../../stores/connection')).useConnectionStore()
-    conn.features = ['tunnels']
+    conn.features = ['tunnels', 'preview-run']
     const { ws } = await import('../../api/ws')
     files.openPath('/workspace/test.html', '/workspace', 'local', null)
     files.setContent({
@@ -355,10 +355,30 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(tip.text()).toContain('sandboxed')
     expect(tip.classes()).toContain('has-scripts')
 
-    // Open in new tab link
+    // Open in new tab — runs scripts too, in the same opaque origin as the
+    // run frame (server sends `sandbox allow-scripts` CSP): no relay
+    // cookies or parent DOM, though it can still issue network requests.
     const newTabLink = tip.find('a[target="_blank"]')
     expect(newTabLink.exists()).toBe(true)
     expect(newTabLink.text()).toContain('Open in new tab')
+    expect(newTabLink.attributes('href')).toContain('run=1')
+    expect(newTabLink.attributes('title')).toContain('isolated origin')
+    // The tip must explain both run paths share the same isolation boundary
+    expect(tip.text()).toContain('isolated origin')
+
+    // ▶ switches the iframe sandbox to allow-scripts and adds ?run=1; the
+    // server then sends CSP `sandbox allow-scripts` so scripts execute in
+    // an opaque origin. src keeps the capability-scoped preview URL.
+    const runBtn = wrapper.find('button[aria-label="Run scripts"]')
+    expect(runBtn.exists()).toBe(true)
+    expect(wrapper.find('iframe').attributes('sandbox')).toBe('')
+    await runBtn.trigger('click')
+    const runFrame = wrapper.find('iframe')
+    expect(runFrame.attributes('sandbox')).toBe('allow-scripts')
+    expect(runFrame.attributes('src')).toContain('/preview/')
+    expect(runFrame.attributes('src')).toContain('run=1') // server relaxes CSP for any load carrying run=1, iframe or new tab
+    await runBtn.trigger('click')
+    expect(wrapper.find('iframe').attributes('sandbox')).toBe('')
 
     // Tunnel preview button
     const tunnelBtn = tip.find('.fp-tip-tunnel-btn, .fp-tip-btn.primary')
@@ -378,10 +398,131 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     wrapper.unmount()
   })
 
+  it('resets run mode when switching to another file', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run']
+    files.openPath('/workspace/one.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/one.html',
+      content: '<script>console.log("a");</script>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 30,
+    })
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(wrapper.find('iframe').attributes('sandbox')).toBe('allow-scripts')
+
+    // Switching files must not inherit run mode — script execution is a
+    // per-document choice, so the next HTML loads fully sandboxed again.
+    files.openPath('/workspace/two.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/two.html',
+      content: '<script>console.log("b");</script>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 30,
+    })
+    await nextTick()
+    await nextTick() // watch is async (capability mint)
+    const frame = wrapper.find('iframe')
+    expect(frame.attributes('sandbox')).toBe('')
+    expect(frame.attributes('src')).not.toContain('run=1')
+    wrapper.unmount()
+  })
+
+  it('ignores a preview capability that arrives after switching files', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run']
+    // Hold each /preview-auth response so the test decides the arrival order.
+    const pending: Array<(cap: string) => void> = []
+    vi.mocked(globalThis.fetch).mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          pending.push((cap) =>
+            resolve(new Response(JSON.stringify({ capability: cap, run_capability: `run-${cap}` }), { status: 200 })),
+          )
+        }),
+    )
+    const html = (path: string) => ({
+      type: 'file_content' as const,
+      path,
+      content: '<script>1</script>',
+      encoding: 'utf-8' as const,
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 18,
+    })
+    files.openPath('/proj/index.html', '/proj', 'local', null)
+    files.setContent(html('/proj/index.html'))
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false } })
+    await nextTick()
+    files.openPath('/proj/admin/page.html', '/proj/admin', 'local', null)
+    files.setContent(html('/proj/admin/page.html'))
+    await nextTick()
+    expect(pending).toHaveLength(2)
+
+    // The newer file's mint answers first, then the stale wider-dir mint.
+    pending[1]('cap-admin')
+    await flushPromises()
+    pending[0]('cap-proj')
+    await flushPromises()
+
+    const src = wrapper.find('iframe').attributes('src')
+    expect(src).toContain('/preview/cap-admin/')
+    expect(src).not.toContain('cap-proj')
+    expect(wrapper.find('a[target="_blank"]').attributes('href')).toContain('/preview/run-cap-admin/')
+    wrapper.unmount()
+  })
+
+  it('hides run affordances when the relay lacks the preview-run feature', async () => {
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['tunnels'] // no preview-run (old relay)
+    files.openPath('/workspace/legacy.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/legacy.html',
+      content: '<script>console.log("x");</script>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 30,
+    })
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+    await nextTick()
+
+    // ▶ stays hidden — clicking it on an old relay would look enabled but
+    // the response CSP would still block scripts.
+    expect(wrapper.find('button[aria-label="Run scripts"]').exists()).toBe(false)
+    // The new-tab link falls back to the sandboxed static URL.
+    const link = wrapper.find('a[target="_blank"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).not.toContain('run=1')
+    expect(link.attributes('title')).toContain('sandboxed')
+    wrapper.unmount()
+  })
+
   it('does not render sandboxed/js warning when HTML contains no scripts', async () => {
     const files = useFilesStore()
     const conn = (await import('../../stores/connection')).useConnectionStore()
-    conn.features = ['tunnels']
+    conn.features = ['tunnels', 'preview-run']
 
     files.openPath('/workspace/static.html', '/workspace', 'local', null)
     files.setContent({
@@ -419,7 +560,7 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     const conn = (await import('../../stores/connection')).useConnectionStore()
     const { useTunnelsStore } = await import('../../stores/tunnels')
     const tunnels = useTunnelsStore()
-    conn.features = ['tunnels']
+    conn.features = ['tunnels', 'preview-run']
 
     files.openPath('/workspace/flow.html', '/workspace', 'local', null)
     files.setContent({
@@ -467,7 +608,7 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     const conn = (await import('../../stores/connection')).useConnectionStore()
     const { useTunnelsStore } = await import('../../stores/tunnels')
     const tunnels = useTunnelsStore()
-    conn.features = ['tunnels']
+    conn.features = ['tunnels', 'preview-run']
 
     files.openPath('/workspace/error.html', '/workspace', 'local', null)
     files.setContent({

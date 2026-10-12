@@ -117,6 +117,7 @@ func (t *rejectLogThrottle) allow(ip string, now time.Time) (bool, int) {
 type previewCapability struct {
 	host      string
 	ip        string // minter's client IP — the cap must be used from it
+	dir       string // directory scope — the cap only reads files under it
 	expiresAt time.Time
 }
 
@@ -274,7 +275,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		name := filepath.Base(filepath.ToSlash(path))
 		w.Header().Set("Content-Disposition", contentDisposition(name))
 	}
-	if err := s.files.ServeStream(w, r, host, path); err != nil {
+	if err := s.files.ServeStream(w, r, host, path, ""); err != nil {
 		w.Header().Del("Content-Disposition")
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
@@ -522,36 +523,72 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := string(hostBytes)
-	if s.cfg.Token != "" && !s.validPreviewCapability(capability, host, realClientIP(r)) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 	filePath := "/" + strings.TrimPrefix(filePart, "/")
+	scopeDir := ""
+	if s.cfg.Token != "" {
+		dir, ok := s.previewScopeDir(capability, host, realClientIP(r), filePath)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		scopeDir = dir
+	}
 
-	// Force the response into a sandboxed context even if loaded via
-	// top-level navigation. The preview is fully static — bare `sandbox`
-	// grants no capabilities, so no script may run. That is what makes the
-	// capability in the URL safe: any credential a script could read
-	// (location.href, document.baseURI, element.src) is exfiltratable via
-	// frame self-navigation, which no CSP directive covers, so the only
-	// complete fix is removing script execution. Static markup cannot read
-	// its own URL and cannot embed a per-view minted capability it does
-	// not know. The deny-by-default CSP stays as defense in depth:
+	// Opt-in script execution requires ?run=1 AND a directory-scoped
+	// capability. The opaque origin is enforced by the response CSP itself —
+	// `sandbox allow-scripts` applies to any browsing context, iframe or
+	// top-level — so a new tab running JS is no more privileged than the
+	// inline run frame, and no Sec-Fetch-Dest sniffing is needed. A running
+	// script can read its own URL and therefore the capability, which is why
+	// the capability is scoped to the file's directory (see
+	// handlePreviewAuth) and that scope is re-checked against the opened
+	// file in ServeStream.
+	//
+	// `sandbox allow-scripts` lets the document execute scripts but keeps it
+	// in an opaque origin — the response enforces the boundary, so an
+	// embedder that drops (or widens) the iframe's sandbox attribute cannot
+	// turn this into relay-origin execution. No allow-same-origin, ever.
+	//
+	// Default loads get a fully static, sandboxed response: bare `sandbox`
+	// grants no capabilities, so no script may run and static markup cannot
+	// read its own URL — defense in depth even when the iframe sandbox
+	// attribute already blocks execution. The deny-by-default CSP:
+	//
 	// 'self' never matches inside an opaque-origin document, so the
 	// request's own scheme://host is emitted explicitly to keep relative
 	// subresources (CSS/images/fonts) loading under this origin + data:.
+	//
+	// Run mode narrows all subresource channels: script/style/img/media/font
+	// and fetch/XHR/WebSocket only reach this relay origin (sibling files in
+	// the scoped dir — cross-origin, so no credentials ride along) or data:.
+	// default-src 'none' closes the fallback for unlisted directives
+	// (manifest-src, prefetch-src, worker-src, ...), so no fetch-like
+	// channel can send off-origin at all. What remains unpreventable by CSP
+	// is top-level document navigation. What bounds a leaked run capability
+	// is the capability itself: scoped to the file's directory, dotfiles
+	// refused, bound to the minter's IP, 10-minute TTL.
+	run := r.URL.Query().Get("run") == "1" && (s.cfg.Token == "" || scopeDir != "")
 	proto := "http"
 	if r.TLS != nil || (isLoopback(r.RemoteAddr) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
 		proto = "https"
 	}
 	self := proto + "://" + r.Host
-	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; "+
-		"style-src 'unsafe-inline' "+self+"; "+
-		"img-src "+self+" data:; media-src "+self+" data:; font-src "+self+" data:; "+
-		"connect-src 'none'; form-action 'none'; base-uri 'none'")
+	if run {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; "+
+			"script-src 'unsafe-inline' 'unsafe-eval' "+self+" data:; "+
+			"style-src 'unsafe-inline' "+self+" data:; "+
+			"img-src "+self+" data:; media-src "+self+" data:; font-src "+self+" data:; "+
+			"connect-src "+self+"; frame-src 'none'; object-src 'none'; "+
+			"form-action 'none'; base-uri 'none'")
+	} else {
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; "+
+			"style-src 'unsafe-inline' "+self+"; "+
+			"img-src "+self+" data:; media-src "+self+" data:; font-src "+self+" data:; "+
+			"connect-src 'none'; form-action 'none'; base-uri 'none'")
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if err := s.files.ServeStream(w, r, host, filePath); err != nil {
+	if err := s.files.ServeStream(w, r, host, filePath, scopeDir); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -587,14 +624,42 @@ func (s *Server) handlePreviewAuth(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "local"
 	}
-	capability, err := s.issuePreviewCapability(host, realClientIP(r))
+	// Two capabilities are minted: `capability` is legacy host-scoped and
+	// drives the default static preview (a sandboxed document cannot run
+	// scripts, so it cannot leak the token in its URL — and ../ resources
+	// keep working). `run_capability` is scoped to the file's directory —
+	// a script running in the opt-in mode can read its own URL and leak it,
+	// so only the narrow token may ever reach a script-executing document.
+	// dir must be absolute and inside one of the host's roots — dir=/ would
+	// otherwise degenerate the scope into every allowed root. A missing dir
+	// mints only the legacy capability (older clients); those never qualify
+	// for run mode (see handleFilePreview).
+	capability, err := s.issuePreviewCapability(host, realClientIP(r), "")
 	if err != nil {
 		http.Error(w, "preview capability unavailable", http.StatusInternalServerError)
 		return
 	}
+	resp := map[string]string{"capability": capability}
+	if raw := r.URL.Query().Get("dir"); raw != "" {
+		dir := filepath.Clean(raw)
+		if dir == "." || !filepath.IsAbs(dir) {
+			http.Error(w, "dir must be an absolute path", http.StatusBadRequest)
+			return
+		}
+		if !s.files.DirWithinRoots(host, dir) {
+			http.Error(w, "dir outside allowed roots", http.StatusBadRequest)
+			return
+		}
+		runCapability, err := s.issuePreviewCapability(host, realClientIP(r), dir)
+		if err != nil {
+			http.Error(w, "preview capability unavailable", http.StatusInternalServerError)
+			return
+		}
+		resp["run_capability"] = runCapability
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"capability": capability})
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleSessionAuth sets the HttpOnly relay session cookie. Same-origin SPA
@@ -714,7 +779,7 @@ func sameOriginCheck(origin, host string) bool {
 	return originHost == host
 }
 
-func (s *Server) issuePreviewCapability(host, ip string) (string, error) {
+func (s *Server) issuePreviewCapability(host, ip, dir string) (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
@@ -743,7 +808,7 @@ func (s *Server) issuePreviewCapability(host, ip string) (string, error) {
 		}
 		delete(s.previewCaps, oldestKey)
 	}
-	s.previewCaps[token] = previewCapability{host: host, ip: ip, expiresAt: now.Add(previewCapabilityTTL)}
+	s.previewCaps[token] = previewCapability{host: host, ip: ip, dir: dir, expiresAt: now.Add(previewCapabilityTTL)}
 	return token, nil
 }
 
@@ -759,7 +824,15 @@ func sameClientIP(a, b string) bool {
 	return pa != nil && pb != nil && pa.IsLoopback() && pb.IsLoopback()
 }
 
-func (s *Server) validPreviewCapability(token, host, ip string) bool {
+func (s *Server) validPreviewCapability(token, host, ip, filePath string) bool {
+	_, ok := s.previewScopeDir(token, host, ip, filePath)
+	return ok
+}
+
+// previewScopeDir validates the capability and returns its directory scope.
+// A valid legacy capability (minted without dir) returns ""; callers must
+// treat that as unscoped-for-read but ineligible for run mode.
+func (s *Server) previewScopeDir(token, host, ip, filePath string) (string, bool) {
 	now := time.Now()
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
@@ -768,9 +841,25 @@ func (s *Server) validPreviewCapability(token, host, ip string) bool {
 		if ok && !capability.expiresAt.After(now) {
 			delete(s.previewCaps, token)
 		}
-		return false
+		return "", false
 	}
-	return true
+	// Remote paths do not exist on this filesystem, so only the lexical
+	// check applies here; remoteResolveScriptScoped is the authoritative
+	// gate at serve time. Local paths get full symlink resolution.
+	if host == "" || host == "local" {
+		if !service.PathWithinDir(capability.dir, filePath) {
+			return "", false
+		}
+	} else if !service.PathWithinDirLexical(capability.dir, filePath) {
+		return "", false
+	}
+	// A scoped capability must never open dotfiles — the run-mode document
+	// can leak its capability URL, and same-egress-IP holders must not get
+	// .env/.git. Same rule the file tunnel applies.
+	if capability.dir != "" && service.HasDotSegment(filePath) {
+		return "", false
+	}
+	return capability.dir, true
 }
 
 // sessionCookieVersion marks the signed-cookie format so a future change can
@@ -963,7 +1052,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		hello.Features = append(hello.Features, "tunnel-direct")
 	}
 	if s.files != nil {
-		hello.Features = append(hello.Features, "file-upload")
+		hello.Features = append(hello.Features, "file-upload", "preview-run")
 	}
 	if s.svc != nil && s.svc.HasHistory() {
 		hello.Features = append(hello.Features, "input-history")

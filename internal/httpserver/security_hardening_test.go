@@ -181,22 +181,22 @@ func TestRejectLogThrottleBoundsVolume(t *testing.T) {
 // A preview capability minted by one client IP must not replay from another.
 func TestPreviewCapabilityBindsClientIP(t *testing.T) {
 	s := &Server{previewCaps: make(map[string]previewCapability)}
-	capability, err := s.issuePreviewCapability("local", "192.0.2.1")
+	capability, err := s.issuePreviewCapability("local", "192.0.2.1", "/srv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.validPreviewCapability(capability, "local", "203.0.113.9") {
+	if s.validPreviewCapability(capability, "local", "203.0.113.9", "/srv/a.html") {
 		t.Fatal("capability replayed from a different client IP")
 	}
-	if !s.validPreviewCapability(capability, "local", "192.0.2.1") {
+	if !s.validPreviewCapability(capability, "local", "192.0.2.1", "/srv/a.html") {
 		t.Fatal("capability rejected for its minting IP")
 	}
 	// Loopback representations are the same client.
-	loop, err := s.issuePreviewCapability("local", "127.0.0.1")
+	loop, err := s.issuePreviewCapability("local", "127.0.0.1", "/srv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.validPreviewCapability(loop, "local", "::1") {
+	if !s.validPreviewCapability(loop, "local", "::1", "/srv/a.html") {
 		t.Fatal("loopback capability should work across 127.0.0.1/::1")
 	}
 }

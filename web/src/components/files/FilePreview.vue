@@ -240,22 +240,29 @@ const renderedMd = computed(() => {
 // previewUrl uses a path-based URL (/preview/<path>) so that relative URLs in
 // HTML documents (CSS, JS, images) resolve against the file's directory.
 // The URL carries only a short-lived preview capability, never the relay token.
+// `capability` (host-scoped) drives the default static preview — a sandboxed
+// doc cannot leak it, and ../ resources keep working. `run_capability`
+// (dir-scoped) goes only into script-executing run URLs.
 const previewCapability = ref('')
-const previewUrl = computed(() => {
+const runCapability = ref('')
+function buildPreviewUrl(capability: string) {
   if (!preview.value?.path) return ''
   const base = relayHttpBase(conn.url)
   const encodedHost = btoa(preview.value.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   const encodedPath = preview.value.path.split('/').map(encodeURIComponent).join('/')
-  const capability = previewCapability.value ? `${previewCapability.value}/` : ''
-  return `${base}/preview/${capability}${encodedHost}/${encodedPath}`
-})
+  const cap = capability ? `${capability}/` : ''
+  return `${base}/preview/${cap}${encodedHost}/${encodedPath}`
+}
+const previewUrl = computed(() => buildPreviewUrl(previewCapability.value))
 
 // previewAuthUrl mints a scoped preview capability via a same-origin fetch.
 // The relay token stays in this parent-page request's Authorization header,
 // never in a URL or the iframe URL.
 const previewAuthUrl = computed(() => {
   const base = relayHttpBase(conn.url)
-  const params = new URLSearchParams({ host: preview.value?.host || 'local' })
+  const filePath = preview.value?.path || '/'
+  const dir = filePath.slice(0, filePath.lastIndexOf('/')) || '/'
+  const params = new URLSearchParams({ host: preview.value?.host || 'local', dir })
   return `${base}/preview-auth?${params.toString()}`
 })
 
@@ -382,10 +389,20 @@ const rawFileUrl = computed(() => {
 
 // authReady stays false on any failure, so the iframe is never rendered
 // into a known-broken state; the message below explains what to do instead.
+// runScripts resets per file: script execution is a per-document choice,
+// not a session-wide mode the next HTML inherits silently.
+const runScripts = ref(false)
+// authSeq drops /preview-auth responses that arrive after the user moved on:
+// a slow mint for an earlier file (say, a wider parent dir) must never land
+// its capability on the file opened since.
+let authSeq = 0
 watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], async ([path]) => {
+  const seq = ++authSeq
   authReady.value = false
   authError.value = ''
   previewCapability.value = ''
+  runCapability.value = ''
+  runScripts.value = false
   if (!path) return
 
   if (isCrossOrigin.value) {
@@ -401,6 +418,7 @@ watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], as
       credentials: 'include',
       headers: conn.token ? { Authorization: `Bearer ${conn.token}` } : undefined,
     })
+    if (seq !== authSeq) return
     if (!resp.ok && resp.status !== 204) {
       authError.value =
         `Preview auth failed (${resp.status}). The Relay rejected the capability request. ` +
@@ -408,14 +426,17 @@ watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], as
       return
     }
     if (resp.status !== 204) {
-      const body = (await resp.json()) as { capability?: unknown }
+      const body = (await resp.json()) as { capability?: unknown; run_capability?: unknown }
+      if (seq !== authSeq) return
       if (typeof body.capability !== 'string' || !body.capability) {
         authError.value = 'Preview auth returned no capability. Use the "source" toggle above to view the file contents.'
         return
       }
       previewCapability.value = body.capability
+      runCapability.value = typeof body.run_capability === 'string' ? body.run_capability : ''
     }
   } catch {
+    if (seq !== authSeq) return
     authError.value =
       'Preview auth unreachable — /preview-auth did not respond. If the Relay was rebuilt, restart it; ' +
       'in dev mode make sure vite proxies /preview and /preview-auth. Use the "source" toggle meanwhile.'
@@ -433,9 +454,24 @@ const iframeRef = ref<HTMLIFrameElement | null>(null)
 function reloadIframe() {
   haptic()
   if (iframeRef.value) {
-    iframeRef.value.src = previewUrl.value
+    iframeRef.value.src = iframeUrl.value
   }
 }
+
+// Run mode flips the iframe to sandbox="allow-scripts" and uses a
+// dir-scoped run URL: the server answers ?run=1 with CSP
+// `sandbox allow-scripts`, so scripts execute in an opaque origin — iframe
+// or new tab alike — with no relay cookies, parent DOM, or credentialed
+// calls. connect-src/img-src keep subresources on the relay; remote
+// <script> URLs and navigation can still leave the page, which is why only
+// the dir-scoped capability ever appears in a script-readable URL. Relays
+// without the preview-run feature keep the static sandbox everywhere.
+const canRun = computed(() => conn.hasFeature('preview-run'))
+const runUrl = computed(() => {
+  if (!canRun.value || !previewUrl.value) return previewUrl.value
+  return buildPreviewUrl(runCapability.value || previewCapability.value) + '?run=1'
+})
+const iframeUrl = computed(() => (runScripts.value ? runUrl.value : previewUrl.value))
 
 const scroller = ref<HTMLElement | null>(null)
 const pathNav = ref<HTMLElement | null>(null)
@@ -650,12 +686,12 @@ function fmtSize(bytes: number): string {
       <!-- Viewport controls for HTML preview -->
       <template v-if="isHtml && htmlRendered">
         <a
-          v-if="previewUrl"
-          :href="previewUrl"
+          v-if="runUrl"
+          :href="runUrl"
           target="_blank"
           rel="noopener noreferrer"
           class="fp-btn"
-          title="Open HTML in a new tab"
+          :title="canRun ? 'Open HTML in a new tab (scripts run in an isolated origin)' : 'Open HTML in a new tab (still sandboxed — no JavaScript)'"
           aria-label="Open HTML in a new tab"
         >↗</a>
         <button
@@ -684,6 +720,15 @@ function fmtSize(bytes: number): string {
           title="Full Viewport (100%)"
           @click="viewportWidth = '100%'"
         >💻</button>
+        <button
+          v-if="hasScripts && canRun"
+          class="fp-btn"
+          :class="{ active: runScripts }"
+          title="Run scripts in an isolated origin"
+          aria-label="Run scripts"
+          :aria-pressed="runScripts"
+          @click="runScripts = !runScripts"
+        >▶</button>
         <button
           class="fp-btn"
           title="Reload Preview"
@@ -741,11 +786,11 @@ function fmtSize(bytes: number): string {
           <div v-if="hasScripts" class="fp-tip-msg">
             <span class="fp-tip-icon">ℹ</span>
             <span class="fp-tip-text">
-              Preview is sandboxed (JavaScript disabled). Start a tunnel preview to run scripts.
+              Preview is sandboxed — JavaScript is disabled here.<template v-if="canRun"> ▶ or ↗ runs it with scripts in an isolated origin.</template>
             </span>
           </div>
           <div class="fp-tip-actions">
-            <a v-if="previewUrl" :href="previewUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn">Open in new tab ↗</a>
+            <a v-if="runUrl" :href="runUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn" :title="canRun ? 'Larger view — scripts run in an isolated origin' : 'Larger view — still sandboxed'">Open in new tab ↗</a>
             <template v-if="conn.hasFeature('tunnels')">
               <div v-if="tunnelCreateError" class="fp-tunnel-status">
                 <span class="fp-tunnel-badge error" :title="tunnelCreateError">Failed to start: {{ tunnelCreateError }}</span>
@@ -780,11 +825,12 @@ function fmtSize(bytes: number): string {
 
         <iframe
           v-if="authReady"
+          :key="runScripts ? 'run' : 'safe'"
           ref="iframeRef"
           class="fp-iframe"
           :style="{ width: viewportWidth }"
-          :src="previewUrl"
-          sandbox=""
+          :src="iframeUrl"
+          :sandbox="runScripts ? 'allow-scripts' : ''"
           title="HTML Preview"
         ></iframe>
         <div v-else class="fp-loading">preparing preview…</div>
