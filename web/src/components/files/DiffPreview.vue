@@ -8,6 +8,7 @@ import { useHaptic } from '../../composables/useHaptic';
 import { highlight } from '../../utils/highlight';
 import { parseNameStatus } from '../../utils/nameStatus';
 import { parseGitLog } from '../../utils/gitLog';
+import { fileIcon } from '../../utils/fileIcons';
 import type { GitLogOptions } from '../../api/types';
 
 const diff = useDiffStore();
@@ -510,6 +511,7 @@ watch(openPicker, (open) => {
             class="dp-ns-row"
             :data-path="e.path"
           >
+            <span class="dp-ns-icon" aria-hidden="true">{{ fileIcon(e.path) }}</span>
             <span class="dp-ns-badge mono" :class="`s-${e.status[0]}`" :title="nsLabel(e.status)" :aria-label="nsLabel(e.status)">{{ e.status }}</span>
             <button type="button" class="dp-ns-path mono" :title="`Show diff of ${e.path}`" @click="showPatch(e.path)">
               {{ e.path }}<span v-if="e.orig" class="dp-ns-dim"> ← {{ e.orig }}</span>
@@ -531,7 +533,7 @@ watch(openPicker, (open) => {
       <div v-else class="dp-files">
         <div v-for="(sec, si) in sections" :key="si" class="dp-file" :data-path="sec.isHeader ? undefined : sec.path">
           <button v-if="!sec.isHeader" class="dp-file-head" :title="`Open ${sec.path}`" @click="openFilePath(sec.path)">
-            <span class="dp-file-icon" aria-hidden="true">📄</span>
+            <span class="dp-file-icon" aria-hidden="true">{{ fileIcon(sec.path) }}</span>
             <span class="dp-file-path mono">{{ sec.path }}</span>
           </button>
           <div class="dp-code-scroll">
@@ -854,6 +856,7 @@ watch(openPicker, (open) => {
 }
 .dp-ns-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
 .dp-ns-row:hover { background: var(--surface-2); }
+.dp-ns-icon { flex-shrink: 0; width: 20px; text-align: center; }
 .dp-ns-badge {
   flex-shrink: 0; min-width: 18px; text-align: center; font-size: var(--text-2xs); font-weight: 700; color: var(--text-dim);
 }

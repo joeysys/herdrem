@@ -6,6 +6,7 @@ import { useTerminalStore } from '../../stores/terminal'
 import { useHaptic } from '../../composables/useHaptic'
 import { useUploadsStore, type UploadItem } from '../../stores/uploads'
 import { safeStorage } from '../../utils/storage'
+import { fileIcon } from '../../utils/fileIcons'
 import { relayFileUrl } from '../../utils/relay'
 import { autoFocus } from '../../utils/softKeyboard'
 import type { FileEntry } from '../../api/types'
@@ -107,12 +108,6 @@ function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`
   return `${(bytes / 1024 / 1024).toFixed(1)}M`
-}
-
-function icon(type: string): string {
-  if (type === 'dir') return '📁'
-  if (type === 'link') return '🔗'
-  return '📄'
 }
 
 function getRelativePath(e: FileEntry): string {
@@ -423,7 +418,7 @@ watch(() => files.entries, async () => {
             @click="onEntry(e.name, e.type)"
             @keydown.enter="onEntry(e.name, e.type)"
           >
-            <span class="fe-icon" aria-hidden="true">{{ icon(e.type) }}</span>
+            <span class="fe-icon" aria-hidden="true">{{ fileIcon(e.name, e.type) }}</span>
             <span class="fe-name">{{ e.name }}</span>
             <span v-if="isStarred(e)" class="fe-star" aria-label="Starred">★</span>
             <span class="fe-mtime">{{ fmtMtime(e.mtime) }}</span>
