@@ -300,16 +300,15 @@ describe('TermInput prompt history', () => {
     expect(w.get('button.send-btn').attributes('aria-label')).toBe('Fill command into terminal')
   })
 
-  it('emits history from the ⏱ key and from Ctrl+R in the installed window', async () => {
+  it('emits history from Ctrl+R in the installed window, with no key-row button', async () => {
     setStandalone(true)
     setup()
     const w = mount(TermInput, { props: { pane: hpane } })
-    await w.get('[aria-label="Input history"]').trigger('click')
+    expect(w.find('[aria-label="Input history"]').exists()).toBe(false)
     const ev = new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true, bubbles: true })
     w.get('textarea.cmd').element.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(true)
-    expect(w.emitted('history')).toHaveLength(2)
-    expect(w.get('[aria-label="Input history"]').attributes('title')).toBe('Input history (Ctrl+R)')
+    expect(w.emitted('history')).toHaveLength(1)
   })
 
   it('leaves Ctrl+R to the browser reload in a normal tab', async () => {
@@ -319,7 +318,7 @@ describe('TermInput prompt history', () => {
     w.get('textarea.cmd').element.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(false)
     expect(w.emitted('history')).toBeUndefined()
-    expect(w.get('[aria-label="Input history"]').attributes('title')).toBe('Input history')
+    expect(w.find('[aria-label="Input history"]').exists()).toBe(false)
   })
 
   it('a replace fill swaps the whole input (history pick)', async () => {

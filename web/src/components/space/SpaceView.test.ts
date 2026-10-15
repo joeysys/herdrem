@@ -111,6 +111,92 @@ describe('SpaceView inside-space cards', () => {
     expect(wrapper.emitted('openTerminal')).toEqual([['p2']])
   })
 
+  it('groups by branch+path: same branch name at different cwds stays separate', () => {
+    // Branch is resolved per-cwd server-side, so "main" at /repo/a and "main"
+    // at /repo/b are different repos' main — one group per (cwd, branch).
+    localStorage.setItem('herdrem_group_by_branch', 'true')
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        modelValue: 'ws-a',
+        agents: [
+          { ...panes[1], pane_id: 'a1', cwd: '/repo/a', branch: 'main' },
+          { ...panes[1], pane_id: 'a2', cwd: '/repo/b', branch: 'main' },
+          { ...panes[1], pane_id: 'a3', cwd: '/repo/a', branch: 'main' },
+        ],
+      },
+    })
+
+    const headers = wrapper.findAll('.branch-header')
+    expect(headers.length).toBe(2)
+    expect(headers[0].find('.branch-count').text()).toBe('2')
+    expect(headers[1].find('.branch-count').text()).toBe('1')
+    // Identical branch names are disambiguated by the shortest distinct cwd
+    // suffix, and the full path stays available on hover.
+    expect(wrapper.findAll('.branch-cwd').map((n) => n.text())).toEqual(['…/a', '…/b'])
+    expect(wrapper.findAll('.branch-cwd')[0].attributes('title')).toBe('/repo/a')
+  })
+
+  it('widens the cwd suffix until it disambiguates colliding basenames', () => {
+    localStorage.setItem('herdrem_group_by_branch', 'true')
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        modelValue: 'ws-a',
+        agents: [
+          { ...panes[1], pane_id: 'a1', cwd: '/x/api', branch: 'main' },
+          { ...panes[1], pane_id: 'a2', cwd: '/y/api', branch: 'main' },
+          { ...panes[1], pane_id: 'a3', cwd: '/a/proj', branch: 'main' },
+          { ...panes[1], pane_id: 'a4', cwd: '/b/a/proj', branch: 'main' },
+        ],
+      },
+    })
+
+    expect(wrapper.findAll('.branch-cwd').map((n) => n.text())).toEqual([
+      '/x/api', // all 2 segments needed — complete path, no ellipsis
+      '/y/api',
+      '/a/proj', // whole path — every shorter suffix also ends the longer path
+      '/b/a/proj',
+    ])
+  })
+
+  it('labels every group in a multi-cwd space, even a unique branch name', () => {
+    // Project identity is positional: the user cannot tell "main @ /repo/a"
+    // from "main @ /repo/b" by the branch alone, so each group names its path.
+    localStorage.setItem('herdrem_group_by_branch', 'true')
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        modelValue: 'ws-a',
+        agents: [
+          { ...panes[1], pane_id: 'a1', cwd: '/repo/a', branch: 'main' },
+          { ...panes[1], pane_id: 'a2', cwd: '/repo/b', branch: 'dev' },
+          { ...panes[1], pane_id: 'a3', cwd: '/repo/c' }, // no branch
+        ],
+      },
+    })
+
+    expect(wrapper.findAll('.branch-header').length).toBe(3)
+    expect(wrapper.findAll('.branch-cwd').map((n) => n.text())).toEqual(['…/a', '…/b', '…/c'])
+  })
+
+  it('shows no cwd suffix when all panes share one cwd', () => {
+    localStorage.setItem('herdrem_group_by_branch', 'true')
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        modelValue: 'ws-a',
+        agents: [
+          { ...panes[1], pane_id: 'a1', cwd: '/repo/a', branch: 'main' },
+          { ...panes[1], pane_id: 'a2', cwd: '/repo/a', branch: 'dev' },
+        ],
+      },
+    })
+
+    expect(wrapper.findAll('.branch-header').length).toBe(2)
+    expect(wrapper.findAll('.branch-cwd').length).toBe(0)
+  })
+
   it('grid order follows workspace recency, not the blocked-first input order', () => {
     // `filtered` pins blocked panes; App.vue hands that sorted array straight
     // to SpaceView — a workspace containing a blocked pane must not jump the

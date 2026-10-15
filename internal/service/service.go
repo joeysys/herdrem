@@ -170,6 +170,8 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleHistoryRemove(ctx, conn, data)
 	case "history_clear":
 		s.handleHistoryClear(ctx, conn, data)
+	case "history_favorite":
+		s.handleHistoryFavorite(ctx, conn, data)
 	case "history_import":
 		s.handleHistoryImport(ctx, conn, data)
 	case "todo_get":

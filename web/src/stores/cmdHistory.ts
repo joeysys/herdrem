@@ -173,16 +173,51 @@ export const useCmdHistoryStore = defineStore('cmdHistory', () => {
    * Forget one kind or everything. With `workspace` only that workspace's
    * entries go (and the relay clears just those); otherwise the whole relay's.
    */
+  function clearedBy(e: HistoryEntry, kind: 'all' | HistoryKind, workspace?: { host: string; workspaceId: string }) {
+    if (e.f) return false
+    const kindMatch = kind === 'all' || kindOf(e) === kind
+    const scopeMatch = !workspace || ((e.h ?? '') === workspace.host && (e.s ?? '') === workspace.workspaceId)
+    return kindMatch && scopeMatch
+  }
+
   function clear(kind: 'all' | HistoryKind = 'all', workspace?: { host: string; workspaceId: string }) {
-    setList(entries.value.filter((e) => {
-      const kindMatch = kind === 'all' || kindOf(e) === kind
-      const scopeMatch = !workspace || ((e.h ?? '') === workspace.host && (e.s ?? '') === workspace.workspaceId)
-      return !(kindMatch && scopeMatch)
-    }))
+    setList(entries.value.filter((e) => !clearedBy(e, kind, workspace)))
     if (shared.value) {
       ws.send({ type: 'history_clear', kind, host: workspace?.host, workspace_id: workspace?.workspaceId })
     }
     persist()
+  }
+
+  /** Star or unstar one command. `everywhere` covers every workspace's copy (the relay-wide row). */
+  function setFavorite(entry: Pick<HistoryEntry, 'c' | 'k' | 'h' | 's'>, fav: boolean, everywhere = false) {
+    const kind = entry.k ?? 'sh'
+    const host = entry.h ?? ''
+    const workspaceId = entry.s ?? ''
+    setList(entries.value.map((e) => {
+      if (e.c !== entry.c || kindOf(e) !== kind) return e
+      if (!everywhere && ((e.h ?? '') !== host || (e.s ?? '') !== workspaceId)) return e
+      if (!!e.f === fav) return e
+      const next = { ...e }
+      if (fav) next.f = true
+      else delete next.f
+      return next
+    }))
+    if (shared.value) {
+      ws.send({
+        type: 'history_favorite',
+        kind,
+        text: entry.c,
+        favorite: fav,
+        everywhere,
+        host: everywhere ? undefined : host,
+        workspace_id: everywhere ? undefined : workspaceId,
+      })
+    }
+    persist()
+  }
+
+  function clearable(kind: 'all' | HistoryKind, workspace?: { host: string; workspaceId: string }) {
+    return entries.value.some((e) => clearedBy(e, kind, workspace))
   }
 
   // ---- changes coming from the relay ----
@@ -240,10 +275,26 @@ export const useCmdHistoryStore = defineStore('cmdHistory', () => {
   function applyCleared(kind: unknown, host?: unknown, workspaceId?: unknown) {
     const k = kind === 'sh' || kind === 'ag' ? kind : 'all'
     const scoped = typeof host === 'string' && typeof workspaceId === 'string' && host !== '' && workspaceId !== ''
-    setList(entries.value.filter((e) => {
-      const kindMatch = k === 'all' || kindOf(e) === k
-      const scopeMatch = !scoped || ((e.h ?? '') === host && (e.s ?? '') === workspaceId)
-      return !(kindMatch && scopeMatch)
+    setList(entries.value.filter((e) => !clearedBy(e, k, scoped ? { host, workspaceId } : undefined)))
+    persist()
+  }
+
+  /** Another device starred or unstarred an entry. */
+  function applyFavorited(kind: unknown, text: unknown, fav: unknown, host?: unknown, workspaceId?: unknown, everywhere?: unknown) {
+    if (typeof text !== 'string') return
+    const k: HistoryKind = kind === 'ag' ? 'ag' : 'sh'
+    const on = fav === true
+    const allCopies = everywhere === true
+    const h = typeof host === 'string' ? host : ''
+    const s = typeof workspaceId === 'string' ? workspaceId : ''
+    setList(entries.value.map((e) => {
+      if (e.c !== text || kindOf(e) !== k) return e
+      if (!allCopies && ((e.h ?? '') !== h || (e.s ?? '') !== s)) return e
+      if (!!e.f === on) return e
+      const next = { ...e }
+      if (on) next.f = true
+      else delete next.f
+      return next
     }))
     persist()
   }
@@ -265,8 +316,8 @@ export const useCmdHistoryStore = defineStore('cmdHistory', () => {
 
   return {
     entries, counts, agentTypes, shared, recordAgents, setRecordAgents,
-    record, remove, clear, suggest, search, count,
-    applySnapshot, applyAdded, applyRemoved, applyCleared,
+    record, remove, clear, setFavorite, clearable, suggest, search, count,
+    applySnapshot, applyAdded, applyRemoved, applyCleared, applyFavorited,
   }
 })
 

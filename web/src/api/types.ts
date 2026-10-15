@@ -505,11 +505,21 @@ export interface HistoryWireEntry {
   h?: string
   s?: string
   l?: string
+  f?: boolean
 }
 export interface HistorySnapshotMsg { type: 'history'; entries: HistoryWireEntry[] }
 export interface HistoryAddedMsg { type: 'history_added'; entry: HistoryWireEntry }
 export interface HistoryRemovedMsg { type: 'history_removed'; kind: 'sh' | 'ag'; text: string }
 export interface HistoryClearedMsg { type: 'history_cleared'; kind: 'all' | 'sh' | 'ag'; host?: string; workspace_id?: string }
+export interface HistoryFavoritedMsg {
+  type: 'history_favorited'
+  kind: 'sh' | 'ag'
+  text: string
+  favorite: boolean
+  everywhere?: boolean
+  host?: string
+  workspace_id?: string
+}
 export interface HistoryRecord {
   type: 'history_record'
   text: string
@@ -523,6 +533,15 @@ export interface HistoryRecord {
 }
 export interface HistoryRemove { type: 'history_remove'; kind: 'sh' | 'ag'; text: string }
 export interface HistoryClear { type: 'history_clear'; kind: 'all' | 'sh' | 'ag'; host?: string; workspace_id?: string }
+export interface HistoryFavorite {
+  type: 'history_favorite'
+  kind: 'sh' | 'ag'
+  text: string
+  favorite: boolean
+  everywhere?: boolean
+  host?: string
+  workspace_id?: string
+}
 export interface HistoryImport { type: 'history_import'; entries: HistoryWireEntry[] }
 
 export type ServerMessage =
@@ -533,6 +552,7 @@ export type ServerMessage =
   | HistoryAddedMsg
   | HistoryRemovedMsg
   | HistoryClearedMsg
+  | HistoryFavoritedMsg
   | Hello
   | AgentsSnapshot
   | BlockedNotify
@@ -559,6 +579,7 @@ export type ClientMessage =
   | HistoryRecord
   | HistoryRemove
   | HistoryClear
+  | HistoryFavorite
   | HistoryImport
   | Respond
   | SendText

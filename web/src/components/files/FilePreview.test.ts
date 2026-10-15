@@ -53,21 +53,23 @@ describe('FilePreview copy button', () => {
 
     const copyBtn = wrapper.find('.copy-btn')
     expect(copyBtn.exists()).toBe(true)
-    expect(copyBtn.text()).toBe('⧉ copy')
+    expect(copyBtn.text().trim()).toBe('')
+    expect(copyBtn.find('svg').exists()).toBe(true)
     expect(copyBtn.attributes('title')).toBe('Copy file content')
 
     await copyBtn.trigger('click')
     await nextTick()
 
     expect(writeTextMock).toHaveBeenCalledWith('console.log("hello world");')
-    expect(wrapper.find('.copy-btn').text()).toBe('✓ copied')
+    expect(wrapper.find('.copy-btn').text().trim()).toBe('')
     expect(wrapper.find('.copy-btn').classes()).toContain('copied')
     expect(wrapper.find('.copy-btn').attributes('title')).toBe('Copied to clipboard')
 
     // After 2s timeout, it reverts to idle
     vi.advanceTimersByTime(2000)
     await nextTick()
-    expect(wrapper.find('.copy-btn').text()).toBe('⧉ copy')
+    expect(wrapper.find('.copy-btn').text().trim()).toBe('')
+    expect(wrapper.find('.copy-btn').attributes('title')).toBe('Copy file content')
     expect(wrapper.find('.copy-btn').classes()).not.toContain('copied')
 
     wrapper.unmount()
@@ -206,7 +208,8 @@ describe('FilePreview copy button', () => {
     await nextTick()
 
     expect(execCommandMock).toHaveBeenCalledWith('copy')
-    expect(wrapper.find('.copy-btn').text()).toBe('✓ copied')
+    expect(wrapper.find('.copy-btn').text().trim()).toBe('')
+    expect(wrapper.find('.copy-btn').classes()).toContain('copied')
 
     wrapper.unmount()
   })
@@ -242,13 +245,14 @@ describe('FilePreview copy button', () => {
     await copyBtn.trigger('click')
     await nextTick()
 
-    expect(wrapper.find('.copy-btn').text()).toBe('⚠ failed')
+    expect(wrapper.find('.copy-btn').text().trim()).toBe('')
     expect(wrapper.find('.copy-btn').classes()).toContain('error')
     expect(wrapper.find('.copy-btn').attributes('title')).toBe('Failed to copy')
 
     vi.advanceTimersByTime(2000)
     await nextTick()
-    expect(wrapper.find('.copy-btn').text()).toBe('⧉ copy')
+    expect(wrapper.find('.copy-btn').text().trim()).toBe('')
+    expect(wrapper.find('.copy-btn').attributes('title')).toBe('Copy file content')
 
     wrapper.unmount()
   })
@@ -353,6 +357,7 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     const tip = wrapper.find('.fp-sandbox-tip')
     expect(tip.exists()).toBe(true)
     expect(tip.text()).toContain('sandboxed')
+    expect(tip.text()).toContain('top-right corner')
     expect(tip.classes()).toContain('has-scripts')
 
     // Open in new tab — runs scripts too, in the same opaque origin as the
@@ -365,6 +370,8 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(newTabLink.attributes('title')).toContain('isolated origin')
     // The tip must explain both run paths share the same isolation boundary
     expect(tip.text()).toContain('isolated origin')
+    expect(tip.text()).toContain('buttons below')
+    expect(tip.get('button[aria-label="Run scripts"]').text()).toContain('Run scripts')
 
     // ▶ switches the iframe sandbox to allow-scripts and adds ?run=1; the
     // server then sends CSP `sandbox allow-scripts` so scripts execute in
@@ -394,6 +401,9 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
         auth_mode: 'token_gate',
       })
     )
+
+    await wrapper.get('[aria-label="Dismiss preview notice"]').trigger('click')
+    expect(wrapper.find('.fp-sandbox-tip').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -648,5 +658,122 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(wrapper.find('.fp-tip-btn.primary').text()).toContain('Public tunnel preview')
 
     wrapper.unmount()
+  })
+})
+
+describe('FilePreview header on a phone', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('uses a T for markdown source and keeps search as a stroke icon', () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/readme.md', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/readme.md',
+      content: '# hi',
+      encoding: 'utf-8',
+      mime_type: 'text/markdown',
+      is_text: true,
+      is_image: false,
+      size: 4,
+    })
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false } })
+
+    const mode = wrapper.get('.fp-btn.mode')
+    expect(mode.text()).toBe('T')
+    expect(mode.attributes('aria-label')).toBe('Show source')
+
+    const search = wrapper.get('button[aria-label="Search file"]')
+    expect(search.text()).not.toContain('⌕')
+    expect(search.find('svg').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('tucks fill and directory into the more menu', async () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/a.ts', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/a.ts',
+      content: 'const a = 1\n',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      size: 12,
+    })
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false } })
+
+    expect(wrapper.find('.fp-menu').exists()).toBe(false)
+    await wrapper.get('[aria-label="More actions"]').trigger('click')
+    const menu = wrapper.get('.fp-menu')
+    expect(menu.text()).toContain('Fill path')
+    expect(menu.text()).toContain('Copy')
+    expect(menu.text()).toContain('Search')
+    expect(menu.text()).toContain('Directory')
+
+    await menu.get('[aria-label="Show file browser"]').trigger('click')
+    expect(wrapper.emitted('toggleDirectory')?.[0]).toEqual([{ path: '/workspace', root: '/workspace', host: 'local' }])
+    expect(wrapper.find('.fp-menu').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+})
+
+describe('HTML viewport widths', () => {
+  const originalWidth = window.innerWidth
+  function setWidth(width: number) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+  }
+  function mountHtml() {
+    setActivePinia(createPinia())
+    const files = useFilesStore()
+    files.openPath('/workspace/test.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/test.html',
+      content: '<h1>Hello</h1>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 14,
+    })
+    return mount(FilePreview, { props: { directoryOpen: false } })
+  }
+  afterEach(() => setWidth(originalWidth))
+
+  it('hides the width switch on a phone and keeps the preview full', async () => {
+    setWidth(390)
+    const w = mountHtml()
+    await nextTick()
+    expect(w.find('[title="Mobile Viewport (375px)"]').exists()).toBe(false)
+    expect(w.find('[title="Tablet Viewport (768px)"]').exists()).toBe(false)
+    expect(w.find('[title="Full Viewport (100%)"]').exists()).toBe(false)
+    expect(w.get('iframe').attributes('style')).toContain('100%')
+    w.unmount()
+  })
+
+  it('offers mobile and full on a tablet', async () => {
+    setWidth(800)
+    const w = mountHtml()
+    await nextTick()
+    expect(w.find('[title="Mobile Viewport (375px)"]').exists()).toBe(true)
+    expect(w.find('[title="Tablet Viewport (768px)"]').exists()).toBe(false)
+    expect(w.find('[title="Full Viewport (100%)"]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('offers mobile, tablet, and full on a desktop', async () => {
+    setWidth(1200)
+    const w = mountHtml()
+    await nextTick()
+    expect(w.find('[title="Mobile Viewport (375px)"]').exists()).toBe(true)
+    expect(w.find('[title="Tablet Viewport (768px)"]').exists()).toBe(true)
+    expect(w.find('[title="Full Viewport (100%)"]').exists()).toBe(true)
+    w.unmount()
   })
 })

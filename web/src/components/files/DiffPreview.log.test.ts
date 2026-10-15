@@ -48,7 +48,7 @@ describe('DiffPreview log tab', () => {
     await modes(w).find((b) => b.text() === 'log')!.trigger('click')
     expect(last()).toEqual({ type: 'git_log_view', cwd: '/repo', host: 'local', req_id: expect.any(String), oneline: true, graph: true })
     // the name-status switch is a diff thing
-    expect(w.findAll('.dp-btn').some((b) => b.text() === 'name-status')).toBe(false)
+    expect(w.find('[aria-label="name-status"]').exists()).toBe(false)
     expect(switches(w).findAll('.dp-mode').map((b) => [b.text(), b.attributes('aria-pressed')])).toEqual([
       ['oneline', 'true'], ['graph', 'true'], ['all', 'false'],
     ])

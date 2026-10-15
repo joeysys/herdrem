@@ -53,6 +53,7 @@ type HistoryEntry struct {
 	Host           string `json:"h,omitempty"`
 	Workspace      string `json:"s,omitempty"`
 	WorkspaceLabel string `json:"l,omitempty"`
+	Fav            bool   `json:"f,omitempty"` // kept when the history is cleared
 }
 
 // Credential-looking text is never stored: this mirrors the browser-side
@@ -169,11 +170,20 @@ func NewHistoryStore(filePath string) (*HistoryStore, error) {
 }
 
 // sortAndCapLocked orders newest first and enforces the per-kind caps.
+// Favorites are exempt: clearing keeps them, so the cap must not drop them.
 func (s *HistoryStore) sortAndCapLocked() {
 	sort.SliceStable(s.entries, func(i, j int) bool { return s.entries[i].Time > s.entries[j].Time })
 	seen := map[string]int{}
-	kept := s.entries[:0]
+	kept := make([]HistoryEntry, 0, len(s.entries))
+	var rest []HistoryEntry
 	for _, e := range s.entries {
+		if e.Fav {
+			kept = append(kept, e)
+			continue
+		}
+		rest = append(rest, e)
+	}
+	for _, e := range rest {
 		max := MaxShellEntries
 		if e.Kind == HistoryAgent {
 			max = MaxAgentEntries
@@ -184,6 +194,7 @@ func (s *HistoryStore) sortAndCapLocked() {
 		seen[e.Kind]++
 		kept = append(kept, e)
 	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Time > kept[j].Time })
 	s.entries = kept
 }
 
@@ -251,6 +262,7 @@ func (s *HistoryStore) mergeLocked(e HistoryEntry, keepCount bool) HistoryEntry 
 				merged.WorkspaceLabel = e.WorkspaceLabel
 			}
 		}
+		merged.Fav = old.Fav || e.Fav
 		s.entries[i] = merged
 		return merged
 	}
@@ -336,7 +348,7 @@ func (s *HistoryStore) Clear(kind string, scoped bool, host, workspace string) (
 	for _, e := range s.entries {
 		kindMatch := kind == "" || kind == "all" || e.Kind == normKind(kind)
 		scopeMatch := !scoped || (e.Host == host && e.Workspace == workspace)
-		if kindMatch && scopeMatch {
+		if kindMatch && scopeMatch && !e.Fav {
 			removed++
 			continue
 		}
@@ -347,4 +359,31 @@ func (s *HistoryStore) Clear(kind string, scoped bool, host, workspace string) (
 		return 0, nil
 	}
 	return removed, s.saveLocked()
+}
+
+// SetFavorite stars or unstars an input. everywhere updates every workspace's
+// copy of that text; otherwise only the host+workspace slot.
+func (s *HistoryStore) SetFavorite(kind, text, host, workspace string, everywhere, fav bool) (int, error) {
+	kind = normKind(kind)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for i, e := range s.entries {
+		if e.Kind != kind || e.Text != text {
+			continue
+		}
+		if !everywhere && (e.Host != host || e.Workspace != workspace) {
+			continue
+		}
+		if e.Fav == fav {
+			continue
+		}
+		e.Fav = fav
+		s.entries[i] = e
+		n++
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	return n, s.saveLocked()
 }

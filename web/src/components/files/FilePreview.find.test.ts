@@ -133,13 +133,17 @@ describe('FilePreview find', () => {
   it('switches a rendered HTML preview to source to search it, and restores it on close', async () => {
     const w = open('/workspace/page.html', '<h1>Hello</h1>\n<p>hello again</p>\n')
     const modeBtn = () => w.get('.fp-btn.mode')
-    expect(modeBtn().text()).toBe('source') // currently rendered; the button offers the source
+    expect(modeBtn().text()).toBe('T') // rendered; T offers the source
+    expect(modeBtn().attributes('aria-label')).toBe('Show source')
     await search(w, 'hello')
-    expect(modeBtn().text()).toBe('preview') // now showing source
+    expect(modeBtn().text()).toBe('') // source; the eye offers the preview
+    expect(modeBtn().find('svg').exists()).toBe(true)
+    expect(modeBtn().attributes('aria-label')).toBe('Show preview')
     expect(marks(w)).toHaveLength(2)
     await w.get('button[aria-label="Close search"]').trigger('click')
     await flush()
-    expect(modeBtn().text()).toBe('source') // rendered again
+    expect(modeBtn().text()).toBe('T') // rendered again
+    expect(modeBtn().attributes('aria-label')).toBe('Show source')
     expect(marks(w)).toHaveLength(0)
   })
 
@@ -149,7 +153,7 @@ describe('FilePreview find', () => {
     await search(w, 'hello')
     await w.get('button[aria-label="Close search"]').trigger('click')
     await flush()
-    expect(w.get('.fp-btn.mode').text()).toBe('preview') // still source
+    expect(w.get('.fp-btn.mode').attributes('aria-label')).toBe('Show preview') // still source
   })
 
   it('closes the search if the user switches back to the rendered HTML', async () => {

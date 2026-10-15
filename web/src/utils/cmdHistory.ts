@@ -35,6 +35,8 @@ export interface HistoryEntry {
   s?: string
   /** workspace label at submit time */
   l?: string
+  /** kept across a clear; set from the history panel */
+  f?: boolean
 }
 
 /** Where the user is right now; used to rank and scope lookups. */
@@ -153,17 +155,20 @@ export function addEntry(
     if (a) entry.a = a
     if (w) entry.w = w
   }
+  if (prev?.f) entry.f = true
   return capEntries([entry, ...list.filter((e) => !same(e))], maxOverride)
 }
 
-/** Newest first, each kind capped on its own. */
+/** Newest first. Favorites are never evicted; each kind's other entries are capped on their own. */
 export function capEntries(list: readonly HistoryEntry[], maxOverride?: number): HistoryEntry[] {
   const sorted = [...list].sort((a, b) => b.t - a.t)
+  const fav = sorted.filter((e) => e.f)
   const seen: Record<HistoryKind, number> = { sh: 0, ag: 0 }
-  return sorted.filter((e) => {
+  const rest = sorted.filter((e) => !e.f).filter((e) => {
     const k = kindOf(e)
     return ++seen[k] <= (maxOverride ?? LIMITS[k].maxEntries)
   })
+  return [...fav, ...rest].sort((a, b) => b.t - a.t)
 }
 
 /**
@@ -177,7 +182,7 @@ export function mergeEntries(base: readonly HistoryEntry[], incoming: readonly H
   for (const e of incoming) {
     const old = map.get(slot(e))
     if (!old) map.set(slot(e), e)
-    else map.set(slot(e), { ...(e.t > old.t ? e : old), n: Math.max(old.n, e.n), t: Math.max(old.t, e.t) })
+    else map.set(slot(e), { ...(e.t > old.t ? e : old), n: Math.max(old.n, e.n), t: Math.max(old.t, e.t), ...(old.f || e.f ? { f: true } : {}) })
   }
   return capEntries([...map.values()])
 }
@@ -189,7 +194,12 @@ function tier(e: HistoryEntry, w: Where): number {
   return sameWorkspace(e, w) ? 1 : 0
 }
 
-function rank(a: HistoryEntry, b: HistoryEntry, w: Where = {}): number {
+function rank(a: HistoryEntry, b: HistoryEntry, w: Where = {}, sort: HistorySort = 'recent'): number {
+  if (sort === 'often') {
+    if (a.n !== b.n) return b.n - a.n
+    if (a.t !== b.t) return b.t - a.t
+    return tier(b, w) - tier(a, w)
+  }
   const dt = tier(b, w) - tier(a, w)
   if (dt) return dt
   if (a.t !== b.t) return b.t - a.t
@@ -246,7 +256,7 @@ export function collapseByText(list: readonly HistoryEntry[]): HistoryEntry[] {
       map.set(key, e)
     } else {
       const newest = e.t > old.t ? e : old
-      map.set(key, { ...newest, n: old.n + e.n })
+      map.set(key, { ...newest, n: old.n + e.n, ...(old.f || e.f ? { f: true } : {}) })
     }
   }
   return [...map.values()]
@@ -261,6 +271,8 @@ function isSubsequence(needle: string, hay: string): boolean {
 }
 
 export type Scope = 'pane' | 'workspace' | 'relay'
+/** recent: last used, this pane first. often: times submitted, then last used. */
+export type HistorySort = 'recent' | 'often'
 
 export interface SearchFilter extends Where {
   kind?: 'all' | HistoryKind
@@ -268,6 +280,7 @@ export interface SearchFilter extends Where {
   agent?: string
   /** how far to look; default 'relay'. 'pane' / 'workspace' need the matching Where field. */
   scope?: Scope
+  sort?: HistorySort
 }
 
 /**
@@ -296,8 +309,9 @@ export function search(
     return true
   })
   if (scope === 'relay') pool = collapseByText(pool)
+  const sort = filter.sort ?? 'recent'
   const q = query.trim().toLowerCase()
-  if (!q) return pool.sort((a, b) => rank(a, b, filter)).slice(0, limit)
+  if (!q) return pool.sort((a, b) => rank(a, b, filter, sort)).slice(0, limit)
   const tokens = q.split(/\s+/)
   const scored: Array<{ e: HistoryEntry; s: number }> = []
   for (const e of pool) {
@@ -307,7 +321,7 @@ export function search(
     else if (isSubsequence(q.replace(/\s+/g, ''), lc)) s = 1
     if (s) scored.push({ e, s })
   }
-  scored.sort((a, b) => b.s - a.s || rank(a.e, b.e, filter))
+  scored.sort((a, b) => b.s - a.s || rank(a.e, b.e, filter, sort))
   return scored.slice(0, limit).map((x) => x.e)
 }
 
@@ -331,6 +345,7 @@ export function sanitizeEntries(raw: unknown): HistoryEntry[] {
     if (h) entry.h = h
     if (sid) entry.s = sid
     if (l) entry.l = l
+    if (e.f === true) entry.f = true
     if (kind === 'ag') {
       entry.k = 'ag'
       const a = typeof e.a === 'string' ? clip(e.a) : undefined

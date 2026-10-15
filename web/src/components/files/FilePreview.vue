@@ -11,6 +11,7 @@ import { highlight, langForPath } from '../../utils/highlight'
 import { relayFileUrl, relayHttpBase } from '../../utils/relay'
 import { applyHighlights, clearHighlights, matchesQuery, setActiveGroup, MAX_HITS } from '../../utils/domHighlight'
 import FindBar from '../common/FindBar.vue'
+import TermIcon from '../term/TermIcon.vue'
 import { addOverlaySource, isShortcutActive, register, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 
 const files = useFilesStore()
@@ -56,11 +57,19 @@ const copyTitle = computed(() => {
   return 'Copy file content'
 })
 
-const copyLabel = computed(() => {
-  if (copyStatus.value === 'copied') return '✓ copied'
-  if (copyStatus.value === 'error') return '⚠ failed'
-  return '⧉ copy'
+const copyIcon = computed((): 'copy' | 'check' | 'warn' => {
+  if (copyStatus.value === 'copied') return 'check'
+  if (copyStatus.value === 'error') return 'warn'
+  return 'copy'
 })
+
+// Phone header keeps only the path and a more menu; every action lives in that
+// menu. Desktop shows the same actions inline. Same breakpoint as the terminal.
+const showMenu = ref(false)
+function closeMenu() {
+  showMenu.value = false
+}
+const tipDismissed = ref(false)
 
 function fallbackCopy(text: string): boolean {
   try {
@@ -119,15 +128,27 @@ const findTitle = computed(() => {
 
 let offFind: (() => void) | null = null
 let offOverlay: (() => void) | null = null
+let pathObserver: ResizeObserver | null = null
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer)
   if (findDebounce) clearTimeout(findDebounce)
+  pathObserver?.disconnect()
+  pathObserver = null
+  window.removeEventListener('resize', syncViewportTier)
+  document.removeEventListener('click', closeMenu)
   offFind?.()
   offFind = null
   offOverlay?.()
   offOverlay = null
 })
 onMounted(() => {
+  window.addEventListener('resize', syncViewportTier)
+  syncViewportTier()
+  if (pathNav.value && typeof ResizeObserver !== 'undefined') {
+    pathObserver = new ResizeObserver(() => pinPathEnd())
+    pathObserver.observe(pathNav.value)
+  }
+  document.addEventListener('click', closeMenu)
   offOverlay = addOverlaySource(() => !!preview.value)
   offFind = register({
     id: 'file.find',
@@ -217,6 +238,23 @@ const codeCellStyle = computed(() =>
 const mdRendered = ref(true)
 const htmlRendered = ref(true)
 const viewportWidth = ref<'100%' | '768px' | '375px'>('100%')
+type ViewportTier = 'phone' | 'tablet' | 'desktop'
+function readViewportTier(): ViewportTier {
+  const w = typeof window === 'undefined' ? 1200 : window.innerWidth
+  if (w <= 639) return 'phone'
+  if (w < 900) return 'tablet'
+  return 'desktop'
+}
+const viewportTier = ref<ViewportTier>(readViewportTier())
+function syncViewportTier() {
+  const tier = readViewportTier()
+  viewportTier.value = tier
+  if (tier === 'phone') viewportWidth.value = '100%'
+  else if (tier === 'tablet' && viewportWidth.value === '768px') viewportWidth.value = '100%'
+}
+const frameWidth = computed(() => (viewportTier.value === 'phone' ? '100%' : viewportWidth.value))
+const showMobileWidth = computed(() => viewportTier.value !== 'phone')
+const showTabletWidth = computed(() => viewportTier.value === 'desktop')
 const authReady = ref(false)
 const authError = ref('')
 
@@ -226,6 +264,23 @@ watch(preview, (p) => {
   copyStatus.value = 'idle'
   if (copyTimer) clearTimeout(copyTimer)
 })
+
+// Markdown and HTML share one toggle: T offers the source, the eye offers the
+// rendered or preview view. The icon is the destination, not an on/off state.
+const hasModeToggle = computed(() => (isMd.value && !preview.value?.isImage) || isHtml.value)
+const showingRich = computed(() => (isHtml.value ? htmlRendered.value : mdRendered.value))
+const modeLabel = computed(() => {
+  if (showingRich.value) return 'Show source'
+  return isHtml.value ? 'Show preview' : 'Show rendered'
+})
+const modeMenuLabel = computed(() => {
+  if (showingRich.value) return 'Source'
+  return isHtml.value ? 'Preview' : 'Rendered'
+})
+function toggleMode() {
+  if (isHtml.value) htmlRendered.value = !htmlRendered.value
+  else mdRendered.value = !mdRendered.value
+}
 
 const lines = computed(() => {
   if (!preview.value || (preview.value.isImage && !isSvg.value)) return []
@@ -283,6 +338,12 @@ const fullTunnelUrl = computed(() => {
 const tunnelStarting = ref(false)
 const copiedTunnelUrl = ref(false)
 const tunnelCreateError = ref<string | null>(null)
+const tunnelLive = computed(() => {
+  if (tunnelCreateError.value) return true
+  const status = fileTunnel.value?.status
+  return !!status && status !== 'closed'
+})
+const showSandboxBar = computed(() => !hasScripts.value || !tipDismissed.value || tunnelLive.value)
 let tunnelStartingTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearTunnelStartingTimer() {
@@ -481,13 +542,17 @@ const pathNav = ref<HTMLElement | null>(null)
 // nextTick ensures the browser has finished layout (scrollWidth is stable)
 // before we set scrollLeft — a single rAF can fire mid-layout and leave the
 // bar a few characters short of the right edge.
+function pinPathEnd() {
+  const el = pathNav.value
+  if (!el) return
+  el.scrollLeft = el.scrollWidth
+}
 async function scrollPathToRight() {
   await nextTick()
+  pinPathEnd()
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const el = pathNav.value
-      if (el) el.scrollLeft = el.scrollWidth
-    })
+    pinPathEnd()
+    requestAnimationFrame(pinPathEnd)
   })
 }
 // Re-scroll when the preview file changes or when the directory panel
@@ -629,9 +694,16 @@ function stepFind(delta: number) {
 }
 
 // Showing the rendered HTML again while searching leaves nothing to search.
-watch(htmlRendered, (v) => { if (v && findOpen.value) closeFind(false) })
+watch(htmlRendered, (v) => {
+  if (v && findOpen.value) closeFind(false)
+  if (!v) tipDismissed.value = false
+})
 // A different file starts a fresh search.
-watch(() => preview.value?.path, () => closeFind(false))
+watch(() => preview.value?.path, () => {
+  closeFind(false)
+  closeMenu()
+  tipDismissed.value = false
+})
 
 
 
@@ -648,117 +720,212 @@ function fmtSize(bytes: number): string {
     <header class="fp-head">
       <button class="fp-btn fp-close" aria-label="Close preview" title="Close preview" @click="emit('close')">×</button>
       <nav ref="pathNav" class="fp-path" aria-label="Preview path">
-        <template v-for="(dir, index) in previewDirs" :key="dir.path">
-          <span v-if="index" class="fp-sep">/</span>
-          <button class="fp-dir" :title="`Open ${dir.path} in file browser`" @click="openDirectory(dir.path)">{{ dir.name }}</button>
-        </template>
-        <span class="fp-sep">/</span>
-        <span class="fp-name" :title="preview.path">{{ fileName }}</span>
+        <div class="fp-path-row">
+          <template v-for="(dir, index) in previewDirs" :key="dir.path">
+            <span v-if="index" class="fp-sep">/</span>
+            <button class="fp-dir" :title="`Open ${dir.path} in file browser`" @click="openDirectory(dir.path)">{{ dir.name }}</button>
+          </template>
+          <span class="fp-sep">/</span>
+          <span class="fp-name" :title="preview.path">{{ fileName }}</span>
+        </div>
       </nav>
       <span class="fp-size mono">{{ fmtSize(preview.size) }}</span>
       <button
-        class="fp-btn fill-path"
+        class="fp-btn fp-icon fill-path fp-desk"
         :title="`Fill file path (${previewRelPath}) into terminal input`"
         aria-label="Fill file path into terminal"
         @click="fillPreviewPath"
-      >↙</button>
+      ><TermIcon name="fill" /></button>
 
       <button
         v-if="!preview.isImage || isSvg"
-        class="fp-btn copy-btn"
+        class="fp-btn fp-icon copy-btn fp-desk"
         :class="{ copied: copyStatus === 'copied', error: copyStatus === 'error' }"
         :title="copyTitle"
         :aria-label="copyTitle"
         :disabled="!canCopy"
         @click="copyContent"
-      >{{ copyLabel }}</button>
+      ><TermIcon :name="copyIcon" /></button>
 
       <button
         v-if="searchable"
-        class="fp-btn"
+        class="fp-btn fp-icon fp-desk"
         :class="{ active: findOpen }"
         aria-label="Search file"
         :title="findTitle"
         :aria-pressed="findOpen"
         @click="findOpen ? closeFind() : openFind()"
-      >⌕</button>
+      ><TermIcon name="search" /></button>
 
-      <!-- Viewport controls for HTML preview -->
-      <template v-if="isHtml && htmlRendered">
+      <!-- Viewport controls for HTML preview. On a phone these move into the menu. -->
+      <div v-if="isHtml && htmlRendered" class="fp-desk fp-toolset">
         <a
           v-if="runUrl"
           :href="runUrl"
           target="_blank"
           rel="noopener noreferrer"
-          class="fp-btn"
+          class="fp-btn fp-icon"
           :title="canRun ? 'Open HTML in a new tab (scripts run in an isolated origin)' : 'Open HTML in a new tab (still sandboxed — no JavaScript)'"
           aria-label="Open HTML in a new tab"
-        >↗</a>
+        ><TermIcon name="external" /></a>
         <button
           v-if="conn.hasFeature('tunnels')"
-          class="fp-btn"
+          class="fp-btn fp-icon"
           :class="{ active: fileTunnel?.status === 'active' }"
           :title="fileTunnel?.status === 'active' ? 'Show tunnel preview' : 'Publish a public tunnel preview'"
           aria-label="Publish a public tunnel preview"
           @click="startTunnelPreview"
-        >⚡</button>
+        ><TermIcon name="bolt" /></button>
         <button
-          class="fp-btn vp-btn"
+          v-if="showMobileWidth"
+          class="fp-btn fp-icon vp-btn"
           :class="{ active: viewportWidth === '375px' }"
           title="Mobile Viewport (375px)"
           @click="viewportWidth = '375px'"
-        >📱</button>
+        ><TermIcon name="phone" /></button>
         <button
-          class="fp-btn vp-btn"
+          v-if="showTabletWidth"
+          class="fp-btn fp-icon vp-btn"
           :class="{ active: viewportWidth === '768px' }"
           title="Tablet Viewport (768px)"
           @click="viewportWidth = '768px'"
-        >📱 768</button>
+        ><TermIcon name="tablet" /></button>
         <button
-          class="fp-btn vp-btn"
+          v-if="showMobileWidth"
+          class="fp-btn fp-icon vp-btn"
           :class="{ active: viewportWidth === '100%' }"
           title="Full Viewport (100%)"
           @click="viewportWidth = '100%'"
-        >💻</button>
+        ><TermIcon name="display" /></button>
         <button
           v-if="hasScripts && canRun"
-          class="fp-btn"
+          class="fp-btn fp-icon"
           :class="{ active: runScripts }"
           title="Run scripts in an isolated origin"
           aria-label="Run scripts"
           :aria-pressed="runScripts"
           @click="runScripts = !runScripts"
-        >▶</button>
+        ><TermIcon name="play" /></button>
         <button
-          class="fp-btn"
+          class="fp-btn fp-icon"
           title="Reload Preview"
           aria-label="Reload Preview"
           @click="reloadIframe"
-        >↻</button>
-      </template>
+        ><TermIcon name="refresh" /></button>
+      </div>
 
       <button
-        v-if="isMd && !preview.isImage"
-        class="fp-btn mode"
-        :aria-label="mdRendered ? 'Show source' : 'Show rendered'"
-        @click="mdRendered = !mdRendered"
-      >{{ mdRendered ? 'text' : 'rendered' }}</button>
+        v-if="hasModeToggle"
+        class="fp-btn fp-icon mode fp-desk"
+        :aria-label="modeLabel"
+        :title="modeLabel"
+        @click="toggleMode"
+      ><span v-if="showingRich" class="fp-letter">T</span><TermIcon v-else name="render" /></button>
 
       <button
-        v-if="isHtml"
-        class="fp-btn mode"
-        :aria-label="htmlRendered ? 'Show source' : 'Show preview'"
-        @click="htmlRendered = !htmlRendered"
-      >{{ htmlRendered ? 'source' : 'preview' }}</button>
-
-      <button
-        class="fp-btn directory-toggle"
+        class="fp-btn fp-icon directory-toggle fp-desk"
         :class="{ active: props.directoryOpen }"
         :aria-label="props.directoryOpen ? 'Hide file browser' : 'Show file browser'"
         :title="props.directoryOpen ? 'Hide directory' : 'Show directory'"
         :aria-pressed="props.directoryOpen"
         @click="toggleDirectory"
-      >🗂</button>
+      ><TermIcon name="files" /></button>
+
+      <div class="fp-more">
+        <button
+          type="button"
+          class="fp-btn fp-icon"
+          :class="{ active: showMenu }"
+          aria-label="More actions"
+          title="More"
+          :aria-expanded="showMenu"
+          aria-haspopup="menu"
+          @click.stop="showMenu = !showMenu"
+        ><TermIcon name="more" /></button>
+        <div v-if="showMenu" class="fp-menu" role="menu" aria-label="Preview actions" @click.stop>
+          <button
+            type="button"
+            role="menuitem"
+            :title="`Fill file path (${previewRelPath}) into terminal input`"
+            aria-label="Fill file path into terminal"
+            @click="fillPreviewPath(); closeMenu()"
+          ><TermIcon name="fill" />Fill path</button>
+          <button
+            v-if="!preview.isImage || isSvg"
+            type="button"
+            role="menuitem"
+            class="copy-btn"
+            :class="{ copied: copyStatus === 'copied', error: copyStatus === 'error' }"
+            :title="copyTitle"
+            :aria-label="copyTitle"
+            :disabled="!canCopy"
+            @click="copyContent()"
+          ><TermIcon :name="copyIcon" />{{ copyStatus === 'copied' ? 'Copied' : copyStatus === 'error' ? 'Copy failed' : 'Copy' }}</button>
+          <button
+            v-if="searchable"
+            type="button"
+            role="menuitem"
+            :class="{ active: findOpen }"
+            aria-label="Search file"
+            :title="findTitle"
+            :aria-pressed="findOpen"
+            @click="(findOpen ? closeFind() : openFind()); closeMenu()"
+          ><TermIcon name="search" />Search</button>
+          <template v-if="isHtml && htmlRendered">
+            <a
+              v-if="runUrl"
+              role="menuitem"
+              :href="runUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              :title="canRun ? 'Open HTML in a new tab (scripts run in an isolated origin)' : 'Open HTML in a new tab (still sandboxed — no JavaScript)'"
+              aria-label="Open HTML in a new tab"
+              @click="closeMenu()"
+            ><TermIcon name="external" />Open in new tab</a>
+            <button
+              v-if="conn.hasFeature('tunnels')"
+              type="button"
+              role="menuitem"
+              :class="{ active: fileTunnel?.status === 'active' }"
+              :title="fileTunnel?.status === 'active' ? 'Show tunnel preview' : 'Publish a public tunnel preview'"
+              aria-label="Publish a public tunnel preview"
+              @click="startTunnelPreview(); closeMenu()"
+            ><TermIcon name="bolt" />Tunnel</button>
+            <button v-if="showMobileWidth" type="button" role="menuitem" :class="{ active: viewportWidth === '375px' }" title="Mobile Viewport (375px)" @click="viewportWidth = '375px'; closeMenu()"><TermIcon name="phone" />Mobile</button>
+            <button v-if="showTabletWidth" type="button" role="menuitem" :class="{ active: viewportWidth === '768px' }" title="Tablet Viewport (768px)" @click="viewportWidth = '768px'; closeMenu()"><TermIcon name="tablet" />Tablet</button>
+            <button v-if="showMobileWidth" type="button" role="menuitem" :class="{ active: viewportWidth === '100%' }" title="Full Viewport (100%)" @click="viewportWidth = '100%'; closeMenu()"><TermIcon name="display" />Full width</button>
+            <button
+              v-if="hasScripts && canRun"
+              type="button"
+              role="menuitem"
+              :class="{ active: runScripts }"
+              title="Run scripts in an isolated origin"
+              aria-label="Run scripts"
+              :aria-pressed="runScripts"
+              @click="runScripts = !runScripts; closeMenu()"
+            ><TermIcon name="play" />Run scripts</button>
+            <button type="button" role="menuitem" title="Reload Preview" aria-label="Reload Preview" @click="reloadIframe(); closeMenu()"><TermIcon name="refresh" />Reload</button>
+          </template>
+          <button
+            v-if="hasModeToggle"
+            type="button"
+            role="menuitem"
+            :aria-label="modeLabel"
+            :title="modeLabel"
+            @click="toggleMode(); closeMenu()"
+          ><span v-if="showingRich" class="fp-letter">T</span><TermIcon v-else name="render" />{{ modeMenuLabel }}</button>
+          <button
+            type="button"
+            role="menuitem"
+            class="directory-toggle"
+            :class="{ active: props.directoryOpen }"
+            :aria-label="props.directoryOpen ? 'Hide file browser' : 'Show file browser'"
+            :title="props.directoryOpen ? 'Hide directory' : 'Show directory'"
+            :aria-pressed="props.directoryOpen"
+            @click="toggleDirectory(); closeMenu()"
+          ><TermIcon name="files" />{{ props.directoryOpen ? 'Hide directory' : 'Directory' }}</button>
+        </div>
+      </div>
 
     </header>
 
@@ -782,15 +949,28 @@ function fmtSize(bytes: number): string {
       <!-- HTML Sandboxed Iframe Preview -->
       <div v-else-if="isHtml && htmlRendered" class="fp-iframe-container">
         <!-- Sandbox tip & Tunnel banner -->
-        <div class="fp-sandbox-tip" :class="{ 'has-scripts': hasScripts }">
-          <div v-if="hasScripts" class="fp-tip-msg">
+        <div v-if="showSandboxBar" class="fp-sandbox-tip" :class="{ 'has-scripts': hasScripts && !tipDismissed }">
+          <div v-if="hasScripts && !tipDismissed" class="fp-tip-msg">
             <span class="fp-tip-icon">ℹ</span>
             <span class="fp-tip-text">
-              Preview is sandboxed — JavaScript is disabled here.<template v-if="canRun"> ▶ or ↗ runs it with scripts in an isolated origin.</template>
+              Preview is sandboxed — JavaScript is disabled here.
+              <template v-if="canRun"> Use the buttons below to open it in a new tab or run scripts in an isolated origin. The top-right corner has the same actions.</template>
+              <template v-else> Use the button below to open it in a new tab (still sandboxed). The top-right corner has the same action.</template>
             </span>
+            <button type="button" class="fp-tip-close" aria-label="Dismiss preview notice" title="Dismiss" @click="tipDismissed = true">×</button>
           </div>
-          <div class="fp-tip-actions">
-            <a v-if="runUrl" :href="runUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn" :title="canRun ? 'Larger view — scripts run in an isolated origin' : 'Larger view — still sandboxed'">Open in new tab ↗</a>
+          <div v-if="!tipDismissed || !hasScripts || tunnelLive" class="fp-tip-actions">
+            <a v-if="runUrl && (!tipDismissed || !hasScripts)" :href="runUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn" :title="canRun ? 'Larger view — scripts run in an isolated origin' : 'Larger view — still sandboxed'">Open in new tab ↗</a>
+            <button
+              v-if="hasScripts && canRun && !tipDismissed"
+              type="button"
+              class="fp-tip-btn"
+              :class="{ active: runScripts }"
+              aria-label="Run scripts"
+              title="Run scripts in an isolated origin"
+              :aria-pressed="runScripts"
+              @click="runScripts = !runScripts"
+            >▶ Run scripts</button>
             <template v-if="conn.hasFeature('tunnels')">
               <div v-if="tunnelCreateError" class="fp-tunnel-status">
                 <span class="fp-tunnel-badge error" :title="tunnelCreateError">Failed to start: {{ tunnelCreateError }}</span>
@@ -828,7 +1008,7 @@ function fmtSize(bytes: number): string {
           :key="runScripts ? 'run' : 'safe'"
           ref="iframeRef"
           class="fp-iframe"
-          :style="{ width: viewportWidth }"
+          :style="{ width: frameWidth }"
           :src="iframeUrl"
           :sandbox="runScripts ? 'allow-scripts' : ''"
           title="HTML Preview"
@@ -877,9 +1057,15 @@ function fmtSize(bytes: number): string {
 .fp-head {
   display: flex; align-items: center; gap: 8px;
   padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
+  position: relative; z-index: 3;
 }
-.fp-path { flex: 1; min-width: 0; display: flex; align-items: center; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; scrollbar-width: none; }
+.fp-path { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; }
 .fp-path::-webkit-scrollbar { display: none; }
+.fp-path-row {
+  display: flex; align-items: center; width: max-content; min-width: 100%;
+  padding-right: 8px;
+  font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap;
+}
 .fp-name { flex-shrink: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text); }
 .fp-dir { flex-shrink: 0; color: var(--blue); background: none; border: 0; padding: 3px 4px; border-radius: 3px; }
 .fp-dir:hover { background: var(--blue-soft); }
@@ -892,25 +1078,46 @@ function fmtSize(bytes: number): string {
 }
 .fp-btn:hover { color: var(--text); }
 .fp-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.fp-btn.fp-icon {
+  width: 30px; height: 30px; padding: 0;
+  display: grid; place-items: center;
+}
+.fp-letter { font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; }
+.fp-menu .fp-letter {
+  width: 16px; height: 16px; display: grid; place-items: center; flex-shrink: 0;
+  font-size: 13px;
+}
+a.fp-btn { text-decoration: none; }
+.fp-toolset { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.fp-more { display: none; position: relative; flex-shrink: 0; }
+.fp-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); min-width: 168px;
+}
+.fp-menu button, .fp-menu a {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; font-family: var(--font-mono); font-size: var(--text-sm);
+  color: var(--text-dim); background: transparent; border: none; border-radius: var(--radius);
+  text-align: left; white-space: nowrap; text-decoration: none;
+}
+.fp-menu button:hover, .fp-menu a:hover { background: var(--surface-2); color: var(--text); }
+.fp-menu button.active, .fp-menu a.active { color: var(--blue); }
+.fp-menu button:disabled { opacity: 0.45; }
+.fp-menu .copy-btn.copied { color: var(--green); }
+.fp-menu .copy-btn.error { color: var(--orange); }
+/* Highlight only a control that is actually on (search, directory, viewport,
+   scripts, tunnel, open menu). Everything else stays the normal muted color. */
 .fp-btn.directory-toggle.active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .fp-close { width: 30px; height: 30px; padding: 0; font-size: var(--text-md); }
-.fp-btn.mode { color: var(--blue); }
-.fp-btn.vp-btn { padding: 4px 7px; }
+@media (max-width: 639px) {
+  /* .fp-btn.fp-icon is display:grid (two classes). A bare .fp-desk
+     cannot override it, so the inline buttons stayed next to the menu. */
+  .fp-head .fp-desk { display: none; }
+  .fp-more { display: flex; }
+}
 .fp-btn.vp-btn.active { color: var(--blue); border-color: var(--blue); background: var(--surface-3, var(--surface)); }
-.fp-btn.fill-path {
-  color: var(--blue);
-  border-color: var(--border-strong, var(--border));
-}
-.fp-btn.fill-path:hover {
-  background: var(--surface-3, var(--surface));
-}
-.fp-btn.copy-btn {
-  color: var(--blue);
-  border-color: var(--border-strong, var(--border));
-}
-.fp-btn.copy-btn:hover:not(:disabled) {
-  background: var(--surface-3, var(--surface));
-}
 .fp-btn.copy-btn.copied {
   color: var(--green);
   border-color: var(--green);
@@ -959,6 +1166,20 @@ function fmtSize(bytes: number): string {
   color: var(--muted, #94a3b8);
   line-height: 1.4;
 }
+.fp-tip-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted, #94a3b8);
+  font-size: 16px;
+  line-height: 1;
+}
+.fp-tip-close:hover { color: var(--text); background: var(--surface); }
 .fp-tip-actions {
   display: flex;
   align-items: center;
@@ -980,6 +1201,7 @@ function fmtSize(bytes: number): string {
   white-space: nowrap;
   transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
+.fp-tip-btn.active { color: var(--blue); border-color: var(--blue); }
 .fp-tip-btn:hover:not(:disabled) {
   background: var(--surface-2, #2e3440);
   border-color: var(--border-strong, #3b4252);

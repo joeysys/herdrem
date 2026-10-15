@@ -225,6 +225,22 @@ describe('cmdHistory store — shared through the relay', () => {
     expect(sent()).toEqual([])
   })
 
+  it('keeps favorites when clearing and forwards the star', () => {
+    const { h } = shared()
+    h.record('keep', sh('p', { host: 'local', workspaceId: 'w1' }))
+    h.record('drop', sh('p', { host: 'local', workspaceId: 'w1' }))
+    vi.mocked(ws.send).mockClear()
+    h.setFavorite(h.entries.find((e) => e.c === 'keep')!, true)
+    expect(sent()[0]).toMatchObject({
+      type: 'history_favorite', text: 'keep', favorite: true, everywhere: false, host: 'local', workspace_id: 'w1',
+    })
+    h.clear('all', { host: 'local', workspaceId: 'w1' })
+    expect(h.entries.map((e) => e.c)).toEqual(['keep'])
+    expect(h.clearable('all', { host: 'local', workspaceId: 'w1' })).toBe(false)
+    h.applyFavorited('sh', 'keep', false, 'local', 'w1', false)
+    expect(h.entries[0].f).toBeUndefined()
+  })
+
   it('forwards removals and clears (relay-wide, per kind, per workspace)', () => {
     const { h } = shared()
     h.record('gone', sh())

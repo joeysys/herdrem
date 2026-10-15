@@ -67,22 +67,57 @@ watch(groupByBranch, (v) => {
 })
 
 interface BranchGroup {
+  key: string
   branch: string
+  cwd: string
+  cwdLabel?: string
   panes: Pane[]
 }
 
 const groupedPanes = computed<BranchGroup[]>(() => {
   const panes = activeSpace.value?.panes
   if (!panes) return []
-  if (!groupByBranch.value) return [{ branch: '', panes }]
-  const map = new Map<string, Pane[]>()
+  if (!groupByBranch.value) return [{ key: '', branch: '', cwd: '', panes }]
+  // Branch alone is not a group identity: the backend resolves it per-cwd
+  // (`git -C <cwd> branch --show-current`), so two panes at different paths
+  // that both report "main" are different repos' main. Group by cwd+branch.
+  const map = new Map<string, BranchGroup>()
   for (const p of panes) {
-    const b = p.branch || '(no branch)'
-    if (!map.has(b)) map.set(b, [])
-    map.get(b)!.push(p)
+    const branch = p.branch || '(no branch)'
+    const cwd = p.cwd || ''
+    const key = cwd + '\u0000' + branch
+    if (!map.has(key)) map.set(key, { key, branch, cwd, panes: [] })
+    map.get(key)!.panes.push(p)
   }
-  return [...map.entries()].map(([branch, ps]) => ({ branch, panes: ps }))
+  const groups = [...map.values()]
+  // A branch name identifies a repo only within one project: in a space with
+  // multiple cwds, "main" alone can't say which project it belongs to — even
+  // when it is the only "main" group right now. So whenever the space spans
+  // more than one cwd, label every group header with the shortest cwd suffix
+  // that sets it apart from the space's other paths.
+  const cwds = [...new Set(groups.map((g) => g.cwd).filter(Boolean))]
+  if (cwds.length > 1) {
+    for (const g of groups) {
+      if (g.cwd) g.cwdLabel = minCwdSuffix(g.cwd, cwds.filter((c) => c !== g.cwd))
+    }
+  }
+  return groups
 })
+
+/** Shortest `/`-joined trailing segments of `cwd` not equal to the same-length
+ *  suffix of any path in `others`, prefixed with '…/' when truncated.
+ *  Falls back to the full cwd when no shorter suffix distinguishes it. */
+function minCwdSuffix(cwd: string, others: string[]): string {
+  const segs = cwd.split('/').filter(Boolean)
+  const otherSegs = others.map((o) => o.split('/').filter(Boolean))
+  for (let n = 1; n <= segs.length; n++) {
+    const suffix = segs.slice(-n).join('/')
+    // Full-length match still distinguishes: a shorter path's whole name is
+    // not the same suffix. Only a truncated suffix gets the '…/' prefix.
+    if (otherSegs.every((o) => o.slice(-n).join('/') !== suffix)) return n < segs.length ? '…/' + suffix : cwd
+  }
+  return cwd
+}
 
 function enter(id: string) { activeSpaceId.value = id }
 
@@ -156,10 +191,11 @@ function newTab() {
       >⎇ branch</button>
     </div>
     <div class="agent-list">
-      <template v-for="g in groupedPanes" :key="g.branch || '_all'">
+      <template v-for="g in groupedPanes" :key="g.key || '_all'">
         <div v-if="groupByBranch && g.branch" class="branch-header">
           <span class="branch-icon">⎇</span>
           <span class="branch-name">{{ g.branch }}</span>
+          <span v-if="g.cwdLabel" class="branch-cwd" :title="g.cwd">{{ g.cwdLabel }}</span>
           <span class="branch-count">{{ g.panes.length }}</span>
         </div>
         <article
@@ -300,6 +336,10 @@ function newTab() {
 }
 .branch-header .branch-icon { opacity: 0.7; }
 .branch-header .branch-name { font-weight: 700; }
+.branch-header .branch-cwd {
+  color: var(--faint); font-weight: 400;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .branch-header .branch-count {
   color: var(--faint); font-weight: 400;
   background: var(--surface); border: 1px solid var(--border);

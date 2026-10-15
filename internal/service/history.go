@@ -133,6 +133,39 @@ func (s *Service) handleHistoryClear(ctx context.Context, conn *websocket.Conn, 
 	}
 }
 
+func (s *Service) handleHistoryFavorite(ctx context.Context, conn *websocket.Conn, data []byte) {
+	if s.historyStore == nil {
+		s.sendError(ctx, conn, "history_favorite", "history store not available")
+		return
+	}
+	var msg protocol.HistoryFavorite
+	if err := json.Unmarshal(data, &msg); err != nil {
+		s.sendError(ctx, conn, "history_favorite", "invalid message: "+err.Error())
+		return
+	}
+	switch msg.Kind {
+	case "", "sh", "ag":
+	default:
+		s.sendError(ctx, conn, "history_favorite", "invalid kind")
+		return
+	}
+	if msg.Text == "" {
+		s.sendError(ctx, conn, "history_favorite", "missing text")
+		return
+	}
+	n, err := s.historyStore.SetFavorite(msg.Kind, msg.Text, msg.Host, msg.WorkspaceID, msg.Everywhere, msg.Favorite)
+	if err != nil {
+		s.sendError(ctx, conn, "history_favorite", err.Error())
+		return
+	}
+	if n > 0 {
+		s.hub.BroadcastJSONExcept(protocol.HistoryFavorited{
+			Type: "history_favorited", Kind: msg.Kind, Text: msg.Text, Favorite: msg.Favorite,
+			Everywhere: msg.Everywhere, Host: msg.Host, WorkspaceID: msg.WorkspaceID,
+		}, conn)
+	}
+}
+
 func (s *Service) handleHistoryImport(ctx context.Context, conn *websocket.Conn, data []byte) {
 	if s.historyStore == nil {
 		s.sendError(ctx, conn, "history_import", "history store not available")

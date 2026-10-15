@@ -337,4 +337,22 @@ describe('mergeEntries / capEntries', () => {
     expect(out.some((x) => x.c === 'sh')).toBe(true)
     expect(out[0].t).toBeGreaterThanOrEqual(out[1].t)
   })
+
+  it('keeps a favorite across another use, a merge, and the cap', () => {
+    let l = addEntry([], 'ls', SH, 1)
+    l = [{ ...l[0], f: true }]
+    l = addEntry(l, 'ls', SH, 2)
+    expect(l[0]).toMatchObject({ f: true, n: 2, t: 2 })
+    const merged = mergeEntries([e('old', 1, { n: 1, f: true })], [e('old', 5, { n: 2 })])
+    expect(merged[0].f).toBe(true)
+    const capped = capEntries([e('fav', 1, { f: true }), ...Array.from({ length: 12 }, (_, i) => e(`c${i}`, 10 + i))], 10)
+    expect(capped.some((x) => x.c === 'fav')).toBe(true)
+    expect(capped.filter((x) => !x.f)).toHaveLength(10)
+  })
+
+  it('sorts by last used unless asked for frequency', () => {
+    const list = [e('new', 10, { n: 1 }), e('old', 1, { n: 5 })]
+    expect(search(list, '', {}).map((x) => x.c)).toEqual(['new', 'old'])
+    expect(search(list, '', { sort: 'often' }).map((x) => x.c)).toEqual(['old', 'new'])
+  })
 })

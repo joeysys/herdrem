@@ -453,7 +453,7 @@ function bindTermShortcuts() {
   }
   const add = (def: Parameters<typeof register>[0]) => offTermShortcuts.push(register(def))
   add({ id: 'term.find', label: 'Search output', scope: 'global', key: 'f', mod: true, browserTab: 'blocked', blockedNote: 'In a normal browser tab, Ctrl/⌘+F is the browser find. Use the ⌕ search button', when: termFindOk, run: () => openSearch() })
-  add({ id: 'term.history', label: 'Input history', scope: 'terminal', key: 'r', mod: true, browserTab: 'blocked', blockedNote: 'In a normal browser tab, Ctrl/⌘+R reloads the page. Use the ⏱ history button', when: () => termFindOk() && !isTextInput(document.activeElement), run: () => openHistory() })
+  add({ id: 'term.history', label: 'Input history', scope: 'terminal', key: 'r', mod: true, browserTab: 'blocked', blockedNote: 'In a normal browser tab, Ctrl/⌘+R reloads the page. Use the history button', when: () => termFindOk() && !isTextInput(document.activeElement), run: () => openHistory() })
   add({ id: 'term.insert', label: 'Focus the input', scope: 'terminal', key: 'i', run: () => focusPrompt() })
   add({ id: 'term.slash', label: 'Focus the input and type /', scope: 'terminal', key: '/', run: () => insertSlash() })
   add({ id: 'term.files', label: 'File tree', scope: 'terminal', key: 'e', when: () => conn.hasFeature('files'), run: () => openFiles() })
@@ -468,7 +468,7 @@ function liveChord(id: string, name: string) {
   return chord ? `${name} (${chord})` : name
 }
 const fileTitle = computed(() => liveChord('term.files', 'Files'))
-const diffTitle = computed(() => liveChord('term.diff', 'Diff'))
+const diffTitle = computed(() => liveChord('term.diff', conn.hasFeature('git-commit') ? 'Git status' : 'Diff'))
 const todoTitle = computed(() => liveChord('term.todo', 'Todo'))
 const searchTitle = computed(() => liveChord('term.find', 'Search output'))
 const historyTitle = computed(() => liveChord('term.history', 'Input history'))
@@ -573,17 +573,12 @@ function openFiles() {
 }
 
 function openDiff() {
-  if (!conn.hasFeature('git-diff')) {
-    return
-  }
+  if (!conn.hasFeature('git-diff')) return
   const cwd = pane.value?.cwd || '/'
   const h = pane.value?.host || 'local'
-  diff.openDiff(cwd, h)
-}
-
-function openStatus() {
-  if (!conn.hasFeature('git-commit')) return
-  diff.openDiff(pane.value?.cwd || '/', pane.value?.host || 'local', 'status')
+  // One entry. Land on status when the relay can show it; the diff tabs are
+  // inside the panel.
+  diff.openDiff(cwd, h, conn.hasFeature('git-commit') ? 'status' : 'unstaged')
 }
 
 // Any zoom other than 100% — larger or smaller — is "zoomed": the menu item
@@ -733,7 +728,6 @@ onUnmounted(() => {
       <div class="head-actions desktop-only">
         <button class="icon-btn" aria-label="Browse files" :title="fileTitle" @click.stop="openFiles"><TermIcon name="files" /></button>
         <button v-if="conn.hasFeature('git-diff')" class="icon-btn" aria-label="Git diff" :title="diffTitle" @click.stop="openDiff"><TermIcon name="diff" /></button>
-        <button v-if="conn.hasFeature('git-commit')" class="icon-btn" aria-label="Git status" title="Git status: stage and commit" @click.stop="openStatus"><TermIcon name="status" /></button>
         <button
           class="icon-btn"
           :class="{ active: hasTodo }"
@@ -773,7 +767,6 @@ onUnmounted(() => {
         <div v-if="showMenu" class="head-menu" role="menu" aria-label="Terminal actions" @click.stop>
           <button type="button" role="menuitem" aria-label="Browse files" @click.stop="openFiles(); showMenu = false"><TermIcon name="files" />Files</button>
           <button v-if="conn.hasFeature('git-diff')" type="button" role="menuitem" aria-label="Git diff" @click.stop="openDiff(); showMenu = false"><TermIcon name="diff" />Diff</button>
-          <button v-if="conn.hasFeature('git-commit')" type="button" role="menuitem" aria-label="Git status" @click.stop="openStatus(); showMenu = false"><TermIcon name="status" />Status</button>
           <button type="button" role="menuitem" aria-label="Todo notes" :class="{ active: hasTodo }" @click="showTodo = !showTodo; showMenu = false"><TermIcon name="todo" />Todo</button>
           <button type="button" role="menuitem" aria-label="Search output" :class="{ active: searchOpen }" @click="searchOpen ? closeSearch() : openSearch(); showMenu = false"><TermIcon name="search" />Search</button>
           <button type="button" role="menuitem" aria-label="Input history" :class="{ active: showHistory }" @click="showHistory ? closeHistory() : openHistory(); showMenu = false"><TermIcon name="history" />History</button>

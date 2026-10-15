@@ -69,7 +69,6 @@ export interface DiffState {
 
 export const useDiffStore = defineStore('diff', () => {
   const open = ref(false);
-  const halfScreen = ref(false);
   /** Show `--name-status` instead of the patch. A view preference: it
    *  outlives closing the panel, unlike the rest of the state. */
   const nameStatus = ref(false);
@@ -162,7 +161,6 @@ export const useDiffStore = defineStore('diff', () => {
 
   function close() {
     open.value = false;
-    halfScreen.value = false;
     state.value = null;
     diffReqId.value = '';
     logReqId.value = '';
@@ -263,11 +261,6 @@ export const useDiffStore = defineStore('diff', () => {
   function showPatchFor(path: string) {
     focusPath.value = path;
     setNameStatus(false);
-  }
-
-  /** Toggle between full-screen overlay and bottom half-screen. */
-  function toggleHalfScreen() {
-    halfScreen.value = !halfScreen.value;
   }
 
   function setMode(mode: DiffViewMode) {
@@ -699,12 +692,10 @@ export const useDiffStore = defineStore('diff', () => {
 
   return {
     open,
-    halfScreen,
     state,
     openDiff,
     close,
     reset,
-    toggleHalfScreen,
     nameStatus,
     setNameStatus,
     showPatchFor,

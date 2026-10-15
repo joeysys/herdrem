@@ -36,8 +36,8 @@ export function useHistorySuggest(o: HistorySuggestOptions) {
 
   function onKeydown(e: KeyboardEvent) {
     if (e.isComposing) return
-    // In a browser tab Ctrl/⌘+R stays the browser's reload (the ⏱ key opens
-    // history there); only the installed window takes it, like the shell chords.
+    // In a browser tab Ctrl/⌘+R stays the browser's reload (the header history
+    // button opens it there); only the installed window takes it, like the shell chords.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'r' && isStandalone()) {
       e.preventDefault()
       o.openHistory()

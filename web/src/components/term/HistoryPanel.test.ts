@@ -28,7 +28,7 @@ function seeded() {
 
 const HERE = { paneId: 'p1', ...W1 }
 const texts = (w: ReturnType<typeof mount>) => w.findAll('.hp-cmd .text').map((t) => t.text())
-const kindChips = (w: ReturnType<typeof mount>) => w.findAll('.hp-chip:not(.scope)')
+const kindChips = (w: ReturnType<typeof mount>) => w.findAll('.hp-chip:not(.scope):not(.sort)')
 const scopeChips = (w: ReturnType<typeof mount>) => w.findAll('.hp-chip.scope')
 
 beforeEach(() => {
@@ -225,6 +225,24 @@ describe('HistoryPanel', () => {
       await btn.trigger('click')
       expect(h.counts.ag).toBe(0)
       expect(h.counts.sh).toBe(4)
+    })
+
+    it('keeps a favorite and can list the most-used first', async () => {
+      const h = useCmdHistoryStore()
+      h.applySnapshot([
+        { c: 'rare new', t: 300, n: 1, h: 'local', s: 'w1', p: 'p1' },
+        { c: 'often old', t: 100, n: 9, h: 'local', s: 'w1', p: 'p1' },
+      ])
+      const w = mount(HistoryPanel, { props: { defaultKind: 'sh', where: HERE } })
+      expect(texts(w)).toEqual(['rare new', 'often old'])
+      await w.get('.hp-chip.sort:last-child').trigger('click')
+      expect(texts(w)).toEqual(['often old', 'rare new'])
+      await w.get('[aria-label="Favorite rare new"]').trigger('click')
+      const btn = w.get('.hp-clear')
+      await btn.trigger('click')
+      await btn.trigger('click')
+      expect(h.entries.map((e) => e.c)).toEqual(['rare new'])
+      expect(w.get('.hp-clear').attributes('disabled')).toBeDefined()
     })
 
     it('is disabled when there is nothing to clear in view', () => {

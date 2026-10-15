@@ -197,6 +197,24 @@ func TestHistoryRemoveAndClearBroadcast(t *testing.T) {
 	}
 }
 
+func TestHistoryFavoriteBroadcastAndSurvivesClear(t *testing.T) {
+	r := newHistoryRig(t, true)
+	_, _ = r.store.Record(store.HistoryEntry{Text: "keep", Host: "local", Workspace: "a"}, 1)
+	_, _ = r.store.Record(store.HistoryEntry{Text: "drop", Host: "local", Workspace: "a"}, 2)
+	a, b := r.dial(), r.dial()
+	r.send(a, `{"type":"history_favorite","kind":"sh","text":"keep","favorite":true,"host":"local","workspace_id":"a"}`)
+	m := r.next(b)
+	if m["type"] != "history_favorited" || m["text"] != "keep" || m["favorite"] != true {
+		t.Fatalf("got %v", m)
+	}
+	r.send(a, `{"type":"history_clear","kind":"all","host":"local","workspace_id":"a"}`)
+	_ = r.next(b)
+	left := r.store.All()
+	if len(left) != 1 || left[0].Text != "keep" || !left[0].Fav {
+		t.Fatalf("store = %+v", left)
+	}
+}
+
 func TestHistoryClearScopeNeedsBothHostAndWorkspace(t *testing.T) {
 	r := newHistoryRig(t, true)
 	_, _ = r.store.Record(store.HistoryEntry{Text: "x"}, 1)

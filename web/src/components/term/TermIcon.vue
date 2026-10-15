@@ -2,10 +2,12 @@
 // Header action icons. Unicode glyphs (🗂 ⎇ ± ✎ ⌕ ⏱ …) come from different
 // fonts — an emoji here, a symbol fallback there — so their widths and
 // baselines never matched. One stroke set on a fixed box keeps the buttons and
-// the mobile menu's labels lined up.
+// the mobile menu's labels lined up. The file preview header uses the same set.
 export type TermIconName =
   | 'files' | 'diff' | 'status' | 'todo' | 'search' | 'history'
   | 'fullscreen' | 'zoom' | 'refresh' | 'settings' | 'more'
+  | 'copy' | 'check' | 'warn' | 'fill' | 'render'
+  | 'external' | 'bolt' | 'phone' | 'tablet' | 'display' | 'play'
 
 const PATHS: Record<TermIconName, string> = {
   files: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -19,6 +21,17 @@ const PATHS: Record<TermIconName, string> = {
   refresh: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"/>',
   more: '<circle cx="12" cy="5" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="19" r="1.5" fill="currentColor"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
+  warn: '<circle cx="12" cy="12" r="8"/><path d="M12 8v5"/><circle cx="12" cy="16" r="1" fill="currentColor" stroke="none"/>',
+  fill: '<path d="M19 5L5 19"/><path d="M12 19H5v-7"/>',
+  render: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/>',
+  external: '<path d="M14 5h5v5"/><path d="M19 5l-8 8"/><path d="M17 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h5"/>',
+  bolt: '<path d="M13 2L4 14h7l-1 8 10-12h-7z"/>',
+  phone: '<rect x="8" y="2" width="8" height="20" rx="2"/><path d="M11 18h2"/>',
+  tablet: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M18 12h.01"/>',
+  display: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>',
+  play: '<path d="M8 5l12 7-12 7z"/>',
 }
 
 withDefaults(defineProps<{ name: TermIconName; size?: number }>(), { size: 16 })

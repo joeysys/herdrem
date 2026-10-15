@@ -827,6 +827,7 @@ onMounted(() => {
     if (msg.type === 'history_added') cmdHistory.applyAdded(msg.entry);
     if (msg.type === 'history_removed') cmdHistory.applyRemoved(msg.kind, msg.text);
     if (msg.type === 'history_cleared') cmdHistory.applyCleared(msg.kind, msg.host, msg.workspace_id);
+    if (msg.type === 'history_favorited') cmdHistory.applyFavorited(msg.kind, msg.text, msg.favorite, msg.host, msg.workspace_id, msg.everywhere);
     if (msg.type === 'tunnels') tunnelsStore.setTunnels(msg.tunnels || []);
     if (msg.type === 'tunnel_updated') tunnelsStore.updateTunnel(msg.tunnel);
     if (msg.type === 'pane_content') {
@@ -1336,7 +1337,7 @@ onUnmounted(() => {
           @toggle-directory="onTogglePreviewDirectory"
         />
       </div>
-      <div v-if="diff.open" class="diff-preview-panel" :class="{ 'half-screen': diff.halfScreen }">
+      <div v-if="diff.open" class="diff-preview-panel">
         <DiffPreview />
       </div>
     </main>
@@ -1441,23 +1442,16 @@ onUnmounted(() => {
   border-left: 1px solid var(--border);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
 }
-/* Half-screen mode: dock to the bottom, covering only 50% of the height.
-   The terminal above stays visible so the user can read diff + terminal
-   side by side. Overrides the full-screen `inset` and `width`. */
-.diff-preview-panel.half-screen {
-  inset: auto 0 0 0;
-  width: 100%;
-  height: 50%;
-  border-left: none;
-  border-top: 1px solid var(--border-strong);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.3);
-}
 /* A float (non-docked) directory overlays the preview on every layout, so it
    must sit above the preview panel. :deep() is required because FileBrowser is
    a fragment component (two roots: <aside> + <Teleport>), so Vue does NOT add
    this file's scope attribute to its root <aside> — a plain scoped selector
    would silently fail to match. The desktop docked layout instead shares the
-   row (file-preview-panel right: 360px). */
+   row (file-preview-panel right: 360px).
+   top: 49px keeps the preview path bar visible above a floating drawer.
+   Docked desktop panels sit side by side and do not use this offset. On a
+   phone the drawer is an overlay, so the offset stacks a second path under
+   the preview path; the mobile rule below resets top to 0 and covers it. */
 .main.has-file-preview > :deep(.fb-drawer:not(.docked)) {
   top: 49px;
   z-index: 80;
@@ -1477,19 +1471,17 @@ onUnmounted(() => {
   .main.files-docked .diff-preview-panel {
     right: 360px;
   }
-  /* Half-screen overrides desktop split/docked positioning: it always
-     spans the full width at the bottom, regardless of split mode. */
-  .main.split .diff-preview-panel.half-screen {
-    left: 0;
-    width: 100%;
-  }
-  .main.files-docked .diff-preview-panel.half-screen {
-    right: 0;
-  }
 }
 @media (max-width: 899px) {
   .main.directory-over-preview .file-preview-panel {
     z-index: 65;
+  }
+  /* Cover the preview path bar. The drawer is already full width below 639px;
+     above that (still mobile layout) stretch it so the bar is covered entirely
+     instead of leaving the left part of the preview path beside the directory. */
+  .main.has-file-preview.directory-over-preview > :deep(.fb-drawer:not(.docked)) {
+    top: 0;
+    width: 100%;
   }
   .diff-preview-panel {
     width: 100%;

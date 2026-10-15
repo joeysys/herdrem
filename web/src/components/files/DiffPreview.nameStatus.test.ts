@@ -15,7 +15,7 @@ const g = globalThis as unknown as { CSS?: { escape?: (s: string) => string } }
 if (!g.CSS?.escape) g.CSS = { ...(g.CSS ?? {}), escape: (s: string) => s.replace(/["\\]/g, '\\$&') }
 
 const last = () => vi.mocked(ws.send).mock.lastCall?.[0] as unknown as Record<string, unknown>
-const toggle = (w: ReturnType<typeof mount>) => w.findAll('.dp-btn').find((b) => b.text() === 'name-status')
+const toggle = (w: ReturnType<typeof mount>) => w.find('[aria-label="name-status"]')
 
 function reply(content: string, extra: Record<string, unknown> = {}) {
   const req = last()
@@ -38,15 +38,15 @@ describe('DiffPreview name-status', () => {
     const d = useDiffStore()
     d.openDiff('/repo', 'local')
     const without = mount(DiffPreview)
-    expect(toggle(without)).toBeUndefined()
+    expect(toggle(without).exists()).toBe(false)
     without.unmount()
 
     useConnectionStore().setHello('t', ['git-diff', 'git-commit', 'git-name-status'])
     const w = mount(DiffPreview)
-    expect(toggle(w)?.attributes('aria-pressed')).toBe('false')
+    expect(toggle(w).attributes('aria-pressed')).toBe('false')
     d.setMode('status')
     await nextTick()
-    expect(toggle(w)).toBeUndefined()
+    expect(toggle(w).exists()).toBe(false)
   })
 
   it('asks the relay for --name-status and lists the files, then back to the patch', async () => {
@@ -56,7 +56,7 @@ describe('DiffPreview name-status', () => {
     expect(last().format).toBeUndefined()
     const w = mount(DiffPreview)
 
-    await toggle(w)!.trigger('click')
+    await toggle(w).trigger('click')
     expect(last()).toMatchObject({ type: 'git_diff', mode: 'unstaged', format: 'name-status' })
     reply('M\ta.go\nA\tnew.txt\nD\tgone.txt\nR095\told/めい.txt\tnew/めい.txt\n')
     await nextTick()
@@ -68,7 +68,7 @@ describe('DiffPreview name-status', () => {
     expect(rows[2].find('.dp-ns-open').exists()).toBe(false) // a deleted file has nothing to open
     expect(w.find('.dp-files').exists()).toBe(false)
 
-    await toggle(w)!.trigger('click')
+    await w.get('[aria-label="Show the patch"]').trigger('click')
     expect(last().format).toBeUndefined()
     reply(PATCH)
     await nextTick()

@@ -21,7 +21,6 @@ export type KeyRowPaneType = 'agent' | 'shell'
 export const DEFAULT_AGENT_KEY_DEFS: KeyItemDef[] = [
   { id: 'skills', label: '⚡', name: 'Skills', description: 'Agent skills menu' },
   { id: 'agentCmds', label: '▶', name: 'Commands', description: 'Agent quick commands' },
-  { id: 'history', label: '⏱', name: 'History', description: 'Prompt history' },
   { id: 'arrows', label: '⌖', name: 'Arrows', description: 'Arrow keys pad' },
   { id: 'Enter', label: 'Enter', name: 'Enter', key: 'Enter' },
   { id: 'Escape', label: 'Esc', name: 'Esc', key: 'Escape' },

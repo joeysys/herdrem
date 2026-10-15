@@ -267,6 +267,32 @@ func TestHistoryClearByKindAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestHistoryClearKeepsFavorites(t *testing.T) {
+	h, _ := newHistory(t)
+	_, _ = h.Record(HistoryEntry{Text: "keep", Host: "local", Workspace: "a"}, 1)
+	_, _ = h.Record(HistoryEntry{Text: "drop", Host: "local", Workspace: "a"}, 2)
+	if n, err := h.SetFavorite("", "keep", "local", "a", false, true); err != nil || n != 1 {
+		t.Fatalf("favorite n=%d err=%v", n, err)
+	}
+	if _, err := h.Record(HistoryEntry{Text: "keep", Host: "local", Workspace: "a"}, 3); err != nil {
+		t.Fatal(err)
+	}
+	got := h.All()[0]
+	if got.Text != "keep" || !got.Fav || got.Count != 2 {
+		t.Fatalf("re-record lost the star: %+v", got)
+	}
+	if n, _ := h.Clear("all", true, "local", "a"); n != 1 {
+		t.Fatalf("removed %d, want 1", n)
+	}
+	left := h.All()
+	if len(left) != 1 || left[0].Text != "keep" || !left[0].Fav {
+		t.Fatalf("remaining = %+v", left)
+	}
+	if n, _ := h.SetFavorite("", "keep", "local", "a", false, false); n != 1 || h.All()[0].Fav {
+		t.Fatal("unfavorite failed")
+	}
+}
+
 func TestHistoryImportMergesWithoutLosingWhatIsKnown(t *testing.T) {
 	h, _ := newHistory(t)
 	_, _ = h.Record(HistoryEntry{Text: "ls", Host: "local", Workspace: "w"}, 500)

@@ -17,7 +17,7 @@ describe('KeyRowConfigModal', () => {
   it('renders agent pane keys by default and allows switching tabs', async () => {
     const wrapper = mount(KeyRowConfigModal, { props: { type: 'agent' } })
     expect(wrapper.find('.krc-modal').exists()).toBe(true)
-    expect(wrapper.findAll('.krc-item').length).toBe(10) // 10 agent items including Tab
+    expect(wrapper.findAll('.krc-item').length).toBe(9) // agent items, without the history button
 
     // Switch to shell pane tab
     const tabs = wrapper.findAll('.krc-tab')

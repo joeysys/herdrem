@@ -9,6 +9,7 @@ import { highlight } from '../../utils/highlight';
 import { parseNameStatus } from '../../utils/nameStatus';
 import { parseGitLog } from '../../utils/gitLog';
 import { fileIcon } from '../../utils/fileIcons';
+import TermIcon from '../term/TermIcon.vue';
 import type { GitLogOptions } from '../../api/types';
 
 const diff = useDiffStore();
@@ -21,13 +22,31 @@ const state = computed(() => diff.state);
 /** Which commit menu is open. commit = the single-commit tab; from/to = the range tab. */
 const openPicker = ref<null | 'commit' | 'from' | 'to'>(null);
 
-const cwdLabel = computed(() => {
-  const cwd = state.value?.cwd || '';
-  // Show the basename + parent for brevity, like a repo name.
-  const parts = cwd.replace(/\/+$/, '').split('/');
-  if (parts.length <= 2) return cwd || '/';
-  return '…/' + parts.slice(-2).join('/');
+const cwdNav = ref<HTMLElement | null>(null);
+// Full path, scrolled so the repo directory (the last segment) stays in view.
+// A pre-cut "…/parent/name" reads as a broken half path and then ellipsis
+// clips the name again.
+const cwdParts = computed(() => {
+  const raw = (state.value?.cwd || '').replace(/\/+$/, '') || '/';
+  // /home/<user> and /Users/<user> are the home directory; show that as ~.
+  const home = raw.match(/^\/(?:home|Users)\/[^/]+(?=\/|$)/);
+  if (home) {
+    const rest = raw.slice(home[0].length).split('/').filter(Boolean);
+    return rest.length ? ['~', ...rest] : ['~'];
+  }
+  if (raw === '/') return ['/'];
+  return ['', ...raw.split('/').filter(Boolean)];
 });
+async function scrollCwdToEnd() {
+  await nextTick();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const el = cwdNav.value;
+      if (el) el.scrollLeft = el.scrollWidth;
+    });
+  });
+}
+watch(() => state.value?.cwd, scrollCwdToEnd, { immediate: true });
 
 // Per-line diff marker (+ / - / space) for row tinting.
 function lineMarker(html: string): '' | 'add' | 'del' | 'hunk' | 'meta' {
@@ -147,6 +166,8 @@ const nameStatusView = computed(() => {
 const canNameStatus = computed(
   () => conn.hasFeature('git-name-status') && state.value?.mode !== 'status' && state.value?.mode !== 'log',
 );
+// The mode tabs stay a fixed row. Format, log switches and commit pickers are
+// a separate tools row, so a control that is not always there cannot resize them.
 
 // --- log tab ---
 const LOG_SWITCHES: { key: keyof GitLogOptions; label: string; title: string }[] = [
@@ -178,9 +199,9 @@ function nsLabel(status: string): string {
   return NS_LABELS[status] ?? status;
 }
 
-function toggleNameStatus() {
+function setFormat(files: boolean) {
   haptic();
-  diff.setNameStatus(!diff.nameStatus);
+  diff.setNameStatus(files);
 }
 
 function showPatch(path: string) {
@@ -296,21 +317,16 @@ watch(openPicker, (open) => {
     <header class="dp-head">
       <div class="dp-bar">
         <button class="dp-btn dp-close" aria-label="Close diff preview" title="Close" @click="diff.close()">×</button>
-        <span class="dp-cwd mono" :title="state.cwd">⎇ {{ cwdLabel }}</span>
-        <button
-          class="dp-btn"
-          :class="{ active: diff.halfScreen }"
-          :aria-label="diff.halfScreen ? 'Expand to full screen' : 'Switch to half screen'"
-          :title="diff.halfScreen ? 'Full screen' : 'Half screen'"
-          :aria-pressed="diff.halfScreen"
-          @click="diff.toggleHalfScreen()"
-        >
-          ⇕
-        </button>
-        <button class="dp-btn" aria-label="Refresh diff" title="Refresh" @click="refresh">⟳</button>
+        <nav ref="cwdNav" class="dp-cwd mono" :title="state.cwd" aria-label="Repository path">
+          <template v-for="(seg, i) in cwdParts" :key="i">
+            <span v-if="i" class="dp-sep">/</span>
+            <span :class="{ 'dp-repo': i === cwdParts.length - 1 }">{{ seg }}</span>
+          </template>
+        </nav>
+        <button class="dp-btn dp-icon" aria-label="Refresh diff" title="Refresh" @click="refresh"><TermIcon name="refresh" :size="18" /></button>
       </div>
 
-      <div class="dp-modes" role="group" aria-label="Diff mode">
+      <div class="dp-tabs" role="group" aria-label="Diff mode">
         <button
           v-if="conn.hasFeature('git-commit')"
           class="dp-mode"
@@ -374,6 +390,23 @@ watch(openPicker, (open) => {
         v-if="state.mode === 'log' || state.mode === 'commit' || state.mode === 'range' || canNameStatus"
         class="dp-tools"
       >
+        <div v-if="canNameStatus" class="dp-format" role="group" aria-label="Diff format">
+          <button
+            type="button"
+            :class="{ active: !diff.nameStatus }"
+            aria-label="Show the patch"
+            title="Show the patch"
+            @click="setFormat(false)"
+          >patch</button>
+          <button
+            type="button"
+            :class="{ active: diff.nameStatus }"
+            :aria-pressed="diff.nameStatus"
+            aria-label="name-status"
+            title="List changed files only (--name-status)"
+            @click="setFormat(true)"
+          >files</button>
+        </div>
         <div v-if="state.mode === 'log'" class="dp-modes" role="group" aria-label="Log options">
           <button
             v-for="o in LOG_SWITCHES"
@@ -461,17 +494,6 @@ watch(openPicker, (open) => {
             </div>
           </template>
         </template>
-
-        <button
-          v-if="canNameStatus"
-          class="dp-btn dp-ns-toggle"
-          :class="{ active: diff.nameStatus }"
-          :aria-pressed="diff.nameStatus"
-          :title="diff.nameStatus ? 'Show the patch' : 'List changed files only (--name-status)'"
-          @click="toggleNameStatus"
-        >
-          name-status
-        </button>
       </div>
     </header>
 
@@ -571,8 +593,8 @@ watch(openPicker, (open) => {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
-  padding: 8px 12px 10px;
+  gap: 0;
+  padding: 8px 12px 0;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
@@ -584,17 +606,32 @@ watch(openPicker, (open) => {
   gap: 8px;
   min-width: 0;
 }
+.dp-bar { padding-bottom: 6px; }
 .dp-tools {
   flex-wrap: wrap;
+  padding: 8px 0;
 }
-.dp-tools > .dp-modes {
-  flex: 1;
+.dp-tools > .dp-modes,
+.dp-format {
+  flex: 0 0 auto;
 }
 .dp-cwd {
   flex: 1;
   min-width: 0;
-  max-width: none;
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  white-space: nowrap;
+  scrollbar-width: none;
+  font-size: var(--text-xs);
+  color: var(--faint);
 }
+.dp-cwd::-webkit-scrollbar { display: none; }
+.dp-cwd span { flex-shrink: 0; }
+.dp-sep { flex-shrink: 0; padding: 0 1px; }
+.dp-repo { color: var(--text); font-weight: 600; font-size: var(--text-sm); }
 .dp-btn {
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
@@ -613,56 +650,91 @@ watch(openPicker, (open) => {
   border-color: var(--blue);
   background: var(--blue-soft);
 }
-.dp-close {
+.dp-close,
+.dp-icon {
   width: 30px;
   height: 30px;
   padding: 0;
+  display: grid;
+  place-items: center;
   font-size: var(--text-md);
 }
-.dp-cwd {
-  font-size: var(--text-xs);
-  color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
+.dp-tabs {
+  display: flex;
+  min-width: 0;
+  margin: 0 -12px;
+  padding: 0 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dp-tabs::-webkit-scrollbar { display: none; }
+.dp-tabs .dp-mode {
+  flex: 1 1 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 4px 6px;
+  text-align: center;
+}
+.dp-tabs .dp-mode.active {
+  color: var(--blue);
+  background: transparent;
+  border-bottom-color: var(--blue);
+}
 .dp-modes {
   display: flex;
-  gap: 2px;
   min-width: 0;
-  overflow-x: auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }
+.dp-format {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.dp-format button {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
+  padding: 5px 10px;
+  line-height: 1;
+}
+.dp-format button:last-child { border-right: 0; }
+.dp-format button.active { color: var(--blue); background: var(--blue-soft); }
 .dp-slot-name {
   color: var(--faint);
   flex-shrink: 0;
-}
-.dp-ns-toggle {
-  margin-left: auto;
 }
 .dp-swap {
   padding-inline: 8px;
 }
 .dp-mode {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   color: var(--muted);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 4px 9px;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  padding: 5px 10px;
   cursor: pointer;
   line-height: 1;
+  white-space: nowrap;
 }
-.dp-mode:hover {
-  color: var(--text);
-}
-.dp-mode.active {
-  color: var(--blue);
-  border-color: var(--blue);
-  background: var(--blue-soft);
-}
+.dp-mode:last-child { border-right: 0; }
+.dp-mode:hover { color: var(--text); }
+.dp-mode.active { color: var(--blue); background: var(--blue-soft); }
 
 .dp-commit-wrap {
   position: relative;

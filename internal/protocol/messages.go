@@ -397,8 +397,31 @@ type HistoryRemove struct {
 	Text string `json:"text"`
 }
 
+// HistoryFavorite stars or unstars one input. Everywhere updates every
+// workspace's copy; otherwise host and workspace_id pick the slot.
+type HistoryFavorite struct {
+	Type        string `json:"type"`
+	Kind        string `json:"kind"`
+	Text        string `json:"text"`
+	Favorite    bool   `json:"favorite"`
+	Everywhere  bool   `json:"everywhere,omitempty"`
+	Host        string `json:"host,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+// HistoryFavorited announces a star change to the other clients.
+type HistoryFavorited struct {
+	Type        string `json:"type"`
+	Kind        string `json:"kind"`
+	Text        string `json:"text"`
+	Favorite    bool   `json:"favorite"`
+	Everywhere  bool   `json:"everywhere,omitempty"`
+	Host        string `json:"host,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
 // HistoryClear forgets a kind ("all" | "sh" | "ag"). With host+workspace_id
-// only that workspace's entries are removed.
+// only that workspace's entries are removed. Favorites are kept.
 type HistoryClear struct {
 	Type        string `json:"type"`
 	Kind        string `json:"kind,omitempty"`

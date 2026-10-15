@@ -273,22 +273,16 @@ describe('TermView shell history', () => {
 describe('TermView agent prompt history', () => {
   const agentInput = (w: VueWrapper) => w.get('textarea.cmd')
 
-  it('opens on prompts for an agent pane and shows both header and key-row buttons', async () => {
+  it('opens on prompts for an agent pane from the header button', async () => {
     const w = mountView('agent')
     useCmdHistoryStore().record('refactor the parser', ag('p1'))
     useCmdHistoryStore().record('ls -la', sh('p1'))
-    expect(w.findAll('button[aria-label="Input history"]').length).toBeGreaterThanOrEqual(2)
+    expect(w.find('.key-row button[aria-label="Input history"]').exists()).toBe(false)
+    expect(w.findAll('button[aria-label="Input history"]')).toHaveLength(1)
     await w.get('.head-actions button[aria-label="Input history"]').trigger('click')
     await flush()
     const rows = w.findAll('.hp-cmd .text').map((t) => t.text())
     expect(rows).toEqual(['refactor the parser'])
-  })
-
-  it('the key-row ⏱ button opens the same panel', async () => {
-    const w = mountView('agent')
-    await w.get('.key-row button[aria-label="Input history"]').trigger('click')
-    await flush()
-    expect(w.find('[role="dialog"][aria-label="Input history"]').exists()).toBe(true)
   })
 
   it('picking a prompt replaces the agent input without sending it', async () => {
@@ -393,7 +387,7 @@ describe('TermView history scope and workspace', () => {
 })
 
 describe('TermView git status shortcut', () => {
-  it('shows ± only when the relay supports git status, and opens it for the pane folder', async () => {
+  it('has no separate status button; the diff button opens the status page', async () => {
     const w = mountView('agent')
     expect(w.find('.head-actions button[aria-label="Git status"]').exists()).toBe(false)
     w.unmount()
@@ -402,7 +396,8 @@ describe('TermView git status shortcut', () => {
     const { useDiffStore } = await import('../../stores/diff')
     useConnectionStore().setHello('t', ['git-diff', 'git-commit'])
     const w2 = mountView('agent')
-    await w2.get('.head-actions button[aria-label="Git status"]').trigger('click')
+    expect(w2.find('button[aria-label="Git status"]').exists()).toBe(false)
+    await w2.get('.head-actions button[aria-label="Git diff"]').trigger('click')
     expect(useDiffStore().state).toMatchObject({ cwd: '/tmp', host: 'local', mode: 'status' })
   })
 })

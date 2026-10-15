@@ -38,11 +38,27 @@ describe('DiffPreview two-commit range', () => {
     w.unmount()
   })
 
+  it('shows a home directory as ~', () => {
+    useDiffStore().openDiff('/home/user/proj/repo', 'local')
+    const w = mount(DiffPreview)
+    expect(w.get('.dp-cwd').text()).toBe('~/proj/repo')
+    expect(w.get('.dp-cwd').attributes('title')).toBe('/home/user/proj/repo')
+    w.unmount()
+
+    useDiffStore().openDiff('/Users/user/repo', 'local')
+    const mac = mount(DiffPreview)
+    expect(mac.get('.dp-cwd').text()).toBe('~/repo')
+    mac.unmount()
+  })
+
   it('lays the path and the mode tabs on separate rows, then diffs the two picks', async () => {
     useDiffStore().openDiff('/repo', 'local')
     const w = mount(DiffPreview)
-    expect(w.get('.dp-bar').text()).toContain('repo')
-    expect(w.get('.dp-bar').find('[aria-label="Refresh diff"]').exists()).toBe(true)
+    expect(w.get('.dp-repo').text()).toBe('repo')
+    expect(w.get('.dp-cwd').text()).toBe('/repo')
+    expect(w.get('.dp-bar').text()).not.toContain('…/')
+    const refresh = w.get('.dp-bar').get('[aria-label="Refresh diff"]')
+    expect(refresh.find('svg').exists()).toBe(true)
     expect(w.get('[aria-label="Diff mode"]').text()).not.toContain('Refresh')
 
     await w.get('[aria-label="Diff mode"]').findAll('.dp-mode').find((b) => b.text() === 'range')!.trigger('click')

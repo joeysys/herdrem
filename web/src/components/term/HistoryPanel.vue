@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
-import { kindOf, type HistoryEntry, type HistoryKind, type Scope, type Where } from '../../utils/cmdHistory'
+import { kindOf, type HistoryEntry, type HistoryKind, type HistorySort, type Scope, type Where } from '../../utils/cmdHistory'
 
 // Searchable input history: shell commands and prompts sent to any agent
 // through this app, shared by every device using the relay (the ^R of the
@@ -19,6 +19,7 @@ const query = ref('')
 const kind = ref<'all' | HistoryKind>(props.defaultKind)
 const agent = ref('')
 const scope = ref<Scope>(props.where.workspaceId ? 'workspace' : 'relay')
+const sort = ref<HistorySort>('recent')
 const active = ref(0)
 const confirmClear = ref(false)
 const inputEl = ref<HTMLInputElement | null>(null)
@@ -55,10 +56,11 @@ const filter = computed(() => ({
   kind: kind.value,
   agent: showAgentFilter.value ? agent.value : '',
   scope: scope.value,
+  sort: sort.value,
 }))
 const results = computed(() => history.search(query.value, filter.value, 100))
 
-watch([query, kind, agent, scope], () => { active.value = 0 })
+watch([query, kind, agent, scope, sort], () => { active.value = 0 })
 watch(results, (r) => { if (active.value >= r.length) active.value = Math.max(0, r.length - 1) })
 
 // Clearing follows the scope: on the relay scope it empties the relay (for
@@ -70,11 +72,15 @@ const clearLabel = computed(() => {
   return clearsRelay.value ? `clear ${what}` : `clear ${what} here`
 })
 const clearTitle = computed(() =>
-  clearsRelay.value ? 'Removes it from the relay, for every device' : 'Removes this workspace\'s entries, for every device',
+  clearsRelay.value
+    ? 'Removes non-favorites from the relay, for every device. Favorites are kept.'
+    : 'Removes this workspace\'s non-favorites, for every device. Favorites are kept.',
 )
-const clearable = computed(() =>
-  history.count({ ...props.where, kind: kind.value, scope: clearsRelay.value ? 'relay' : 'workspace' }) > 0,
-)
+const clearable = computed(() => {
+  const { host, workspaceId } = props.where
+  const workspace = clearsRelay.value || !workspaceId ? undefined : { host: host ?? '', workspaceId }
+  return history.clearable(kind.value, workspace)
+})
 
 let clearTimer: ReturnType<typeof setTimeout> | null = null
 function onClear() {
@@ -109,7 +115,7 @@ function pickActive() {
 // their native keyboard behaviour (Enter on a chip toggles it, etc.).
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') { e.preventDefault(); emit('close'); return }
-  if ((e.target as HTMLElement | null)?.closest('.hp-filters, .hp-foot')) return
+  if ((e.target as HTMLElement | null)?.closest('.hp-filters, .hp-foot, .hp-fav, .hp-del')) return
   if (e.key === 'ArrowDown') { e.preventDefault(); move(1) }
   else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1) }
   else if (e.key === 'Enter') { e.preventDefault(); pickActive() }
@@ -132,7 +138,7 @@ function meta(e: HistoryEntry): string {
     if (e.w) parts.push(e.w)
   }
   if (scope.value === 'relay' && e.l) parts.push(e.l)
-  if (e.n > 1) parts.push(`×${e.n}`)
+  parts.push(`×${e.n}`)
   parts.push(ago(e.t))
   return parts.join(' · ')
 }
@@ -174,6 +180,16 @@ onBeforeUnmount(() => { if (clearTimer) clearTimeout(clearTimer) })
         :aria-pressed="kind === k.v"
         @click="kind = k.v"
       >{{ k.label }}</button>
+      <button
+        v-for="s in (['recent', 'often'] as const)"
+        :key="s"
+        type="button"
+        class="hp-chip sort"
+        :class="{ on: sort === s }"
+        :aria-pressed="sort === s"
+        :title="s === 'recent' ? 'Last used' : 'Times submitted'"
+        @click="sort = s"
+      >{{ s }}</button>
       <select v-if="showAgentFilter" v-model="agent" class="hp-select" aria-label="Filter by agent type">
         <option value="">all agent types</option>
         <option v-for="t in history.agentTypes" :key="t" :value="t">{{ t }}</option>
@@ -211,6 +227,15 @@ onBeforeUnmount(() => { if (clearTimer) clearTimeout(clearTimer) })
           <span class="text">{{ e.c }}</span>
           <span class="meta">{{ meta(e) }}</span>
         </button>
+        <button
+          type="button"
+          class="hp-fav"
+          :class="{ on: e.f }"
+          :aria-pressed="!!e.f"
+          :aria-label="`${e.f ? 'Unfavorite' : 'Favorite'} ${e.c}`"
+          :title="e.f ? 'Unfavorite' : 'Favorite'"
+          @click.stop="history.setFavorite(e, !e.f, scope === 'relay')"
+        >{{ e.f ? '★' : '☆' }}</button>
         <button type="button" class="hp-del" :aria-label="`Remove ${e.c} from history`" title="Remove" @click="history.remove(e)">×</button>
       </li>
     </ul>
@@ -283,10 +308,12 @@ onBeforeUnmount(() => { if (clearTimer) clearTimeout(clearTimer) })
   overflow: hidden; word-break: break-word; white-space: pre-wrap;
 }
 .hp-cmd .meta { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--faint); }
-.hp-del {
+.hp-fav, .hp-del {
   width: 30px; flex-shrink: 0; align-self: center; height: 30px;
   color: var(--faint); background: transparent; border: none; font-size: var(--text-md);
 }
+.hp-fav.on { color: var(--orange, #f59e0b); }
+.hp-fav:hover { color: var(--orange, #f59e0b); }
 .hp-del:hover { color: var(--red); }
 .hp-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
