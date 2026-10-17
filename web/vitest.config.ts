@@ -10,6 +10,10 @@ export default defineConfig({
     alias: {
       // vite-only virtual module (SettingsPanel imports it); stub in tests
       'virtual:build-id': fileURLToPath(new URL('./src/__mocks__/virtual-build-id.ts', import.meta.url)),
+      // vite-plugin-pwa virtual module (App.vue imports it); stub in tests
+      'virtual:pwa-register/vue': fileURLToPath(
+        new URL('./src/__mocks__/virtual-pwa-register-vue.ts', import.meta.url),
+      ),
     },
   },
   test: {

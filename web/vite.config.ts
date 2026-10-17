@@ -34,7 +34,12 @@ export default defineConfig({
     vue(),
     buildIdPlugin(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt' installs an update in the background and leaves it waiting.
+      // autoUpdate called skipWaiting + clientsClaim, and App.vue reloaded on
+      // controllerchange — the page painted, then refreshed again and dropped
+      // whatever the user had just opened. The waiting worker takes over the
+      // next time the app is opened with no client still running.
+      registerType: 'prompt',
       // notificationclick handling lives in public/sw-notify.js
       workbox: {
         importScripts: ['sw-notify.js'],

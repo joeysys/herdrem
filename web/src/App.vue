@@ -23,6 +23,7 @@ import { useDiffStore } from './stores/diff';
 import { usePrefsStore } from './stores/prefs';
 import { useCmdHistoryStore } from './stores/cmdHistory';
 import { useTunnelsStore } from './stores/tunnels';
+import { useRegisterSW } from 'virtual:pwa-register/vue';
 import { useRelayConnection } from './composables/useRelayConnection';
 import { useNotify } from './composables/useNotify';
 import { useHaptic } from './composables/useHaptic';
@@ -70,6 +71,20 @@ const notify = useNotify();
 const { haptic } = useHaptic();
 const trap = useHistoryTrap();
 const { toasts, justDonePanes } = notify;
+
+// registerType 'prompt': a waiting SW is invisible on its own, so surface it.
+// Periodic update() keeps detection alive in long-lived tabs; the reload after
+// SKIP_WAITING only happens when the user taps the banner (user-initiated,
+// not the forced mid-session reload we removed).
+const updateDismissed = ref(false);
+const { needRefresh, updateServiceWorker } = useRegisterSW({
+  onNeedRefresh() {
+    updateDismissed.value = false;
+  },
+  onRegisteredSW(_url, r) {
+    if (r) setInterval(() => r.update(), 60 * 60 * 1000);
+  },
+});
 
 let unsubMsg: (() => void) | null = null;
 
@@ -306,20 +321,6 @@ onMounted(() => {
     history.replaceState({ view: 'root' }, '');
   }
   window.addEventListener('popstate', onPopState);
-
-  // PWA: when a new Service Worker takes control, reload once so the page
-  // runs under the new SW immediately (prevents stale-asset / install failures).
-  // Skip the reload on the FIRST install — the page already has the correct
-  // assets from the network, and reloading causes a visible flicker.
-  if ('serviceWorker' in navigator) {
-    let hadController = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (hadController) {
-        window.location.reload();
-      }
-      hadController = true;
-    });
-  }
 });
 
 onUnmounted(() => {
@@ -1342,6 +1343,19 @@ onUnmounted(() => {
       </div>
     </main>
 
+    <div v-if="needRefresh && !updateDismissed" class="sw-update" role="status">
+      <span>new version available</span>
+      <button class="sw-update-go" type="button" @click="updateServiceWorker()">update &amp; reload</button>
+      <button
+        class="sw-update-x"
+        type="button"
+        aria-label="Dismiss update notice"
+        @click="updateDismissed = true"
+      >
+        ✕
+      </button>
+    </div>
+
     <ContextMenu
       :pane="ctxPane"
       :open="ctxOpen && !!ctxPane"
@@ -1805,6 +1819,56 @@ onUnmounted(() => {
 .toast.exit-toast {
   border-color: rgba(251, 191, 36, 0.5);
   color: #fde68a;
+}
+/* In-flow bottom bar inside .app (flex column): it takes layout space below
+   .main so it can never cover the terminal input row, unlike the floating
+   .toast-stack. Only tokens from base.css :root are used — --accent/--accent-2
+   exist only in the modern-* themes and would silently drop these rules in
+   the 12 other themes. */
+.sw-update {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+}
+.sw-update-go {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0 16px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.sw-update-go:hover {
+  background: var(--border-strong);
+}
+.sw-update-x {
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.sw-update-x:hover {
+  opacity: 1;
 }
 
 /* Boot splash — shown until the first WS hello arrives. Matches the inline
