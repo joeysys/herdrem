@@ -201,6 +201,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/file", s.handleFile)
 	mux.HandleFunc("/upload", s.handleUpload)
 	mux.HandleFunc("/preview/", s.handleFilePreview)
+	mux.HandleFunc("/preview-open/", s.handleFilePreview)
 	mux.HandleFunc("/preview-auth", s.handlePreviewAuth)
 	mux.HandleFunc("/session-auth", s.handleSessionAuth)
 	mux.HandleFunc("/session-logout", s.handleSessionLogout)
@@ -502,7 +503,17 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	// The capability is in the path because an opaque-origin sandbox cannot send
 	// SameSite cookies with relative subresource requests. It is short-lived and
 	// host-bound, so leaking it cannot expose the relay token or another host.
+	//
+	// Open mode is also carried in the path prefix (/preview-open/) rather than
+	// a query parameter: in-document relative links and iframe navigations
+	// resolve against the path, so a query flag would be silently dropped on
+	// the first click inside a multi-page site and the page would fall back to
+	// the static sandbox. A path prefix is preserved by relative resolution.
+	openPath := strings.HasPrefix(r.URL.Path, "/preview-open/")
 	path := strings.TrimPrefix(r.URL.Path, "/preview/")
+	if openPath {
+		path = strings.TrimPrefix(r.URL.Path, "/preview-open/")
+	}
 	parts := strings.SplitN(path, "/", 3)
 	if s.cfg.Token == "" {
 		parts = strings.SplitN(path, "/", 2)
@@ -568,12 +579,55 @@ func (s *Server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
 	// is the capability itself: scoped to the file's directory, dotfiles
 	// refused, bound to the minter's IP, 10-minute TTL.
 	run := r.URL.Query().Get("run") == "1" && (s.cfg.Token == "" || scopeDir != "")
+	// /preview-open/ is the "open in a new tab with scripts & remote resources" mode:
+	// same scoped capability and opaque origin as run mode, but remote
+	// subresource channels (script/style/img/media/font/frame/worker over
+	// https:) are allowed so CDN-backed pages (mermaid, echarts, ...) can render
+	// in an isolated origin — the in-app sandbox can never satisfy those.
+	//
+	// Honest cost: this re-opens the silent-beacon channel that run mode
+	// deliberately closes — a script can embed its own DOM plus the
+	// dir-scoped capability in a remote subresource URL without any visible
+	// navigation. What still bounds the blast radius: the document stays an
+	// opaque origin (no relay cookies, no relay API reads — CORS never
+	// grants this origin), connect-src stays pinned to this origin (no
+	// readable fetch channel back, and no ACAO is emitted so sibling file
+	// contents stay unreadable), and the capability is dir-scoped, refuses
+	// dotfiles, is bound to the minter's IP, and expires in 10 minutes. The
+	// accepted residual — silent leak of page DOM + capability, usable only
+	// by a same-egress-IP party inside the TTL — is recorded in
+	// docs/designs/html-preview-and-tunnel-forwarding.md.
+	//
+	// Sandbox flags stay minimal on purpose: `allow-scripts` only, same as
+	// run mode. Forms, popups, top navigation escapes and downloads are not
+	// needed for CDN-backed rendering, so they are not granted.
+	//
+	// Local files only: remote hosts have no local filesystem to fall back
+	// to and keep the sandboxed preview/tunnel path.
+	//
+	// Authorization boundary: this server does not enforce user consent.
+	// Any request carrying a valid run capability receives the executing
+	// tier (?run=1 or /preview-open/) — including older clients that minted
+	// the capability and navigated to it directly. The consent step
+	// ("▶ Run scripts" in the web UI) is enforced client-side only; the
+	// server-side bound is the capability itself (dir scope, dotfile
+	// refusal, minter-IP binding, 10-minute TTL) plus the CSP above.
+	openMode := openPath && (host == "" || host == "local") &&
+		(s.cfg.Token == "" || scopeDir != "")
 	proto := "http"
 	if r.TLS != nil || (isLoopback(r.RemoteAddr) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
 		proto = "https"
 	}
 	self := proto + "://" + r.Host
-	if run {
+	if openMode {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; "+
+			"script-src 'unsafe-inline' 'unsafe-eval' https: "+self+" data:; "+
+			"style-src 'unsafe-inline' https: "+self+" data:; "+
+			"img-src https: "+self+" data: blob:; media-src https: "+self+" data: blob:; "+
+			"font-src https: "+self+" data:; connect-src "+self+"; "+
+			"frame-src https: "+self+"; worker-src https: "+self+" blob:; "+
+			"form-action 'none'; object-src 'none'; base-uri 'none'")
+	} else if run {
 		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; "+
 			"script-src 'unsafe-inline' 'unsafe-eval' "+self+" data:; "+
 			"style-src 'unsafe-inline' "+self+" data:; "+
@@ -1052,7 +1106,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		hello.Features = append(hello.Features, "tunnel-direct")
 	}
 	if s.files != nil {
-		hello.Features = append(hello.Features, "file-upload", "preview-run")
+		hello.Features = append(hello.Features, "file-upload", "preview-run", "preview-open")
 	}
 	if s.svc != nil && s.svc.HasHistory() {
 		hello.Features = append(hello.Features, "input-history")

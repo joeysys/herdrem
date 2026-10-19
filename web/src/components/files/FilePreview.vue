@@ -37,6 +37,17 @@ const hasScripts = computed(() => {
   if (!c) return false
   return /<script\b|\bon[a-z]{3,}\s*=|javascript\s*:/i.test(c)
 })
+// Remote CSS/images/scripts need the open tier's wider subresource CSP;
+// script-less pages with CDN references otherwise render unstyled in the
+// static sandbox with no way out.
+const hasRemoteResources = computed(() => {
+  if (!isHtml.value) return false
+  if (preview.value?.truncated) return true
+  const c = preview.value?.content
+  if (!c) return false
+  return /(?:src|href)\s*=\s*["']?\s*https?:\/\/|url\(\s*["']?\s*https?:/i.test(c)
+})
+const needsAuthorization = computed(() => hasScripts.value || hasRemoteResources.value)
 
 const copyStatus = ref<'idle' | 'copied' | 'error'>('idle')
 let copyTimer: ReturnType<typeof setTimeout> | null = null
@@ -300,13 +311,13 @@ const renderedMd = computed(() => {
 // (dir-scoped) goes only into script-executing run URLs.
 const previewCapability = ref('')
 const runCapability = ref('')
-function buildPreviewUrl(capability: string) {
+function buildPreviewUrl(capability: string, route = 'preview') {
   if (!preview.value?.path) return ''
   const base = relayHttpBase(conn.url)
   const encodedHost = btoa(preview.value.host || 'local').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   const encodedPath = preview.value.path.split('/').map(encodeURIComponent).join('/')
   const cap = capability ? `${capability}/` : ''
-  return `${base}/preview/${cap}${encodedHost}/${encodedPath}`
+  return `${base}/${route}/${cap}${encodedHost}/${encodedPath}`
 }
 const previewUrl = computed(() => buildPreviewUrl(previewCapability.value))
 
@@ -343,7 +354,7 @@ const tunnelLive = computed(() => {
   const status = fileTunnel.value?.status
   return !!status && status !== 'closed'
 })
-const showSandboxBar = computed(() => !hasScripts.value || !tipDismissed.value || tunnelLive.value)
+const showSandboxBar = computed(() => !needsAuthorization.value || !tipDismissed.value || tunnelLive.value)
 let tunnelStartingTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearTunnelStartingTimer() {
@@ -457,21 +468,28 @@ const runScripts = ref(false)
 // a slow mint for an earlier file (say, a wider parent dir) must never land
 // its capability on the file opened since.
 let authSeq = 0
-watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], async ([path]) => {
+// Server capabilities expire after ~10 minutes (previewCapabilityTTL). The
+// preview can sit open far longer than that before the user clicks ▶,
+// Reload, or Open in new tab — so capabilities are re-minted at use time
+// once they approach expiry instead of trusting the open-time mint.
+let capabilityMintedAt = 0
+const CAP_REFRESH_MS = 8 * 60_000
+
+// mintCapabilities performs the /preview-auth round-trip. It does NOT clear
+// the existing capabilities up front: a failed re-mint leaves the previous
+// (possibly still valid) ones in place, while a watch-driven mint clears
+// them before calling. Returns true when usable capabilities are in place.
+async function mintCapabilities(): Promise<boolean> {
   const seq = ++authSeq
-  authReady.value = false
   authError.value = ''
-  previewCapability.value = ''
-  runCapability.value = ''
-  runScripts.value = false
-  if (!path) return
+  if (!preview.value?.path) return false
 
   if (isCrossOrigin.value) {
     authError.value =
       `Rendered HTML preview needs a same-origin Relay. This Web App is on ${window.location.origin} ` +
       `but the Relay is ${relayOrigin.value}, so the preview capability cannot be minted. ` +
       'Open the Relay URL directly to use rendered preview — or use the "source" toggle above, which works anywhere.'
-    return
+    return false
   }
 
   try {
@@ -479,32 +497,58 @@ watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], as
       credentials: 'include',
       headers: conn.token ? { Authorization: `Bearer ${conn.token}` } : undefined,
     })
-    if (seq !== authSeq) return
+    if (seq !== authSeq) return false
     if (!resp.ok && resp.status !== 204) {
       authError.value =
         `Preview auth failed (${resp.status}). The Relay rejected the capability request. ` +
         'Use the "source" toggle above to view the file contents.'
-      return
+      return false
     }
     if (resp.status !== 204) {
       const body = (await resp.json()) as { capability?: unknown; run_capability?: unknown }
-      if (seq !== authSeq) return
+      if (seq !== authSeq) return false
       if (typeof body.capability !== 'string' || !body.capability) {
         authError.value = 'Preview auth returned no capability. Use the "source" toggle above to view the file contents.'
-        return
+        return false
       }
       previewCapability.value = body.capability
       runCapability.value = typeof body.run_capability === 'string' ? body.run_capability : ''
     }
   } catch {
-    if (seq !== authSeq) return
+    if (seq !== authSeq) return false
     authError.value =
       'Preview auth unreachable — /preview-auth did not respond. If the Relay was rebuilt, restart it; ' +
       'in dev mode make sure vite proxies /preview and /preview-auth. Use the "source" toggle meanwhile.'
-    return
+    return false
   }
+  capabilityMintedAt = Date.now()
   authReady.value = true
+  return true
+}
+
+// ensureFreshCapability re-mints only when the current pair approaches the
+// server-side TTL; callers at use time (▶, Reload, new tab) go through it.
+// authReady is part of the gate: after a file switch cleared the pair, the
+// inherited timestamp must not let a re-mint be skipped.
+async function ensureFreshCapability(): Promise<boolean> {
+  if (authReady.value && capabilityMintedAt && Date.now() - capabilityMintedAt < CAP_REFRESH_MS) return true
+  return mintCapabilities()
+}
+
+watch([() => preview.value?.path, () => preview.value?.host, () => conn.url], () => {
+  runScripts.value = false
+  previewCapability.value = ''
+  runCapability.value = ''
+  authReady.value = false
+  void mintCapabilities()
 }, { immediate: true })
+
+// Authorization is bound to the content the user saw: a rewritten file
+// (agent regeneration, or a fresh file_read pushing a new body) revokes it
+// and drops the preview back to the static sandbox tier.
+watch(() => preview.value?.content, (c, prev) => {
+  if (prev !== undefined && c !== prev) runScripts.value = false
+})
 
 const imageUrl = computed(() => {
   if (!preview.value?.isImage && !isSvg.value) return ''
@@ -512,8 +556,13 @@ const imageUrl = computed(() => {
 })
 
 const iframeRef = ref<HTMLIFrameElement | null>(null)
-function reloadIframe() {
+// Reload re-serves the file currently on disk, which may differ from what
+// the user authorized — so it drops back to the static tier and re-mints:
+// the capability minted at file-open may be past its TTL by now.
+async function reloadIframe() {
   haptic()
+  runScripts.value = false
+  await ensureFreshCapability()
   if (iframeRef.value) {
     iframeRef.value.src = iframeUrl.value
   }
@@ -532,7 +581,86 @@ const runUrl = computed(() => {
   if (!canRun.value || !previewUrl.value) return previewUrl.value
   return buildPreviewUrl(runCapability.value || previewCapability.value) + '?run=1'
 })
-const iframeUrl = computed(() => (runScripts.value ? runUrl.value : previewUrl.value))
+// Authorized remote-resource pages use the open tier in the iframe as well:
+// run mode's self-only subresource CSP could never render their CDN
+// styles/images, and the authorization already covers remote resources.
+// Script-only pages stay on the tighter run tier in-app.
+const iframeUrl = computed(() => {
+  if (!runScripts.value) return previewUrl.value
+  if (hasRemoteResources.value && openUrl.value) return openUrl.value
+  return runUrl.value
+})
+
+// /preview-open/ serves local files for a top-level tab: still
+// `sandbox allow-scripts` (opaque origin — relay credentials can never ride
+// along), but remote https: subresources (CDN scripts/styles/images) are
+// allowed so CDN-backed pages can render. The mode lives in the
+// path (not a query flag) so relative links and iframes keep it across
+// navigation inside a multi-page site. Requires the dir-scoped run
+// capability on token relays — a host-scoped legacy cap gets refused and the
+// server falls back to the static sandbox. Remote hosts keep the sandbox:
+// they have no local file to "open", so the button just stays on runUrl.
+const isLocalFile = computed(() => !preview.value?.host || preview.value.host === 'local')
+const openUrl = computed(() => {
+  if (!conn.hasFeature('preview-open') || !isLocalFile.value || !previewUrl.value) return ''
+  if (previewCapability.value && !runCapability.value) return ''
+  return buildPreviewUrl(runCapability.value, 'preview-open')
+})
+// Gated by explicit user authorization: scripts are disabled by default.
+// Both the in-app iframe and the new tab link stay on the static sandbox
+// (previewUrl) until the user explicitly authorizes execution via "▶ Run scripts".
+const authorizedUrl = computed(() => openUrl.value || runUrl.value)
+const newTabUrl = computed(() => (runScripts.value ? authorizedUrl.value : previewUrl.value))
+const newTabTitle = computed(() => {
+  if (!runScripts.value) {
+    return 'Open HTML in a new tab (still sandboxed — no JavaScript)'
+  }
+  if (openUrl.value) return 'Open in new tab — scripts and remote resources run on an isolated origin'
+  return canRun.value ? 'Larger view — scripts run in an isolated origin' : 'Larger view — still sandboxed'
+})
+// One authorization covers the executable tier: scripts here, and — where
+// the relay offers preview-open — remote resources in a new tab. The label
+// and title say so up front, not only in a post-authorization tooltip.
+const runLabel = computed(() => (hasScripts.value ? 'Run scripts' : 'Load remote resources'))
+const runTitle = computed(() => {
+  const base = hasScripts.value ? 'Run scripts in this preview' : 'Allow remote resources'
+  if (openUrl.value) return `${base} — "Open in new tab" then also allows remote resources (isolated origin)`
+  return `${base} in an isolated origin`
+})
+
+// toggleRun mints a fresh capability before flipping on: the pair minted
+// when the file opened may be past its 10-minute TTL by the time the user
+// finishes reading and authorizes.
+async function toggleRun() {
+  haptic()
+  if (runScripts.value) {
+    runScripts.value = false
+    return
+  }
+  if (await ensureFreshCapability()) runScripts.value = true
+}
+
+// openInNewTab keeps the plain-anchor path while the capability is fresh.
+// Near expiry it steers a placeholder tab opened inside the gesture —
+// awaiting /preview-auth before window.open would trip popup blockers.
+async function openInNewTab(ev: MouseEvent) {
+  if (authReady.value && capabilityMintedAt && Date.now() - capabilityMintedAt < CAP_REFRESH_MS) return
+  ev.preventDefault()
+  haptic()
+  const win = window.open('about:blank', '_blank')
+  if (!win) {
+    authError.value = 'Popup blocked — allow popups for this app to open the preview in a new tab.'
+    return
+  }
+  win.opener = null
+  const ok = await mintCapabilities()
+  const url = ok ? newTabUrl.value : ''
+  if (!url) {
+    win.close()
+    return
+  }
+  win.location.href = url
+}
 
 const scroller = ref<HTMLElement | null>(null)
 const pathNav = ref<HTMLElement | null>(null)
@@ -760,13 +888,14 @@ function fmtSize(bytes: number): string {
       <!-- Viewport controls for HTML preview. On a phone these move into the menu. -->
       <div v-if="isHtml && htmlRendered" class="fp-desk fp-toolset">
         <a
-          v-if="runUrl"
-          :href="runUrl"
+          v-if="newTabUrl"
+          :href="newTabUrl"
           target="_blank"
           rel="noopener noreferrer"
           class="fp-btn fp-icon"
-          :title="canRun ? 'Open HTML in a new tab (scripts run in an isolated origin)' : 'Open HTML in a new tab (still sandboxed — no JavaScript)'"
+          :title="newTabTitle"
           aria-label="Open HTML in a new tab"
+          @click="openInNewTab"
         ><TermIcon name="external" /></a>
         <button
           v-if="conn.hasFeature('tunnels')"
@@ -798,13 +927,13 @@ function fmtSize(bytes: number): string {
           @click="viewportWidth = '100%'"
         ><TermIcon name="display" /></button>
         <button
-          v-if="hasScripts && canRun"
+          v-if="needsAuthorization && canRun"
           class="fp-btn fp-icon"
           :class="{ active: runScripts }"
-          title="Run scripts in an isolated origin"
-          aria-label="Run scripts"
+          :title="runTitle"
+          :aria-label="runLabel"
           :aria-pressed="runScripts"
-          @click="runScripts = !runScripts"
+          @click="toggleRun"
         ><TermIcon name="play" /></button>
         <button
           class="fp-btn fp-icon"
@@ -873,14 +1002,14 @@ function fmtSize(bytes: number): string {
           ><TermIcon name="search" />Search</button>
           <template v-if="isHtml && htmlRendered">
             <a
-              v-if="runUrl"
+              v-if="newTabUrl"
               role="menuitem"
-              :href="runUrl"
+              :href="newTabUrl"
               target="_blank"
               rel="noopener noreferrer"
-              :title="canRun ? 'Open HTML in a new tab (scripts run in an isolated origin)' : 'Open HTML in a new tab (still sandboxed — no JavaScript)'"
+              :title="newTabTitle"
               aria-label="Open HTML in a new tab"
-              @click="closeMenu()"
+              @click="openInNewTab($event); closeMenu()"
             ><TermIcon name="external" />Open in new tab</a>
             <button
               v-if="conn.hasFeature('tunnels')"
@@ -895,15 +1024,15 @@ function fmtSize(bytes: number): string {
             <button v-if="showTabletWidth" type="button" role="menuitem" :class="{ active: viewportWidth === '768px' }" title="Tablet Viewport (768px)" @click="viewportWidth = '768px'; closeMenu()"><TermIcon name="tablet" />Tablet</button>
             <button v-if="showMobileWidth" type="button" role="menuitem" :class="{ active: viewportWidth === '100%' }" title="Full Viewport (100%)" @click="viewportWidth = '100%'; closeMenu()"><TermIcon name="display" />Full width</button>
             <button
-              v-if="hasScripts && canRun"
+              v-if="needsAuthorization && canRun"
               type="button"
               role="menuitem"
               :class="{ active: runScripts }"
-              title="Run scripts in an isolated origin"
-              aria-label="Run scripts"
+              :title="runTitle"
+              :aria-label="runLabel"
               :aria-pressed="runScripts"
-              @click="runScripts = !runScripts; closeMenu()"
-            ><TermIcon name="play" />Run scripts</button>
+              @click="toggleRun(); closeMenu()"
+            ><TermIcon name="play" />{{ runLabel }}</button>
             <button type="button" role="menuitem" title="Reload Preview" aria-label="Reload Preview" @click="reloadIframe(); closeMenu()"><TermIcon name="refresh" />Reload</button>
           </template>
           <button
@@ -949,28 +1078,32 @@ function fmtSize(bytes: number): string {
       <!-- HTML Sandboxed Iframe Preview -->
       <div v-else-if="isHtml && htmlRendered" class="fp-iframe-container">
         <!-- Sandbox tip & Tunnel banner -->
-        <div v-if="showSandboxBar" class="fp-sandbox-tip" :class="{ 'has-scripts': hasScripts && !tipDismissed }">
-          <div v-if="hasScripts && !tipDismissed" class="fp-tip-msg">
+        <div v-if="showSandboxBar" class="fp-sandbox-tip" :class="{ 'has-scripts': needsAuthorization && !tipDismissed }">
+          <div v-if="needsAuthorization && !tipDismissed" class="fp-tip-msg">
             <span class="fp-tip-icon">ℹ</span>
             <span class="fp-tip-text">
-              Preview is sandboxed — JavaScript is disabled here.
-              <template v-if="canRun"> Use the buttons below to open it in a new tab or run scripts in an isolated origin. The top-right corner has the same actions.</template>
+              <template v-if="hasScripts">Preview is sandboxed — JavaScript is disabled by default.</template>
+              <template v-else>Preview is sandboxed — remote styles and images are blocked.</template>
+              <template v-if="canRun">
+                Click "▶ {{ runLabel }}" to authorize<template v-if="openUrl"> scripts here, and scripts + remote resources in a new tab</template><template v-else> execution here or in a new tab</template> — on an isolated origin.
+                The top-right corner has the same actions.
+              </template>
               <template v-else> Use the button below to open it in a new tab (still sandboxed). The top-right corner has the same action.</template>
             </span>
             <button type="button" class="fp-tip-close" aria-label="Dismiss preview notice" title="Dismiss" @click="tipDismissed = true">×</button>
           </div>
-          <div v-if="!tipDismissed || !hasScripts || tunnelLive" class="fp-tip-actions">
-            <a v-if="runUrl && (!tipDismissed || !hasScripts)" :href="runUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn" :title="canRun ? 'Larger view — scripts run in an isolated origin' : 'Larger view — still sandboxed'">Open in new tab ↗</a>
+          <div v-if="!tipDismissed || !needsAuthorization || tunnelLive" class="fp-tip-actions">
+            <a v-if="newTabUrl && (!tipDismissed || !needsAuthorization)" :href="newTabUrl" target="_blank" rel="noopener noreferrer" class="fp-tip-btn" :title="newTabTitle" @click="openInNewTab">Open in new tab ↗</a>
             <button
-              v-if="hasScripts && canRun && !tipDismissed"
+              v-if="needsAuthorization && canRun && !tipDismissed"
               type="button"
               class="fp-tip-btn"
               :class="{ active: runScripts }"
-              aria-label="Run scripts"
-              title="Run scripts in an isolated origin"
+              :aria-label="runLabel"
+              :title="runTitle"
               :aria-pressed="runScripts"
-              @click="runScripts = !runScripts"
-            >▶ Run scripts</button>
+              @click="toggleRun"
+            >▶ {{ runLabel }}</button>
             <template v-if="conn.hasFeature('tunnels')">
               <div v-if="tunnelCreateError" class="fp-tunnel-status">
                 <span class="fp-tunnel-badge error" :title="tunnelCreateError">Failed to start: {{ tunnelCreateError }}</span>

@@ -43,7 +43,7 @@ export default defineConfig({
       // notificationclick handling lives in public/sw-notify.js
       workbox: {
         importScripts: ['sw-notify.js'],
-        navigateFallbackDenylist: [/^\/preview\//, /^\/api\//, /^\/file/, /^\/ws/, /^\/healthz/],
+        navigateFallbackDenylist: [/^\/preview\//, /^\/preview-open\//, /^\/api\//, /^\/file/, /^\/ws/, /^\/healthz/],
       },
       manifest: {
         name: 'Herdrem',
@@ -73,6 +73,7 @@ export default defineConfig({
       '/upload': 'http://localhost:8766',
       '/api': 'http://localhost:8766',
       '/preview': 'http://localhost:8766',
+      '/preview-open': 'http://localhost:8766',
       '/preview-auth': 'http://localhost:8766',
     },
   },

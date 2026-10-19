@@ -363,3 +363,129 @@ func TestFilePreviewLegacyCapServesOutsideDir(t *testing.T) {
 		t.Fatalf("dir cap ../ status = %d, want 401", w.Code)
 	}
 }
+
+// /preview-open/ serves local files for a real top-level tab: opaque-origin
+// sandbox with remote https: subresources allowed, connect-src still pinned
+// to the relay origin so no readable fetch channel leaves the machine. The
+// mode lives in the path prefix so relative navigation keeps it. Scoped
+// capability and local host are required — anything else falls back to the
+// strict static sandbox.
+func TestFilePreviewOpenModeCSP(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>x</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other.html"), []byte("<h1>o</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
+	s := &Server{
+		cfg:         config.Config{Token: "secret"},
+		files:       files,
+		previewCaps: make(map[string]previewCapability),
+	}
+	scoped, err := s.issuePreviewCapability("local", "192.0.2.1", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := s.issuePreviewCapability("local", "192.0.2.1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := s.issuePreviewCapability("otherhost", "192.0.2.1", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localHost := base64.RawURLEncoding.EncodeToString([]byte("local"))
+	remoteHost := base64.RawURLEncoding.EncodeToString([]byte("otherhost"))
+	path := strings.TrimPrefix(filepath.Join(dir, "index.html"), "/")
+	otherPath := strings.TrimPrefix(filepath.Join(dir, "other.html"), "/")
+	openURL := "/preview-open/" + scoped + "/" + localHost + "/" + path
+
+	for _, tc := range []struct {
+		name string
+		u    string
+		want string // "open" | "strict"
+	}{
+		{"open local scoped", openURL, "open"},
+		{"open wins over run", openURL + "?run=1", "open"},
+		// Mode is path-based, so relative navigation inside the opened site
+		// keeps it — sibling pages get the open CSP, not the static sandbox.
+		{"sibling page keeps open", "/preview-open/" + scoped + "/" + localHost + "/" + otherPath, "open"},
+		{"legacy cap refused", "/preview-open/" + legacy + "/" + localHost + "/" + path, "strict"},
+		{"remote host refused", "/preview-open/" + remote + "/" + remoteHost + "/" + path, "strict"},
+		// A stale ?open=1 query on the old path form has no effect.
+		{"query flag inert", "/preview/" + scoped + "/" + localHost + "/" + path + "?open=1", "strict"},
+	} {
+		r := httptest.NewRequest("GET", tc.u, nil)
+		r.RemoteAddr = "192.0.2.1:9999"
+		w := httptest.NewRecorder()
+		s.handleFilePreview(w, r)
+		csp := w.Header().Get("Content-Security-Policy")
+		switch tc.want {
+		case "open":
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d", tc.name, w.Code, http.StatusOK)
+			}
+			for _, want := range []string{
+				"sandbox allow-scripts",
+				"script-src 'unsafe-inline' 'unsafe-eval' https:",
+				"img-src https:",
+				// Trailing ';' anchors the directive: "connect-src
+				// http://example.com https:" must NOT satisfy this check.
+				"connect-src http://example.com;",
+				"default-src 'none'",
+				"form-action 'none'",
+				"object-src 'none'",
+				"base-uri 'none'",
+			} {
+				if !strings.Contains(csp, want) {
+					t.Fatalf("%s: open CSP = %q, missing %q", tc.name, csp, want)
+				}
+			}
+			for _, banned := range []string{
+				"allow-same-origin",
+				"allow-top-navigation",
+				"allow-forms",
+				"allow-popups",
+				"allow-downloads",
+			} {
+				if strings.Contains(csp, banned) {
+					t.Fatalf("%s: open CSP = %q, must not contain %q", tc.name, csp, banned)
+				}
+			}
+		case "strict":
+			if !strings.Contains(csp, "default-src 'none'") || strings.Contains(csp, " https:") {
+				t.Fatalf("%s: CSP = %q, want strict sandbox without remote sources", tc.name, csp)
+			}
+		}
+	}
+}
+
+// A tokenless relay has no capability at all: /preview-open/<host>/<path>
+// still serves open mode for local files (the whole relay is already
+// unauthenticated, so unscoped serving matches its trust level).
+func TestFilePreviewOpenModeTokenless(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>x</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := service.NewFileService(func(string) []string { return []string{dir} }, nil)
+	s := &Server{cfg: config.Config{}, files: files}
+	localHost := base64.RawURLEncoding.EncodeToString([]byte("local"))
+	path := strings.TrimPrefix(filepath.Join(dir, "index.html"), "/")
+
+	r := httptest.NewRequest("GET", "/preview-open/"+localHost+"/"+path, nil)
+	w := httptest.NewRecorder()
+	s.handleFilePreview(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("tokenless open status = %d, want %d", w.Code, http.StatusOK)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "sandbox allow-scripts") || !strings.Contains(csp, " https:") {
+		t.Fatalf("tokenless open CSP = %q, want open mode", csp)
+	}
+	if strings.Contains(csp, "allow-same-origin") {
+		t.Fatalf("tokenless open CSP = %q, must never allow same-origin", csp)
+	}
+}
