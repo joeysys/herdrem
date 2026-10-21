@@ -555,6 +555,42 @@ describe('desktop file panel placement', () => {
 // entry without user activation (all same-document entries share that state).
 // The trap used to re-push inside popstate, so the second back in a row left
 // the app. These run on a model of that rule rather than jsdom's history.
+describe('system back from a git file diff', () => {
+  it('returns to status before closing the panel', async () => {
+    setActivePinia(createPinia());
+    const wrapper = mount(App);
+    await flush();
+    await enterTerminal(wrapper);
+    useConnectionStore().setHello('t', ['git-diff', 'git-commit']);
+
+    const diff = useDiffStore();
+    diff.openDiff('/root/proj', 'local', 'status');
+    diff.showFileDiff('src/a.go', false);
+    await flush();
+    expect(diff.open).toBe(true);
+    expect(diff.state?.mode).toBe('unstaged');
+
+    history.back();
+    await flush();
+    expect(diff.open).toBe(true);
+    expect(diff.state?.mode).toBe('status');
+    expect(wrapper.find('.term-wrap').exists()).toBe(true);
+
+    history.back();
+    await flush();
+    expect(diff.open).toBe(false);
+    expect(wrapper.find('.term-wrap').exists()).toBe(true);
+
+    history.back();
+    await flush();
+    expect(wrapper.find('.term-wrap').exists()).toBe(false);
+    expect(wrapper.find('.agent-card').exists()).toBe(true);
+
+    wrapper.unmount();
+    await flush();
+  });
+});
+
 describe('system back in the installed PWA under Chrome history skipping', () => {
   async function setup() {
     (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(true);
@@ -573,6 +609,43 @@ describe('system back in the installed PWA under Chrome history skipping', () =>
     chrome.restore();
     (window as unknown as { __setStandalone: (v: boolean) => void }).__setStandalone(false);
   }
+
+  it('status → file diff, then back: status, git closed, term, toast — then exit', async () => {
+    const { chrome, wrapper } = await setup();
+    useConnectionStore().setHello('t', ['git-diff', 'git-commit']);
+    const diff = useDiffStore();
+    chrome.tap(wrapper.get('.agent-card').element);
+    await flush();
+    chrome.tap(wrapper.get('.desktop-only button[aria-label="Git diff"]').element);
+    await flush();
+    expect(diff.state?.mode).toBe('status');
+
+    diff.showFileDiff('src/a.go', false);
+    await flush();
+    expect(diff.state?.mode).toBe('unstaged');
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(diff.open).toBe(true);
+    expect(diff.state?.mode).toBe('status');
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(diff.open).toBe(false);
+    expect(wrapper.find('.term-wrap').exists()).toBe(true);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(wrapper.find('.term-wrap').exists()).toBe(false);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(false);
+    expect(wrapper.find('.exit-toast').exists()).toBe(true);
+
+    await chrome.systemBack();
+    expect(chrome.exited).toBe(true);
+    teardown(chrome, wrapper);
+  });
 
   it('term → git, then back, back, back without tapping: git, term, toast — then exit', async () => {
     const { chrome, wrapper } = await setup();

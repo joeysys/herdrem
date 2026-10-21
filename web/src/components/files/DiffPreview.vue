@@ -261,6 +261,14 @@ function refresh() {
   diff.refresh();
 }
 
+function onHeadBack() {
+  if (diff.back()) {
+    haptic();
+    return;
+  }
+  diff.close();
+}
+
 function fmtCommitDate(d: string): string {
   return d;
 }
@@ -316,7 +324,12 @@ watch(openPicker, (open) => {
   <section v-if="state" class="diff-preview" aria-label="Git diff preview">
     <header class="dp-head">
       <div class="dp-bar">
-        <button class="dp-btn dp-close" aria-label="Close diff preview" title="Close" @click="diff.close()">×</button>
+        <button
+          class="dp-btn dp-close"
+          :aria-label="diff.canBack ? 'Back to status' : 'Close diff preview'"
+          :title="diff.canBack ? 'Back to status' : 'Close'"
+          @click="onHeadBack"
+        >{{ diff.canBack ? '‹' : '×' }}</button>
         <nav ref="cwdNav" class="dp-cwd mono" :title="state.cwd" aria-label="Repository path">
           <template v-for="(seg, i) in cwdParts" :key="i">
             <span v-if="i" class="dp-sep">/</span>

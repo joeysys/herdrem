@@ -226,6 +226,9 @@ function closeTopLayer(): boolean {
     return true;
   }
   if (diff.open) {
+    // A file opened from the status list: back returns to that list.
+    // The next back closes the panel.
+    if (diff.back()) return true;
     diff.close();
     return true;
   }
@@ -947,6 +950,7 @@ function backDepth(): number {
   ];
   let n = layers.filter(Boolean).length;
   if (files.browserOpen) n += files.breadcrumbs.length; // one back per directory level
+  if (diff.canBack) n++; // file diff opened from status returns there first
   if (view.value === 'term') n++;
   if (activeSpaceId.value) n++;
   return n;

@@ -91,10 +91,6 @@ const canPull = computed(() => {
   return clean.value && !s.staged_outside;
 });
 const canFetch = computed(() => canSync.value && !busy.value);
-function canDiscard(e: GitStatusEntry): boolean {
-  return canSync.value && e.status !== '?' && e.status.length === 1;
-}
-
 function doPush() {
   const s = st.value;
   if (!s || !canPush.value) return;
@@ -122,14 +118,6 @@ function doPull() {
   haptic(18);
   diff.sync('pull');
 }
-function discardOne(path: string) {
-  if (busy.value) return;
-  const ok = window.confirm(`Discard unstaged changes in ${path}?\n\nThis cannot be undone.`);
-  if (!ok) return;
-  haptic(18);
-  diff.discard(path);
-}
-
 const syncText = computed(() => {
   const o = diff.syncOutcome;
   if (!o) return '';
@@ -170,6 +158,11 @@ const branchLabel = computed(() => {
   if (s.detached) return 'detached HEAD';
   return s.branch;
 });
+
+// Rows span two columns (scrollable list + fixed action column). Hover or
+// keyboard focus on either side lights both, so the eye can follow a long
+// path across to its action button.
+const hoverKey = ref('');
 
 // --- commit ---
 const message = ref('');
@@ -284,29 +277,36 @@ function clearCmd() {
           >add selected{{ selected.size ? ` (${selected.size})` : '' }}</button>
           <button type="button" class="gs-btn" :disabled="diff.staging" @click="stageAll">add all</button>
         </header>
-        <ul class="gs-list">
-          <li v-for="e in changes" :key="'c' + e.status + e.path" class="gs-row">
-            <input
-              type="checkbox"
-              class="gs-row-check"
-              :checked="selected.has(e.path)"
-              :aria-label="`Select ${e.path}`"
-              @change="toggle(e.path)"
-            />
-            <span class="gs-badge" :class="badgeClass(e.status)" :title="statusLabel(e.status)" :aria-label="statusLabel(e.status)">{{ badge(e.status) }}</span>
-            <button type="button" class="gs-path mono" :title="e.status === '?' ? `Preview ${e.path}` : `Show diff of ${e.path}`" @click="openEntry(e, false)">{{ e.path }}</button>
-            <button
-              v-if="canDiscard(e)"
-              type="button"
-              class="gs-mini"
-              :aria-label="`Discard unstaged changes in ${e.path}`"
-              title="Discard unstaged changes"
-              :disabled="busy"
-              @click="discardOne(e.path)"
-            >×</button>
-            <button type="button" class="gs-mini" :aria-label="`Add ${e.path}`" title="git add" :disabled="diff.staging" @click="stageOne(e.path)">+</button>
-          </li>
-        </ul>
+        <div class="gs-body">
+          <ul class="gs-list">
+            <li
+              v-for="e in changes" :key="'c' + e.status + e.path" class="gs-row"
+              :class="{ 'gs-hover': hoverKey === 'c' + e.status + e.path }"
+              @mouseenter="hoverKey = 'c' + e.status + e.path" @mouseleave="hoverKey = ''"
+              @focusin="hoverKey = 'c' + e.status + e.path" @focusout="hoverKey = ''"
+            >
+              <input
+                type="checkbox"
+                class="gs-row-check"
+                :checked="selected.has(e.path)"
+                :aria-label="`Select ${e.path}`"
+                @change="toggle(e.path)"
+              />
+              <span class="gs-badge" :class="badgeClass(e.status)" :title="statusLabel(e.status)" :aria-label="statusLabel(e.status)">{{ badge(e.status) }}</span>
+              <button type="button" class="gs-path mono" :title="e.status === '?' ? `Preview ${e.path}` : `Show diff of ${e.path}`" @click="openEntry(e, false)">{{ e.path }}</button>
+            </li>
+          </ul>
+          <ul class="gs-btns">
+            <li
+              v-for="e in changes" :key="'cb' + e.status + e.path" class="gs-btnrow"
+              :class="{ 'gs-hover': hoverKey === 'c' + e.status + e.path }"
+              @mouseenter="hoverKey = 'c' + e.status + e.path" @mouseleave="hoverKey = ''"
+              @focusin="hoverKey = 'c' + e.status + e.path" @focusout="hoverKey = ''"
+            >
+              <button type="button" class="gs-mini" :aria-label="`Add ${e.path}`" title="git add" :disabled="diff.staging" @click="stageOne(e.path)">+</button>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <!-- staged -->
@@ -315,15 +315,31 @@ function clearCmd() {
           <span>staged <span class="gs-count">{{ staged.length }}</span></span>
           <button type="button" class="gs-btn" :disabled="diff.staging" @click="unstageAll">unstage all</button>
         </header>
-        <ul class="gs-list">
-          <li v-for="e in staged" :key="'s' + e.status + e.path" class="gs-row">
-            <span class="gs-badge" :class="badgeClass(e.status)" :title="statusLabel(e.status)" :aria-label="statusLabel(e.status)">{{ badge(e.status) }}</span>
-            <button type="button" class="gs-path mono" :title="`Show staged diff of ${e.path}`" @click="openEntry(e, true)">
-              {{ e.path }}<span v-if="e.orig" class="gs-dim"> ← {{ e.orig }}</span>
-            </button>
-            <button type="button" class="gs-mini" :aria-label="`Unstage ${e.path}`" title="unstage" :disabled="diff.staging" @click="unstageOne(e.path)">−</button>
-          </li>
-        </ul>
+        <div class="gs-body">
+          <ul class="gs-list">
+            <li
+              v-for="e in staged" :key="'s' + e.status + e.path" class="gs-row"
+              :class="{ 'gs-hover': hoverKey === 's' + e.status + e.path }"
+              @mouseenter="hoverKey = 's' + e.status + e.path" @mouseleave="hoverKey = ''"
+              @focusin="hoverKey = 's' + e.status + e.path" @focusout="hoverKey = ''"
+            >
+              <span class="gs-badge" :class="badgeClass(e.status)" :title="statusLabel(e.status)" :aria-label="statusLabel(e.status)">{{ badge(e.status) }}</span>
+              <button type="button" class="gs-path mono" :title="`Show staged diff of ${e.path}`" @click="openEntry(e, true)">
+                {{ e.path }}<span v-if="e.orig" class="gs-dim"> ← {{ e.orig }}</span>
+              </button>
+            </li>
+          </ul>
+          <ul class="gs-btns">
+            <li
+              v-for="e in staged" :key="'sb' + e.status + e.path" class="gs-btnrow"
+              :class="{ 'gs-hover': hoverKey === 's' + e.status + e.path }"
+              @mouseenter="hoverKey = 's' + e.status + e.path" @mouseleave="hoverKey = ''"
+              @focusin="hoverKey = 's' + e.status + e.path" @focusout="hoverKey = ''"
+            >
+              <button type="button" class="gs-mini" :aria-label="`Unstage ${e.path}`" title="unstage" :disabled="diff.staging" @click="unstageOne(e.path)">−</button>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <p v-if="st.truncated" class="gs-warn">The list is cut at 2000 entries.</p>
@@ -412,9 +428,36 @@ function clearCmd() {
 .gs-sec-head > :first-child { flex: 1; min-width: 0; }
 .gs-check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .gs-count { color: var(--text-dim); }
-.gs-list { list-style: none; margin: 0; padding: 4px 0; max-height: 40vh; overflow-y: auto; }
-.gs-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
-.gs-row:hover { background: var(--surface-2); }
+/* Long paths scroll the whole file list horizontally: rows grow to
+   max-content inside .gs-list, which scrolls on x. Per-row action buttons
+   live in the parallel .gs-btns column — outside the scroll region, so
+   they stay pinned at the right edge no matter how far the list scrolls.
+   Vertical scrolling is shared via the wrapping .gs-body. */
+.gs-body {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  max-height: 40vh; overflow-y: auto;
+}
+.gs-list { list-style: none; margin: 0; padding: 4px 0; overflow-x: auto; }
+.gs-row {
+  display: flex; align-items: center; gap: 8px;
+  min-width: max-content; height: 26px; box-sizing: border-box; padding: 0 6px 0 10px;
+}
+/* Zebra + synchronized hover link a path row with its action button
+   across the scroll gap — hovering either side lights both. */
+.gs-list li:nth-child(even), .gs-btns li:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+}
+.gs-row.gs-hover, .gs-btnrow.gs-hover { background: var(--surface-2); }
+.gs-btns {
+  list-style: none; margin: 0; padding: 4px 0;
+  border-left: 1px solid var(--border); background: var(--surface);
+}
+/* Horizontal padding lives on the row, not the column, so the zebra/hover
+   background spans the full column width instead of stopping at the padding. */
+.gs-btnrow {
+  display: flex; align-items: center; gap: 8px; height: 26px; box-sizing: border-box;
+  padding: 0 10px 0 6px;
+}
 .gs-row-check { flex-shrink: 0; }
 .gs-badge {
   flex-shrink: 0; width: 18px; text-align: center; font-family: var(--font-mono); font-size: var(--text-2xs); font-weight: 700;
@@ -425,9 +468,11 @@ function clearCmd() {
 .gs-badge.s-D { color: var(--red); }
 .gs-badge.s-R, .gs-badge.s-C { color: var(--blue); }
 .gs-badge.s-conflict { color: #fff; background: var(--red); }
+/* The full path contributes to the row's max-content width so the list
+   scrolls horizontally — no ellipsis truncation. */
 .gs-path {
   flex: 1; min-width: 0; text-align: left; background: none; border: none; padding: 2px 0;
-  font-size: var(--text-xs); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+  font-size: var(--text-xs); color: var(--text); white-space: nowrap; cursor: pointer;
 }
 .gs-path:hover { color: var(--blue); }
 .gs-mini {

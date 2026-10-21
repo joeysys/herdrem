@@ -52,6 +52,23 @@ describe('DiffPreview status tab', () => {
     expect(last()).toMatchObject({ type: 'git_status' })
   })
 
+  it('the header returns to status after a file was opened from the list', async () => {
+    useConnectionStore().setHello('t', ['git-diff', 'git-commit'])
+    const d = useDiffStore()
+    d.openDiff('/repo', 'local', 'status')
+    const w = mount(DiffPreview)
+    expect(w.get('button[aria-label="Close diff preview"]').text()).toBe('×')
+    d.showFileDiff('a.go', false)
+    await nextTick()
+    const back = w.get('button[aria-label="Back to status"]')
+    expect(back.text()).toBe('‹')
+    await back.trigger('click')
+    expect(d.open).toBe(true)
+    expect(d.state?.mode).toBe('status')
+    expect(w.get('button[aria-label="Close diff preview"]').text()).toBe('×')
+    expect(w.find('.gs').exists()).toBe(true)
+  })
+
   it('opening a file from status scrolls its section into view and highlights it', async () => {
     useConnectionStore().setHello('t', ['git-diff', 'git-commit'])
     const d = useDiffStore()

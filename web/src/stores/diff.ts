@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { ws } from '../api/ws';
 import { uid } from '../utils/id';
 import { safeStorage } from '../utils/storage';
@@ -96,6 +96,9 @@ export const useDiffStore = defineStore('diff', () => {
   const syncReqId = ref('');
   /** file to scroll to once a diff loads (opened from the status list) */
   const focusPath = ref('');
+  /** The current diff was opened by picking a file on the status list.
+   *  Back returns to that list instead of closing the panel. */
+  const openedFromStatus = ref(false);
   const statusReqId = ref('');
   const commitReqId = ref('');
   // The last commit result shown on this page; it survives closing the panel
@@ -138,6 +141,7 @@ export const useDiffStore = defineStore('diff', () => {
       loadingCommits: false,
     };
     open.value = true;
+    openedFromStatus.value = false;
     resetStatus();
     if (mode === 'status') {
       state.value.loading = false;
@@ -165,6 +169,7 @@ export const useDiffStore = defineStore('diff', () => {
     diffReqId.value = '';
     logReqId.value = '';
     logViewReqId.value = '';
+    openedFromStatus.value = false;
     resetStatus();
   }
 
@@ -265,6 +270,8 @@ export const useDiffStore = defineStore('diff', () => {
 
   function setMode(mode: DiffViewMode) {
     if (!state.value) return;
+    // Choosing status (the tab, or back) ends the file-diff return path.
+    if (mode === 'status') openedFromStatus.value = false;
     if (state.value.mode === mode && (mode !== 'commit' || state.value.commit) && (mode !== 'range' || (state.value.commit && state.value.commit2))) return;
     if (mode === 'status') {
       state.value = { ...state.value, mode, loading: false, error: undefined };
@@ -665,18 +672,33 @@ export const useDiffStore = defineStore('diff', () => {
     requestStatus();
   }
 
+  /** True when back should return to the status list instead of closing. */
+  const canBack = computed(() => openedFromStatus.value && !!state.value && state.value.mode !== 'status');
+
+  /** Return to the status list after a file was opened from it. */
+  function back(): boolean {
+    if (!canBack.value) return false;
+    openedFromStatus.value = false;
+    focusPath.value = '';
+    setMode('status');
+    return true;
+  }
+
   /** Jump from the status list to a file's diff (staged → cached view). */
   function showFileDiff(path: string, staged: boolean) {
     if (!state.value) return;
+    const fromStatus = state.value.mode === 'status';
     focusPath.value = path;
     const mode = staged ? 'cached' : 'unstaged';
     // The point is the file's patch, so leave the name-status view.
     if (nameStatus.value && state.value.mode === mode) {
       setNameStatus(false);
-      return;
+    } else {
+      nameStatus.value = false;
+      setMode(mode);
     }
-    nameStatus.value = false;
-    setMode(mode);
+    // Set after setMode: switching to status clears the flag.
+    if (fromStatus) openedFromStatus.value = true;
   }
 
   function clearFocus() {
@@ -734,6 +756,8 @@ export const useDiffStore = defineStore('diff', () => {
     setSyncResult,
     setSyncError,
     showFileDiff,
+    canBack,
+    back,
     clearFocus,
   };
 });

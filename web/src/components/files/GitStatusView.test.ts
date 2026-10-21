@@ -125,10 +125,12 @@ describe('GitStatusView', () => {
     await w.findAll('.gs-path').find((p) => p.text() === 'new.txt')!.trigger('click')
     expect(openPath).toHaveBeenCalledWith('/repo/new.txt', '/repo', 'local', null)
     expect(d.state?.mode).toBe('status')
+    expect(d.canBack).toBe(false)
 
     await w.findAll('.gs-path').find((p) => p.text() === 'src/a.go')!.trigger('click')
     expect(d.state?.mode).toBe('unstaged')
     expect(d.focusPath).toBe('src/a.go')
+    expect(d.canBack).toBe(true)
   })
 
   it('opens the staged diff from the staged list', async () => {
@@ -279,20 +281,12 @@ describe('GitStatusView', () => {
     expect(last()).toMatchObject({ type: 'git_sync', action: 'fetch' })
   })
 
-  it('discards one unstaged file after confirmation, and not new files', async () => {
+  it('offers no discard affordance — the status UI never rewrites file contents', async () => {
     useConnectionStore().setHello('t', ['git-sync'])
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const w = setup(BASIC)
-    expect(w.find('[aria-label="Discard unstaged changes in src/a.go"]').exists()).toBe(true)
-    expect(w.find('[aria-label="Discard unstaged changes in old.txt"]').exists()).toBe(true)
-    expect(w.find('[aria-label="Discard unstaged changes in new.txt"]').exists()).toBe(false)
-    await w.get('[aria-label="Discard unstaged changes in src/a.go"]').trigger('click')
-    expect(sent().some((m) => m.type === 'git_discard')).toBe(false)
-
-    confirm.mockReturnValue(true)
-    await w.get('[aria-label="Discard unstaged changes in src/a.go"]').trigger('click')
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('src/a.go'))
-    expect(last()).toMatchObject({ type: 'git_discard', path: 'src/a.go', cwd: '/repo' })
+    expect(w.find('[aria-label^="Discard unstaged changes"]').exists()).toBe(false)
+    expect(w.findAll('.gs-mini').every((b) => b.attributes('aria-label')?.startsWith('Discard') !== true)).toBe(true)
+    w.unmount()
   })
 
   it('shows a status error', () => {
