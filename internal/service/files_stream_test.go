@@ -33,8 +33,11 @@ func withStreamCap(t *testing.T, cap int64) {
 // blocked on a full stdout pipe and this test hangs instead of failing fast.
 func TestServeRemoteStreamCapDoesNotDeadlock(t *testing.T) {
 	withStreamCap(t, 64<<10)
+	// No `sh -c` wrapper: some shells fork instead of exec, leaving `yes`
+	// orphaned after ctx cancel kills the shell — it then holds the stderr
+	// pipe open and Wait() blocks forever. Run the producer directly.
 	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string, scopeDir string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", "yes hello")
+		return exec.CommandContext(ctx, "yes", "hello")
 	})
 
 	fs := NewFileService(func(string) []string { return []string{"/"} }, nil)
@@ -62,7 +65,7 @@ func TestServeRemoteStreamCapDoesNotDeadlock(t *testing.T) {
 func TestServeRemoteStreamAbortDoesNotDeadlock(t *testing.T) {
 	withStreamCap(t, 1<<30) // effectively uncapped; the abort path is what matters
 	withRemoteCat(t, func(ctx context.Context, host, path string, roots []string, scopeDir string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", "yes hello")
+		return exec.CommandContext(ctx, "yes", "hello")
 	})
 
 	fs := NewFileService(func(string) []string { return []string{"/"} }, nil)
