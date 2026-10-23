@@ -172,18 +172,30 @@ func (s *Service) handleGitStage(ctx context.Context, conn *websocket.Conn, data
 	s.commitMu.Unlock()
 
 	go func() {
-		defer func() {
+		// Release the repo before replying, like finishCommit/finishSync: a
+		// client that answers instantly must not see "already running". The
+		// deferred release is only a safety net for forgotten paths — and must
+		// not run twice: after an early release another op may occupy the slot,
+		// so a second delete would clear the new owner's lock.
+		released := false
+		release := func() {
 			s.commitMu.Lock()
-			delete(s.staging, key)
+			if !released {
+				delete(s.staging, key)
+				released = true
+			}
 			s.commitMu.Unlock()
-		}()
+		}
+		defer release()
 		// Detached from the connection: a phone going to sleep mid-way must not
 		// kill git half-way through. The reply is simply dropped if it left.
 		ctx := context.WithoutCancel(ctx)
 		if err := s.files.GitStage(ctx, msg.Host, msg.Cwd, msg.Paths, msg.All, msg.Unstage); err != nil {
+			release()
 			s.sendErrorKeyReq(ctx, conn, "git_stage", err.Error(), gitErrCode(err), msg.ReqID)
 			return
 		}
+		release()
 		s.sendGitStatus(ctx, conn, msg.Host, msg.Cwd, msg.ReqID, "git_stage")
 	}()
 }
@@ -335,16 +347,28 @@ func (s *Service) handleGitDiscard(ctx context.Context, conn *websocket.Conn, da
 	s.commitMu.Unlock()
 
 	go func() {
-		defer func() {
+		// Release the repo before replying, like finishCommit/finishSync: a
+		// client that answers instantly must not see "already running". The
+		// deferred release is only a safety net for forgotten paths — and must
+		// not run twice: after an early release another op may occupy the slot,
+		// so a second delete would clear the new owner's lock.
+		released := false
+		release := func() {
 			s.commitMu.Lock()
-			delete(s.staging, key)
+			if !released {
+				delete(s.staging, key)
+				released = true
+			}
 			s.commitMu.Unlock()
-		}()
+		}
+		defer release()
 		ctx := context.WithoutCancel(ctx)
 		if err := s.files.GitDiscard(ctx, msg.Host, msg.Cwd, msg.Path); err != nil {
+			release()
 			s.sendErrorKeyReq(ctx, conn, "git_discard", err.Error(), gitErrCode(err), msg.ReqID)
 			return
 		}
+		release()
 		s.sendGitStatus(ctx, conn, msg.Host, msg.Cwd, msg.ReqID, "git_discard")
 	}()
 }
