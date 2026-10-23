@@ -1095,7 +1095,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	hello := protocol.Hello{
 		Type:          "hello",
 		V:             protocol.Version,
-		ServerVersion: "herdrem-m3",
+		ServerVersion: "0.1.0",
 		Features: []string{
 			"agents", "terminal", "todo", "blocked", "multi-host",
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
