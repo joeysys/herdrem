@@ -13,25 +13,21 @@ A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bri
 - **Web PWA** — approve blocked agents with one tap; works as a mobile PWA and a desktop web app
 - **Live terminal** — stream agent output, send input over WebSocket
 - **File browser** — navigate, preview, edit, download and upload files remotely (upload: pick or drag files into the open folder, up to 100 MB each; an existing file is only replaced when you choose to)
-- **Input history** — every shell command and agent prompt sent through the app is remembered on the relay (`history.json` in the data directory), so it follows you across devices. Search it (`⏱`, or Ctrl/Cmd+R when installed as an app — a browser tab keeps it as reload) by pane, workspace (default) or the whole relay, and reuse an entry in any pane; suggestions appear as you type. Text that looks like a password or token is never saved, and a line starting with a space is skipped. Clear it from Settings.
-- **Search** — find text in a pane's output or in a previewed file (`⌕` or Ctrl/Cmd+F)
-- **Git diff & log** — the diff panel shows unstaged / staged changes or one commit (`git show`), as a patch or a `--name-status` file list; its *log* tab shows `git log` with *oneline*, *graph* and *all* switches (remembered per device), and each hash opens that commit
-- **Git status, stage & commit** — `±` on a terminal (or the *status* tab of the diff panel) lists the pane folder's changes; tick files (or all) to `git add`, unstage, discard one file's unstaged changes, open a file's diff, and commit with a message — or set a *commit command* (shared via relay prefs) that the relay runs with `sh` in the repo folder instead (no input, 5-minute limit, output shown). Ahead/behind of the upstream can fetch, fast-forward pull, or push the current branch to that upstream (never a named remote, never forced)
+- **Input history** — every shell command and agent prompt sent through the app is remembered on the relay (`history.json` in the data directory), so it follows you across devices. Open it with the History button, or Ctrl/Cmd+R when installed as an app (a browser tab keeps that chord as reload). Search by pane, workspace (default) or the whole relay, and reuse an entry in any pane; suggestions appear as you type. Text that looks like a password or token is never saved, and a line starting with a space is skipped. Starred entries stay when history is cleared. Clear it from the history panel or from Settings.
+- **Search** — find text in a pane's output or in a previewed file with the Search button, or Ctrl/Cmd+F when installed as an app (a browser tab keeps that chord as the browser's own find)
+- **Git diff & log** — the diff panel tabs are *status*, *unstaged*, *cached* (staged changes, `git diff --cached`), *commit* (`git show`), *range* (two commits) and *log*. A diff is a *patch* or a *name-status* file list. *log* shows `git log` with *oneline*, *graph* and *all* switches (remembered per device), and each hash opens that commit
+- **Git status, stage & commit** — the terminal's Git diff button opens that panel on *status* when the relay supports commits, and on *unstaged* otherwise. An agent card's menu has *git diff* and *git status* as well. On *status*, tick files (or all) to `git add`, unstage, discard one file's unstaged changes, open a file's diff, and commit with a message — or set a *commit command* (shared via relay prefs) that the relay runs with `sh` in the repo folder instead (no input, 5-minute limit, output shown). Ahead/behind of the upstream can fetch, fast-forward pull, or push the current branch to that upstream (never a named remote, never forced)
 - **Cloudflare tunnels** — one-flag public exposure with token/basic-auth/PIN gates
 - **HTML preview** — sandboxed iframe preview of HTML files with CSP hardening
 - **Token auth** — when `HERDREM_TOKEN` is unset (dev), only a same-origin page on `localhost` / `127.0.0.1` / `::1` may connect without a token. Once the token is set, **every** connection needs it, including localhost.
-- **15 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern-dark
+- **16 themes** — default, modern, herdr, e-ink, sand, clay, dune, nord, rose, dracula, kanagawa, midnight, dark, light, modern dark, modern light
 
 ## Screenshots
 
-<!-- Screenshots pending — reserved slots:
 <p align="center">
-  <img src="assets/screenshots/desktop.png" alt="Desktop web" width="720">
+  <img src="assets/screenshots/desktop.jpg" alt="Desktop: agent list beside a live terminal" width="384">
+  <img src="assets/screenshots/mobile-strip.jpg" alt="Phone: agent list, terminal, and file preview" width="438">
 </p>
-<p align="center">
-  <img src="assets/screenshots/mobile.png" alt="Mobile PWA" width="300">
-</p>
--->
 
 ## Quick Start
 
@@ -130,8 +126,10 @@ HERDREM_PORT=9000 ./herdrem serve --web     # env vars still override the file
   binds and `--tunnel` refuse to start without one; generate it with
   `openssl rand -hex 16` (short tokens trigger a startup warning).
 
-The PWA prompts for the token on first connect — enter it in the login field
-or relay settings; `?token=` URLs are not accepted. The token is stored
+The token page appears only when the token is missing or the server rejects
+it. A timeout or an unreachable relay stays on the reconnect path and does
+not ask for a token. Enter a token in the login field or relay settings;
+`?token=` URLs are not accepted. The token is stored
 per-relay in tab `sessionStorage` (never `localStorage`): it survives reloads
 but dies with the tab, and a 401 or deleting/changing the relay drops it.
 Same-origin login also mints an HttpOnly session cookie (not the token) with a
