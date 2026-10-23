@@ -8,7 +8,7 @@ import { useTodoStore } from '../stores/todo'
 import { usePreviewsStore } from '../stores/preview'
 import { useFilesStore } from '../stores/files'
 import { useDiffStore } from '../stores/diff'
-import { canCookieReconnect, relayNeedsToken, sessionTokenFor } from '../utils/relay'
+import { relayMatchesPageOrigin, relayNeedsToken, sessionTokenFor } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
 
 function canConnect(url: string, token: string): boolean {
@@ -16,7 +16,11 @@ function canConnect(url: string, token: string): boolean {
   // checking only entry.token/args would strand cross-origin relays on the
   // boot splash (their metadata never carries a token on disk).
   if (token || sessionTokenFor(url) || !relayNeedsToken(url)) return true
-  return canCookieReconnect(url)
+  // Same-origin can dial with the session cookie. Whether a token is
+  // missing or rejected is the server's 401, decided after the attempt.
+  // A network failure must not be turned into a token prompt.
+  if (relayMatchesPageOrigin(url)) return true
+  return false
 }
 
 export function useRelayConnection() {
@@ -69,8 +73,9 @@ export function useRelayConnection() {
   /**
    * initial boot: connect to the current relay if
    * one is set, otherwise default to same-origin /ws.
-   * Tokens stay in memory. Same-origin reload reconnects via the HttpOnly
-   * session cookie (no query token) when a prior login left a session hint.
+   * Tokens stay in memory and sessionStorage. A same-origin reload dials
+   * without a query token and lets the HttpOnly session cookie authenticate.
+   * A 401, not a local flag, is what opens the token page.
    */
   function boot(token = '') {
     safeStorage.removeItem('herdrem_token')

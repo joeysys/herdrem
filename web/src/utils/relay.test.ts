@@ -1,10 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
-  canCookieReconnect,
-  clearSessionCookieHint,
   extractRelayCredentials,
   isLocalRelayHost,
-  markSessionCookieHint,
   normalizeRelayUrl,
   relayFileUrl,
   relayHttpBase,
@@ -62,24 +59,10 @@ describe('relayNeedsToken', () => {
   })
 })
 
-describe('session cookie reconnect hint', () => {
-  beforeEach(() => {
-    localStorage.clear()
-    clearSessionCookieHint()
-  })
-
+describe('relayMatchesPageOrigin', () => {
   it('matches the page origin after mapping ws to http', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     expect(relayMatchesPageOrigin(`${proto}//${location.host}`)).toBe(true)
     expect(relayMatchesPageOrigin('ws://192.168.1.10:8766')).toBe(false)
-  })
-
-  it('allows cookie reconnect only on the page origin after a minted hint', () => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const pageRelay = `${proto}//${location.host}`
-    expect(canCookieReconnect(pageRelay)).toBe(false)
-    markSessionCookieHint()
-    expect(canCookieReconnect(pageRelay)).toBe(true)
-    expect(canCookieReconnect('ws://192.168.1.10:8766')).toBe(false)
   })
 })

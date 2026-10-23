@@ -5,7 +5,7 @@ import { useTodoStore } from './todo';
 import { useRelaysStore } from './relays';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
-import { markSessionCookieHint, clearSessionCookieHint, extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../utils/relay';
+import { extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
   const status = ref<'disconnected' | 'connecting' | 'connected'>('disconnected');
@@ -68,23 +68,22 @@ export const useConnectionStore = defineStore('connection', () => {
       headers: { Authorization: `Bearer ${token.value}` },
     }).then((res) => {
       if (seq !== connectSeq) return;
-      if (res.ok || res.status === 204) markSessionCookieHint();
       // A 401 means the token itself was rejected — fail fast to the auth
       // prompt instead of letting the WS retry loop cycle under the splash.
-      else if (res.status === 401 || res.status === 429) failBootToAuth(seq, res.status === 401);
+      // 2xx only sets the cookie; nothing local needs to record that.
+      if (res.status === 401 || res.status === 429) failBootToAuth(seq, res.status === 401);
     }).catch(() => {
       /* ignore mint failures; the WS subprotocol still authenticates */
     });
   }
 
   // failBootToAuth converts a same-origin 401 during connect into the token
-  // prompt: drop the dead-session hint, flag the boot as timed out (App.vue's
-  // watcher re-probes /session-auth for the local-relay case), and stop the
-  // WS retry loop — retrying a rejected credential only flickers the splash.
+  // prompt: flag the boot as timed out (App.vue's watcher re-probes
+  // /session-auth for the local-relay case) and stop the WS retry loop —
+  // retrying a rejected credential only flickers the splash.
   // On first boot, booted stays false while that re-probe lands.
   function failBootToAuth(seq: number, invalidToken: boolean) {
     if (seq !== connectSeq) return;
-    clearSessionCookieHint();
     // A rejected token must not be replayed on the next reload.
     if (invalidToken) {
       useRelaysStore().forgetToken(url.value);
@@ -121,12 +120,9 @@ export const useConnectionStore = defineStore('connection', () => {
   function slideSession() {
     const httpBase = sessionHttpBase();
     if (!httpBase || status.value !== 'connected') return;
-    void fetch(`${httpBase}/session-auth`, { credentials: 'include' }).then((res) => {
-      if (res.ok || res.status === 204) markSessionCookieHint();
-      // A dead session mid-connection only matters for the NEXT reload —
-      // the live WS stays open, so drop the stale hint without kicking.
-      else if (res.status === 401) clearSessionCookieHint();
-    }).catch(() => {
+    // A 2xx rolls the cookie. A 401 only matters on the next reload, which
+    // probes /session-auth itself. The live WS stays open either way.
+    void fetch(`${httpBase}/session-auth`, { credentials: 'include' }).catch(() => {
       /* retry on the next interval, or the next connect */
     });
   }
@@ -150,9 +146,7 @@ export const useConnectionStore = defineStore('connection', () => {
     const httpBase = typeof window === 'undefined' ? null : sessionHttpBase();
     if (!httpBase) return Promise.resolve();
     return fetch(`${httpBase}/session-logout`, { method: 'POST', credentials: 'include' })
-      .then((res) => {
-        if (res.ok || res.status === 204) clearSessionCookieHint();
-      })
+      .then(() => undefined)
       .catch(() => {
         /* ignore revoke failures; the new session still mints */
       });
@@ -219,9 +213,8 @@ export const useConnectionStore = defineStore('connection', () => {
       bootTimer = null;
       booted.value = true;
       bootTimedOut.value = true;
-      // Cookieless dial failed to hello: the session cookie is missing or
-      // stale, so the next reload should prompt instead of retrying blindly.
-      if (!token.value) clearSessionCookieHint();
+      // No hello yet is not an auth verdict. A dead session is a 401 from
+      // /session-auth; a timeout is often just the network.
     }, 5000);
     ws.connect(url.value, token.value);
     unsubStatus = ws.onStatus((s) => {

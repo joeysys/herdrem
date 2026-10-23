@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { relTime, useAgentsStore, useConnectionStore } from './connection'
 import { useTodoStore } from './todo'
 import { useRelaysStore } from './relays'
-import { clearSessionCookieHint, markSessionCookieHint, sessionTokenFor } from '../utils/relay'
+import { sessionTokenFor } from '../utils/relay'
 import { ws } from '../api/ws'
 
 vi.mock('../api/ws', () => ({
@@ -22,7 +22,6 @@ beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
   sessionStorage.clear()
-  clearSessionCookieHint()
 })
 
 describe('useAgentsStore', () => {
@@ -170,7 +169,7 @@ describe('useConnectionStore token storage', () => {
     expect(localStorage.getItem('herdrem_url')).not.toContain('query-secret')
   })
 
-  it('marks a session cookie hint after a same-origin mint', async () => {
+  it('mints a session cookie after a same-origin connect with a token', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 204 } as Response)
     const conn = useConnectionStore()
     conn.connect(`ws://${location.host}`, 'lan-token')
@@ -185,7 +184,7 @@ describe('useConnectionStore token storage', () => {
     expect(urls[1]).not.toContain('token=')
     const mintOpts = fetchMock.mock.calls[1][1] as RequestInit
     expect((mintOpts.headers as Record<string, string>).Authorization).toBe('Bearer lan-token')
-    expect(localStorage.getItem('herdrem_session')).toBe('1')
+    expect(localStorage.getItem('herdrem_session')).toBeNull()
     fetchMock.mockRestore()
   })
 })
@@ -219,28 +218,6 @@ describe('useConnectionStore boot timeout', () => {
     vi.useRealTimers()
   })
 
-  it('clears the session cookie hint after a timed-out cookieless boot', () => {
-    vi.useFakeTimers()
-    markSessionCookieHint()
-    const conn = useConnectionStore()
-    conn.connect('ws://192.168.1.10:8766', '')
-    vi.advanceTimersByTime(5000)
-    expect(conn.bootTimedOut).toBe(true)
-    expect(localStorage.getItem('herdrem_session')).toBeNull()
-    vi.useRealTimers()
-  })
-
-  it('keeps the session cookie hint after a timed-out boot that had a token', () => {
-    vi.useFakeTimers()
-    markSessionCookieHint()
-    const conn = useConnectionStore()
-    conn.connect('ws://192.168.1.10:8766', 'saved-token')
-    vi.advanceTimersByTime(5000)
-    expect(conn.bootTimedOut).toBe(true)
-    expect(localStorage.getItem('herdrem_session')).toBe('1')
-    vi.useRealTimers()
-  })
-
   it('clears the boot timer when hello arrives', () => {
     vi.useFakeTimers()
     const conn = useConnectionStore()
@@ -256,7 +233,6 @@ describe('useConnectionStore boot timeout', () => {
 
 describe('useConnectionStore session probe', () => {
   it('fails fast to auth when a cookieless same-origin connect meets a dead session', async () => {
-    markSessionCookieHint()
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 401 } as Response)
     const conn = useConnectionStore()
     conn.connect(`ws://${location.host}`)
@@ -266,7 +242,6 @@ describe('useConnectionStore session probe', () => {
     expect(urls[0]).toContain('/session-auth')
     // No Bearer header — the probe verifies the HttpOnly session cookie.
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toBeUndefined()
-    expect(localStorage.getItem('herdrem_session')).toBeNull()
     expect(conn.bootTimedOut).toBe(true)
     // Splash stays up while App.vue's bootTimedOut watcher re-probes.
     expect(conn.booted).toBe(false)
@@ -274,13 +249,11 @@ describe('useConnectionStore session probe', () => {
   })
 
   it('leaves the connect alone when the session cookie is still valid', async () => {
-    markSessionCookieHint()
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ status: 204 } as Response)
     const conn = useConnectionStore()
     conn.connect(`ws://${location.host}`)
     await new Promise((r) => setTimeout(r, 0))
     expect(conn.bootTimedOut).toBe(false)
-    expect(localStorage.getItem('herdrem_session')).toBe('1')
     fetchMock.mockRestore()
   })
 

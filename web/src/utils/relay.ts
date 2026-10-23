@@ -1,5 +1,4 @@
 // relay.ts — relay URL normalization and access/session helpers.
-import { safeStorage } from './storage'
 
 /** isLocalRelayHost matches the only host names exempt from relay tokens. */
 export function isLocalRelayHost(hostname: string): boolean {
@@ -67,26 +66,6 @@ export function relayMatchesPageOrigin(raw: string): boolean {
   } catch {
     return false
   }
-}
-
-const SESSION_HINT_KEY = 'herdrem_session'
-
-/** hasSessionCookieHint is a non-secret flag that a same-origin HttpOnly cookie was minted. */
-export function hasSessionCookieHint(): boolean {
-  return safeStorage.getItem(SESSION_HINT_KEY) === '1'
-}
-
-export function markSessionCookieHint(): void {
-  safeStorage.setItem(SESSION_HINT_KEY, '1')
-}
-
-export function clearSessionCookieHint(): void {
-  safeStorage.removeItem(SESSION_HINT_KEY)
-}
-
-/** canCookieReconnect allows a cookieless WS dial on this origin after a prior login. */
-export function canCookieReconnect(raw: string): boolean {
-  return relayMatchesPageOrigin(raw) && hasSessionCookieHint()
 }
 
 // Session tokens: relay tokens kept in sessionStorage keyed by relay URL.

@@ -76,9 +76,8 @@ describe('App boot splash', () => {
   });
 
   it('goes splash → token page when the session cookie is dead', async () => {
-    // Stale same-origin session hint + every /session-auth probe answering
-    // 401: the relay restarted and dropped the in-memory session.
-    localStorage.setItem('herdrem_session', '1');
+    // Every /session-auth probe answers 401: the relay restarted and
+    // dropped the in-memory session.
     fetchMock.mockResolvedValue({ status: 401 } as Response);
     const wrapper = mount(App);
     await flush();
@@ -88,7 +87,6 @@ describe('App boot splash', () => {
     expect(wrapper.find('.app').exists()).toBe(false);
     // The prompt names the relay being authenticated — same-origin here.
     expect(wrapper.find('.relay-auth-url').text()).toContain(location.host);
-    expect(localStorage.getItem('herdrem_session')).toBeNull();
     wrapper.unmount();
   });
 
@@ -120,6 +118,120 @@ describe('App boot splash', () => {
     expect((wrapper.find('#boot-relay-token').element as HTMLInputElement).value).toBe('');
     expect(wrapper.find('.relay-auth-url').text()).toBe(second.url);
     wrapper.unmount();
+  });
+
+  it('does not ask for a token on open before the server rejects one', async () => {
+    vi.stubGlobal('location', {
+      protocol: 'http:',
+      host: '192.168.1.10:8766',
+      hostname: '192.168.1.10',
+      origin: 'http://192.168.1.10:8766',
+      href: 'http://192.168.1.10:8766/',
+    });
+    const relays = useRelaysStore();
+    relays.setCurrent(relays.add('lan', 'ws://192.168.1.10:8766', '').id);
+    const wrapper = mount(App);
+    await flush();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+    expect(wrapper.find('.boot-splash').exists()).toBe(true);
+    expect(ws.connect).toHaveBeenCalledWith('ws://192.168.1.10:8766', '');
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it('asks for a token once the same-origin relay rejects the session', async () => {
+    vi.stubGlobal('location', {
+      protocol: 'http:',
+      host: '192.168.1.10:8766',
+      hostname: '192.168.1.10',
+      origin: 'http://192.168.1.10:8766',
+      href: 'http://192.168.1.10:8766/',
+    });
+    fetchMock.mockResolvedValue({ status: 401 } as Response);
+    const relays = useRelaysStore();
+    relays.setCurrent(relays.add('lan', 'ws://192.168.1.10:8766', '').id);
+    const wrapper = mount(App);
+    await flush();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(true);
+    expect(wrapper.find('.app').exists()).toBe(false);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it('stays off the token page when the relay cannot be reached', async () => {
+    fetchMock.mockRejectedValue(new TypeError('offline'));
+    const relays = useRelaysStore();
+    const saved = relays.add('saved', 'wss://saved.example', 'saved-token');
+    relays.setCurrent(saved.id);
+    const wrapper = mount(App);
+    await flush();
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+
+    const conn = useConnectionStore();
+    conn.bootTimedOut = true;
+    conn.booted = true;
+    await flush();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+    expect(wrapper.find('.app').exists()).toBe(true);
+    expect(ws.disconnect).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('asks again when a cross-origin relay is up but the saved token is rejected', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/healthz')) return Promise.resolve({ status: 0, type: 'opaque' } as Response);
+      return Promise.reject(new TypeError('cors'));
+    });
+    const relays = useRelaysStore();
+    relays.setCurrent(relays.add('remote', 'wss://remote.example', 'wrong-token').id);
+    const wrapper = mount(App);
+    await flush();
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+
+    const conn = useConnectionStore();
+    expect(conn.token).toBe('wrong-token');
+    conn.bootTimedOut = true;
+    conn.booted = true;
+    await flush();
+
+    expect(wrapper.find('.relay-auth-form').exists()).toBe(true);
+    expect(wrapper.find('.app').exists()).toBe(false);
+    expect(ws.disconnect).toHaveBeenCalled();
+    // Reachable-but-rejected is a heuristic. Keep the saved token.
+    expect(conn.token).toBe('wrong-token');
+    expect(JSON.parse(sessionStorage.getItem('herdrem_tokens') || '{}')['wss://remote.example']).toBe('wrong-token');
+    wrapper.unmount();
+  });
+
+  it('shows the app when the post-timeout probe never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const relays = useRelaysStore();
+      relays.setCurrent(relays.add('remote', 'wss://remote.example', 'saved-token').id);
+      const wrapper = mount(App);
+      const conn = useConnectionStore();
+      vi.mocked(ws.disconnect).mockClear();
+      conn.bootTimedOut = true;
+      conn.booted = true;
+      await nextTick();
+
+      expect(wrapper.find('.boot-splash').exists()).toBe(true);
+      expect(wrapper.find('.app').exists()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await nextTick();
+
+      expect(wrapper.find('.app').exists()).toBe(true);
+      expect(wrapper.find('.relay-auth-form').exists()).toBe(false);
+      expect(ws.disconnect).not.toHaveBeenCalled();
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses a token saved in settings without showing the token page', async () => {

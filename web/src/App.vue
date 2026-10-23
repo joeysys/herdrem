@@ -40,7 +40,7 @@ import {
 } from './composables/useShortcuts';
 import { ws } from './api/ws';
 import type { ServerMessage, Pane } from './api/types';
-import { canCookieReconnect, relayHostLabel, relayHttpBase, relayNeedsToken } from './utils/relay';
+import { relayHostLabel, relayHttpBase, relayMatchesPageOrigin, relayNeedsToken, sessionTokenFor } from './utils/relay';
 import { createAutoHideScroll, autoHideStep, AUTO_HIDE } from './utils/autoHideHeader';
 import TermView from './components/term/TermView.vue';
 import AgentIcon from './components/agent/AgentIcon.vue';
@@ -112,42 +112,118 @@ const settingsSection = ref<'shell_cmds' | 'skills' | 'agent_cmds' | null>(null)
 const showRelaySwitch = ref(false);
 const bootToken = ref('');
 const revealBootToken = ref(false);
-// Loopback is no longer an implicit credential when the relay has
-// HERDREM_TOKEN set: a same-origin local relay answers 401 on
-// /session-auth just like a remote one. Probe it once boot times out so the
-// token prompt can appear for local relays too (a down/unreachable relay
-// answers with a fetch error instead and keeps the old "just reconnect"
-// behavior).
+// The token page is only for a credential the server has refused, or one
+// we do not have and cannot try (a cross-origin relay with no token).
+// A timeout, a refused connection, or any other network failure stays on
+// the splash / reconnect path. Cross-origin cannot observe a 401: CORS
+// hides /session-auth, and a rejected WS handshake is just close 1006.
+// After the boot timer, a saved cross-origin token is checked with
+// /healthz in no-cors mode. An answer means the relay is up and the
+// missing hello is treated as a rejected token; a network error leaves
+// the reconnect path alone. That heuristic does not forget the token.
+// The probe itself is capped: a fetch that never settles is unreachable.
+const AUTH_PROBE_MS = 3000;
 const serverNeedsToken = ref(false);
+// Held while the post-timeout probe is in flight so the empty app does
+// not flash before we know whether to ask for a token. The cap below
+// clears it even when fetch never resolves.
+const authProbePending = ref(false);
+let authProbeGen = 0;
+
+function probeStillCurrent(gen: number, targetUrl: string): boolean {
+  return gen === authProbeGen && conn.url === targetUrl && conn.bootTimedOut;
+}
+
+async function relayReachable(targetUrl: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    // no-cors resolves with an opaque response when the relay answers,
+    // including when it sends no CORS headers. A network failure rejects.
+    await fetch(`${relayHttpBase(targetUrl)}/healthz`, {
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 watch(
   () => conn.bootTimedOut,
   async (timedOut) => {
+    const gen = ++authProbeGen;
     serverNeedsToken.value = false;
-    if (!timedOut) return;
+    if (!timedOut) {
+      authProbePending.value = false;
+      return;
+    }
     const targetUrl = conn.url;
+    authProbePending.value = true;
+    const ac = new AbortController();
+    // Release the splash on our own clock. A mock or a blackhole peer can
+    // ignore the abort and leave the fetch pending forever.
+    const cap = setTimeout(() => {
+      ac.abort();
+      if (gen === authProbeGen) authProbePending.value = false;
+    }, AUTH_PROBE_MS);
     try {
-      const res = await fetch(`${relayHttpBase(targetUrl)}/session-auth`, { credentials: 'include' });
-      if (conn.url !== targetUrl || !conn.bootTimedOut) return;
-      serverNeedsToken.value = res.status === 401;
-      // The server actively rejected auth (the relay itself only ever
-      // answers 401; a 429 can still come from a tunnel gate or an edge
-      // proxy in front of it), so the background WS retry loop can only
-      // fail — stop it until the user submits a new token.
-      if (res.status === 401 || res.status === 429) conn.disconnect();
-    } catch {
-      serverNeedsToken.value = false;
+      let authStatus: number | null = null;
+      try {
+        const res = await fetch(`${relayHttpBase(targetUrl)}/session-auth`, {
+          credentials: 'include',
+          signal: ac.signal,
+        });
+        authStatus = res.status;
+      } catch {
+        // Cross-origin /session-auth has no CORS, so a rejection and a
+        // network failure look the same here. healthz separates them.
+        // An abort is a timeout: unreachable, not a rejected token.
+        authStatus = null;
+      }
+      if (ac.signal.aborted || !probeStillCurrent(gen, targetUrl)) return;
+      if (authStatus === 401) {
+        serverNeedsToken.value = true;
+        conn.disconnect();
+        return;
+      }
+      // 429 can come from a tunnel gate or an edge proxy. Stop the retry
+      // loop, but it is not evidence the token itself is missing.
+      if (authStatus === 429) {
+        conn.disconnect();
+        return;
+      }
+      // A definitive 2xx means the credential was accepted, or this relay
+      // has no token. A missing hello is not a rejection.
+      if (authStatus !== null && authStatus >= 200 && authStatus < 300) return;
+      // Same-origin non-2xx is a real HTTP status, not a hidden CORS failure.
+      if (relayMatchesPageOrigin(targetUrl)) return;
+      const hasCredential = Boolean(conn.token || relays.current()?.token || sessionTokenFor(targetUrl));
+      // No token at all is already showBootAuth. Do not invent a rejection.
+      if (!hasCredential) return;
+      if (
+        await relayReachable(targetUrl, ac.signal) &&
+        !ac.signal.aborted &&
+        probeStillCurrent(gen, targetUrl)
+      ) {
+        serverNeedsToken.value = true;
+        conn.disconnect();
+      }
+    } finally {
+      clearTimeout(cap);
+      if (gen === authProbeGen) authProbePending.value = false;
     }
   }
 );
 const showBootAuth = computed(() => {
+  if (conn.status === 'connected') return false;
+  if (serverNeedsToken.value) return true;
   const current = relays.current();
   const targetUrl = current?.url || conn.url;
-  const hasMemoryToken = Boolean(conn.token || current?.token);
-  if (conn.status === 'connected') return false;
-  if (relayNeedsToken(targetUrl)) {
-    return conn.bootTimedOut || (!hasMemoryToken && !canCookieReconnect(targetUrl));
-  }
-  return serverNeedsToken.value;
+  const hasCredential = Boolean(conn.token || current?.token || sessionTokenFor(targetUrl));
+  // Cross-origin has no session cookie to attempt. No token anywhere means
+  // the credential is absent; that decision does not depend on the network.
+  return !hasCredential && relayNeedsToken(targetUrl) && !relayMatchesPageOrigin(targetUrl);
 });
 const ctxPane = ref<Pane | null>(null);
 const ctxOpen = ref(false);
@@ -1046,13 +1122,18 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
-  <!-- Boot splash: shown until the first WS hello arrives. The gate is
-       !booted (not status==='connecting') so the reconnect loop of a rejected
-       or restarting relay keeps the splash instead of oscillating
+  <!-- Boot splash: shown until the first WS hello arrives, and while the
+       post-timeout auth probe is still in flight, so a cross-origin
+       rejection does not flash the empty app. The gate is !booted (not
+       status==='connecting') so the reconnect loop of a rejected or
+       restarting relay keeps the splash instead of oscillating
        splash ↔ empty app on every retry. If hello doesn't arrive within 5s
-       (see connection.ts bootTimer), booted becomes true and the main UI
-       renders so the user can access relay switch and settings. -->
-  <div v-else-if="!conn.booted" class="boot-splash">
+       (see connection.ts bootTimer), booted becomes true. The auth probe
+       that follows is capped (AUTH_PROBE_MS); when that fetch never
+       settles the main UI still renders so the user can access relay
+       switch and settings. A timed-out probe is unreachable: no token
+       page and no disconnect. -->
+  <div v-else-if="!conn.booted || authProbePending" class="boot-splash">
     <div class="boot-splash-inner">
       <img src="/brand-mark.png" alt="" width="64" height="58" aria-hidden="true" />
       <div class="boot-spinner"></div>

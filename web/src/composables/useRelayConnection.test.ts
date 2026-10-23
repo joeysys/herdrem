@@ -10,7 +10,7 @@ import { useFilesStore } from '../stores/files'
 import { useTodoStore } from '../stores/todo'
 import { useTerminalStore } from '../stores/terminal'
 import { ws } from '../api/ws'
-import { clearSessionCookieHint, markSessionCookieHint, saveSessionToken } from '../utils/relay'
+import { saveSessionToken } from '../utils/relay'
 import { safeStorage } from '../utils/storage'
 
 vi.mock('../api/ws', () => ({
@@ -39,7 +39,6 @@ beforeEach(() => {
   safeStorage.removeItem('herdrem_relays')
   safeStorage.removeItem('herdrem_relays_current')
   safeStorage.removeItem('herdrem_url')
-  clearSessionCookieHint()
 })
 
 afterEach(() => {
@@ -181,7 +180,7 @@ describe('useRelayConnection', () => {
     expect(ws.connect).toHaveBeenLastCalledWith('ws://192.168.1.10:8766', 'replacement-token')
   })
 
-  it('boots a page-origin LAN relay without a token when a session hint exists', () => {
+  it('boots a page-origin LAN relay without a token so the server can accept or reject it', () => {
     vi.stubGlobal('location', {
       protocol: 'http:',
       host: '192.168.1.10:8766',
@@ -189,7 +188,6 @@ describe('useRelayConnection', () => {
       origin: 'http://192.168.1.10:8766',
       href: 'http://192.168.1.10:8766/',
     })
-    markSessionCookieHint()
     const relay = seedRelay('LAN', 'ws://192.168.1.10:8766', '')
     useRelaysStore().setCurrent(relay.id)
     const { boot } = useRelayConnection()
@@ -197,24 +195,6 @@ describe('useRelayConnection', () => {
     boot()
 
     expect(ws.connect).toHaveBeenCalledWith('ws://192.168.1.10:8766', '')
-    vi.unstubAllGlobals()
-  })
-
-  it('does not boot a page-origin LAN relay without a token when no session hint exists', () => {
-    vi.stubGlobal('location', {
-      protocol: 'http:',
-      host: '192.168.1.10:8766',
-      hostname: '192.168.1.10',
-      origin: 'http://192.168.1.10:8766',
-      href: 'http://192.168.1.10:8766/',
-    })
-    const relay = seedRelay('LAN', 'ws://192.168.1.10:8766', '')
-    useRelaysStore().setCurrent(relay.id)
-    const { boot } = useRelayConnection()
-
-    boot()
-
-    expect(ws.connect).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
   })
 
