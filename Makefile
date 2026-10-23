@@ -1,4 +1,4 @@
-.PHONY: build web dev run clean
+.PHONY: build web dev run clean check-install
 
 build: web
 	go build -o herdrem ./cmd/herdrem
@@ -15,3 +15,6 @@ run: build
 clean:
 	rm -f herdrem
 	rm -rf webdist/*
+
+check-install:
+	./deploy/check-sync.sh

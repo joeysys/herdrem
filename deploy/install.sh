@@ -13,19 +13,31 @@ log() {
 usage() {
     cat <<'EOF'
 Usage: deploy/install.sh [--source | --binary] [--dry-run] [--no-linger]
+       curl -fsSL https://github.com/joeysys/herdrem/releases/latest/download/install.sh | bash
 
 Install herdrem for the current user, then enable its systemd user service.
 Herdr must already be installed for this user.
 
-By default, the installer builds when it is located in a complete source tree.
-Otherwise it installs the herdrem binary next to the deploy directory.
+By default, the installer looks for a cloned herdrem tree — next to deploy/,
+in the script's own directory, or in the current directory (which is the only
+anchor available when the script is piped through bash). A usable clone is
+built with `make build`; if there is no clone or the build toolchain is
+incomplete or fails, the installer downloads the latest release binary from
+GitHub and verifies it against checksums.txt. Without a clone, a herdrem
+binary placed next to deploy/ is installed as is instead of downloading; a
+clone's own herdrem binary is never a fallback for the build, and a piped run
+never uses a loose herdrem file (use --binary to name one explicitly).
 
 Environment:
   HERDR_BIN             Herdr command or absolute path (default: herdr)
   HERDREM_INSTALL_DIR   herdrem install directory (default: ~/.local/bin)
+  HERDREM_DOWNLOAD_URL  release asset URL override
+                        (default: latest GitHub release for this OS/arch)
+  HERDREM_CHECKSUMS_URL checksums.txt URL override
+                        (default: checksums.txt next to the asset URL)
 
 Options:
-  --source     require a source tree and build herdrem before install
+  --source     require a clone and build from it (no download fallback)
   --binary     require and install the herdrem binary next to deploy/
   --dry-run    validate and print the plan without changing anything
   --no-linger  do not enable user lingering
@@ -69,38 +81,249 @@ done
 command -v systemctl >/dev/null 2>&1 || die 'systemctl is required'
 linger_user="$(id -un)"
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-root_dir="$(cd -- "$script_dir/.." && pwd -P)"
-service_source="$script_dir/herdrem.service"
-env_source="$script_dir/herdrem.env.example"
-[[ -f "$service_source" ]] || die "missing deployment template $service_source"
-[[ -f "$env_source" ]] || die "missing deployment template $env_source"
-
-has_source_tree() {
-    [[ -f "$root_dir/Makefile" &&
-        -f "$root_dir/go.mod" &&
-        -d "$root_dir/cmd/herdrem" &&
-        -f "$root_dir/web/package.json" ]]
-}
-
-binary_source="$root_dir/herdrem"
-if [[ "$install_mode" == auto ]]; then
-    if has_source_tree; then
-        install_mode=source
-    elif [[ -f "$binary_source" ]]; then
-        install_mode=binary
-    else
-        die "no source tree found and no herdrem binary exists at $binary_source"
-    fi
-elif [[ "$install_mode" == source ]]; then
-    has_source_tree || die "--source requires a complete source tree at $root_dir"
+if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+    piped=0
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 else
-    [[ -f "$binary_source" ]] || die "--binary requires $binary_source"
+    # Piped through bash (curl … | bash): stdin is the script, so there is no
+    # script directory. The current directory is the only anchor, and it only
+    # counts as a clone; loose files found there (a herdrem binary, unit or env
+    # templates) are never trusted, so a piped run downloads and verifies.
+    piped=1
+    script_dir="$PWD"
 fi
 
-if [[ "$install_mode" == source ]]; then
-    command -v make >/dev/null 2>&1 || die 'make is required when building from source'
-    binary_source="$root_dir/herdrem"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/herdrem-install.XXXXXX")"
+cleanup() { rm -rf -- "$work_dir"; }
+trap cleanup EXIT
+
+# Embedded copies of deploy/herdrem.service and deploy/herdrem.env.example.
+# The on-disk files win when the script runs inside a checkout — keep these
+# in sync with them. They exist so a piped run needs no sibling files.
+embedded_service() {
+    cat <<'EMBEDDED_SERVICE'
+[Unit]
+Description=Herdrem — per-user herdr remote relay and web PWA
+Documentation=https://herdr.dev
+After=network-online.target
+
+[Service]
+Type=simple
+# This is a systemd user unit: it runs as the current user and uses that
+# user's Herdr socket/session. The installer renders this ExecStart with the
+# absolute installed Herdrem path. It does not start or supervise `herdr server`.
+ExecStart=%h/.local/bin/herdrem serve --web --require-herdr
+Restart=on-failure
+RestartSec=3
+
+# Load secrets (HERDREM_TOKEN etc.) from an env file.
+# The `-` prefix is omitted so systemd fails to start if the file is missing.
+EnvironmentFile=%h/.config/herdrem/herdrem.env
+
+# Use the same HOME and data directory as the logged-in user. The installer
+# records HERDR_BIN in the env file; without it, the relay resolves `herdr`
+# from PATH at runtime.
+Environment=HOME=%h
+Environment=HERDREM_DATA_DIR=%h/.config/herdrem
+# Fallback PATH; setup stores the actual Herdrem/Herdr directories in the env file.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+
+# Bind to loopback by default. Set HERDREM_BIND=0.0.0.0 in the env file
+# for LAN access (requires HERDREM_TOKEN), or use --tunnel for public access.
+Environment=HERDREM_BIND=127.0.0.1
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target
+EMBEDDED_SERVICE
+}
+embedded_env() {
+    cat <<'EMBEDDED_ENV'
+# ~/.config/herdrem/herdrem.env — copy this file and fill in real values.
+# Loaded by the herdrem binary itself at startup (and, under systemd, also by
+# the user herdrem.service via EnvironmentFile=). Variables already set in the
+# process environment take precedence over values here.
+# systemd fails to start the unit if this file is missing.
+
+# Relay listen port (default 8766)
+# HERDREM_PORT=8766
+
+# Bind address. Defaults to 127.0.0.1 (loopback only).
+# Set to 0.0.0.0 for LAN access — HERDREM_TOKEN is REQUIRED when
+# binding to a non-loopback address (the relay refuses to start otherwise).
+HERDREM_BIND=127.0.0.1
+
+# Shared-secret token for relay auth.
+# REQUIRED for any non-loopback exposure (tunnels, LAN, public).
+# Generate with: openssl rand -hex 16
+# Example: HERDREM_TOKEN=4f8b9e...
+# Note: The relay does not print this token in startup logs.
+# The default HERDREM_BIND=127.0.0.1 allows an empty token only for a
+# same-origin browser opened via localhost/127.0.0.1/::1. If you set a
+# token, localhost needs it too. Uncomment and set for any real use
+# (LAN, public, --tunnel, or locking down loopback).
+# HERDREM_TOKEN=
+
+# Optional Herdr executable name/path. If unset, `herdr` is resolved from
+# PATH. The one-command installer writes the selected absolute path here and
+# also persists its directory so the service keeps working after logout,
+# linger, or reboot.
+# HERDR_BIN=herdr
+
+# Optional persistent PATH override for the user unit. Leave commented when
+# the fallback PATH is enough; otherwise include the directories containing
+# herdrem and herdr, for example:
+# PATH=/path/to/herdrem/bin:/path/to/herdr/bin:/usr/local/bin:/usr/bin:/bin
+
+# Comma-separated SSH remotes (optional, requires passwordless SSH keys)
+# HERDR_REMOTES=user@server1,user@server2
+
+# Pane kinds to broadcast: agent, shell, or both (comma-separated)
+# HERDREM_KINDS=agent,shell
+
+# Data directory for todo/prefs/poller state
+# HERDREM_DATA_DIR=/home/you/.config/herdrem
+
+# Extra ports that may be forwarded via Cloudflare tunnels, on top of
+# the default allowlist 5173,3000,8080,4173. Singles or inclusive ranges.
+# Privileged system ports (<1024) and malformed tokens are ignored.
+# HERDREM_TUNNEL_PORTS=8000-8100,9000-10000,4174
+
+# Allow ungated (direct) quick tunnels. Off by default — anyone with the
+# generated URL would have full access to that localhost port.
+# HERDREM_ALLOW_DIRECT_TUNNEL=1
+
+# Cap on concurrent starting+active port tunnels (default 8).
+# HERDREM_TUNNEL_MAX=8
+EMBEDDED_ENV
+}
+
+service_source="$script_dir/herdrem.service"
+env_source="$script_dir/herdrem.env.example"
+if (( piped )) || [[ ! -f "$service_source" ]]; then
+    service_source="$work_dir/herdrem.service"
+    embedded_service >"$service_source"
+fi
+if (( piped )) || [[ ! -f "$env_source" ]]; then
+    env_source="$work_dir/herdrem.env.example"
+    embedded_env >"$env_source"
+fi
+[[ -s "$service_source" ]] || die "missing deployment template $service_source"
+[[ -s "$env_source" ]] || die "missing deployment template $env_source"
+
+has_source_tree() {
+    local root="$1"
+    [[ -f "$root/Makefile" &&
+        -f "$root/go.mod" &&
+        -d "$root/cmd/herdrem" &&
+        -f "$root/web/package.json" ]]
+}
+
+build_possible() {
+    command -v make >/dev/null 2>&1 &&
+        command -v go >/dev/null 2>&1 &&
+        command -v npm >/dev/null 2>&1
+}
+
+release_url() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    case "$(uname -m)" in
+        x86_64 | amd64) arch=amd64 ;;
+        aarch64 | arm64) arch=arm64 ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "${HERDREM_DOWNLOAD_URL:-https://github.com/joeysys/herdrem/releases/latest/download/herdrem-${os}-${arch}}"
+}
+
+fetch() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dest" "$url"
+    else
+        die 'curl or wget is required to download the herdrem release binary'
+    fi
+}
+
+# verify_binary refuses an unverified download: the release must publish a
+# checksums.txt (sha256sum format: "<sha>  <asset name>") next to the asset.
+verify_binary() {
+    local file="$1" url="$2" asset sums expected actual
+    asset="${url##*/}"
+    asset="${asset%%[?#]*}"
+    sums="$work_dir/checksums.txt"
+    if ! fetch "${HERDREM_CHECKSUMS_URL:-${url%/*}/checksums.txt}" "$sums"; then
+        die "no checksums.txt next to $url; refusing to install an unverified binary"
+    fi
+    expected="$(awk -v a="$asset" '$2 == a {print $1; exit}' "$sums")"
+    [[ -n "$expected" ]] || die "no sha256 entry for $asset in checksums.txt"
+    command -v sha256sum >/dev/null 2>&1 || die 'sha256sum is required to verify the download'
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || die "checksum mismatch for $asset"
+}
+
+download_binary() {
+    local dest="$1" url
+    url="$(release_url)" || die "no prebuilt herdrem binary for $(uname -s)/$(uname -m); build from a clone instead"
+    log "downloading $url"
+    fetch "$url" "$dest" || die "download failed: $url"
+    verify_binary "$dest" "$url"
+    chmod 0755 "$dest"
+}
+
+# Root candidates, in order: a clone sitting next to deploy/ (in-repo or
+# bundle run), the script's own directory, and the current directory. A piped
+# run has no script directory, so its only candidate is the current directory
+# (where `curl | bash` lands inside a clone) — never its parent.
+candidates=()
+if (( piped )); then
+    cand_dirs=("$PWD")
+else
+    cand_dirs=("$script_dir/.." "$script_dir" "$PWD")
+fi
+for cand in "${cand_dirs[@]}"; do
+    cand="$(cd -- "$cand" 2>/dev/null && pwd -P)" || continue
+    candidates+=("$cand")
+done
+
+root_dir=''
+for cand in "${candidates[@]}"; do
+    if has_source_tree "$cand"; then root_dir="$cand"; break; fi
+done
+if [[ -z "$root_dir" ]] && (( ! piped )); then
+    for cand in "${candidates[@]}"; do
+        if [[ -f "$cand/herdrem" ]]; then root_dir="$cand"; break; fi
+    done
+fi
+root_dir="${root_dir:-$PWD}"
+
+requested_mode="$install_mode"
+binary_source="$root_dir/herdrem"
+if [[ "$install_mode" == auto ]]; then
+    if has_source_tree "$root_dir"; then
+        if build_possible; then
+            install_mode=source
+        else
+            log 'clone found but the build toolchain is incomplete (need make, go, npm); will download a release binary'
+            install_mode=download
+        fi
+    elif (( ! piped )) && [[ -f "$binary_source" ]]; then
+        install_mode=binary
+    else
+        install_mode=download
+    fi
+elif [[ "$install_mode" == source ]]; then
+    has_source_tree "$root_dir" || die "--source requires a complete source tree at $root_dir"
+else
+    [[ -f "$binary_source" ]] || die "--binary requires $binary_source"
 fi
 
 resolve_executable() {
@@ -135,9 +358,12 @@ if (( dry_run )); then
     if [[ "$install_mode" == source ]]; then
         printf 'Input mode:    build from source\n'
         printf 'Would build:   make -C %s build\n' "$root_dir"
-    else
+    elif [[ "$install_mode" == binary ]]; then
         printf 'Input mode:    existing binary\n'
         printf 'Would use:     %s\n' "$binary_source"
+    else
+        printf 'Input mode:    download release binary\n'
+        printf 'Would fetch:   %s\n' "$(release_url || printf '<no prebuilt asset for %s/%s>' "$(uname -s)" "$(uname -m)")"
     fi
     printf 'Would install: %s\n' "$herdrem_path"
     printf 'Herdr:         %s\n' "$herdr_path"
@@ -154,9 +380,18 @@ fi
 
 if [[ "$install_mode" == source ]]; then
     log "building herdrem"
-    make -C "$root_dir" build
-    [[ -f "$binary_source" ]] || die "build completed without producing $binary_source"
-else
+    if ! make -C "$root_dir" build || [[ ! -f "$binary_source" ]]; then
+        if [[ "$requested_mode" == source ]]; then
+            die "build failed in $root_dir"
+        fi
+        log "warning: build failed; downloading a release binary instead"
+        install_mode=download
+    fi
+fi
+if [[ "$install_mode" == download ]]; then
+    binary_source="$work_dir/herdrem"
+    download_binary "$binary_source"
+elif [[ "$install_mode" == binary ]]; then
     log "using existing binary at $binary_source"
 fi
 

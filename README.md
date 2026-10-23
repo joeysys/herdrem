@@ -67,14 +67,23 @@ echo "Relay token: $HERDREM_TOKEN"
 ## Deployment
 
 On a Linux host, the installer script sets everything up in one step — it
-builds `herdrem` (or uses the bundled binary), writes the env file, and
-installs and enables a systemd user service with user lingering so the relay
-survives logout and reboot:
+builds `herdrem` from a clone when it can, otherwise uses the bundled binary
+or downloads the latest release, writes the env file, and installs and
+enables a systemd user service with user lingering so the relay survives
+logout and reboot:
 
 ```bash
 ./deploy/install.sh            # from a source checkout
 ./deploy/install.sh --binary   # from a binary bundle (herdrem next to deploy/)
 ./deploy/install.sh --dry-run  # preview the actions without changing anything
+```
+
+Or pipe the installer straight through bash — no checkout needed. Run from
+inside a clone it builds with `make build`; otherwise it downloads the latest
+release binary from GitHub, then installs the same systemd user service:
+
+```bash
+curl -fsSL https://github.com/joeysys/herdrem/releases/latest/download/install.sh | bash
 ```
 
 **Without systemd**, the relay runs as a foreground process: `scripts/start.sh`
