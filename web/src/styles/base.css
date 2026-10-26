@@ -384,6 +384,18 @@ code, pre { font-family: var(--font-mono); }
 .quick-approve { display: flex; gap: 6px; flex-shrink: 0; margin-top: 7px; flex-wrap: wrap; }
 
 /* blocked card prompt excerpt (approval inbox) */
+.qa-checked {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  color: var(--green);
+}
+.qa-note {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--amber);
+}
 .qa-prompt {
   margin: 6px 0 0;
   padding: 6px 8px;

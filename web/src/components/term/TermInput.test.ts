@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import TermInput from './TermInput.vue'
 import { useTerminalStore } from '../../stores/terminal'
@@ -7,6 +7,7 @@ import { useConnectionStore } from '../../stores/connection'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { safeStorage } from '../../utils/storage'
 import { nextTick } from 'vue'
+import { applyServerMessage, noteDisconnect, resetSendAck } from '../../stores/sendAck'
 
 vi.mock('../../api/ws', () => ({
   ws: {
@@ -41,6 +42,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setStandalone(false)
+  resetSendAck()
 })
 
 describe('TermInput', () => {
@@ -390,5 +392,138 @@ describe('TermInput prompt history', () => {
     expect(labels[1]).toBe('Enter')
     // Esc is hidden
     expect(labels.includes('Esc')).toBe(false)
+  })
+
+  it('keeps a fill until send-ack and shows an error without clearing it', async () => {
+    useConnectionStore().setHello('t', ['send-ack'])
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    const wrapper = mount(TermInput, { props: { pane } })
+    await wrapper.get('textarea.cmd').setValue('echo hi')
+    await wrapper.get('form.input-row').trigger('submit')
+    const extra = sendText.mock.calls[0][2] as { requestId: string }
+    expect(extra.requestId).toEqual(expect.any(String))
+    expect((wrapper.get('textarea.cmd').element as HTMLTextAreaElement).value).toBe('echo hi')
+    expect(wrapper.get('.send-note').text()).toBe('Sending')
+    expect(wrapper.get('textarea.cmd').attributes('readonly')).toBeDefined()
+    expect(wrapper.get('textarea.cmd').attributes('disabled')).toBeUndefined()
+
+    applyServerMessage({ type: 'error', request_id: extra.requestId, message: 'Prompt changed, not sent' })
+    await flushPromises()
+    expect((wrapper.get('textarea.cmd').element as HTMLTextAreaElement).value).toBe('echo hi')
+    expect(wrapper.get('.send-note').text()).toBe('Prompt changed, not sent')
+
+    await wrapper.get('form.input-row').trigger('submit')
+    const again = sendText.mock.calls[1][2] as { requestId: string }
+    applyServerMessage({ type: 'sent', request_id: again.requestId })
+    await flushPromises()
+    expect(wrapper.get('button.send-btn').attributes('aria-label')).toBe('Send command to pane')
+    expect(wrapper.find('.send-note').exists()).toBe(false)
+  })
+
+  it('marks a fill unconfirmed on disconnect and does not send it again', async () => {
+    useConnectionStore().setHello('t', ['send-ack'])
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    const wrapper = mount(TermInput, { props: { pane } })
+    await wrapper.get('textarea.cmd').setValue('echo hi')
+    await wrapper.get('form.input-row').trigger('submit')
+    expect(wrapper.get('textarea.cmd').attributes('readonly')).toBeDefined()
+    expect(wrapper.get('textarea.cmd').attributes('disabled')).toBeUndefined()
+    noteDisconnect()
+    await flushPromises()
+    expect(wrapper.get('.send-note').text()).toBe('Unconfirmed')
+    expect(sendText).toHaveBeenCalledTimes(1)
+    expect((wrapper.get('textarea.cmd').element as HTMLTextAreaElement).value).toBe('echo hi')
+  })
+
+  it('sends a cursor approval as one checked sequence', async () => {
+    useConnectionStore().setHello('t', ['prompt-guard', 'send-ack'])
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const seq = vi.spyOn(term, 'sendKeySequence').mockReturnValue(true)
+    const pane = {
+      ...blockedPane,
+      agent: 'cursor',
+      prompt_id: 'abc',
+      options: ['y', 'n'],
+      option_labels: ['allow once', 'reject'],
+    }
+    const wrapper = mount(TermInput, { props: { pane } })
+    expect(wrapper.text()).toContain('Verified')
+    const buttons = wrapper.findAll('.appr-btn')
+    await buttons[1].trigger('click')
+    expect(seq).toHaveBeenCalledWith(['Down', 'Enter'], {
+      promptId: 'abc',
+      requestId: expect.any(String),
+    })
+    seq.mockRestore()
+  })
+
+  it('keeps a cursor approval on the per-key path when the relay cannot check it', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const seq = vi.spyOn(term, 'sendKeySequence').mockReturnValue(true)
+    const wrapper = mount(TermInput, {
+      props: { pane: { ...blockedPane, agent: 'cursor', options: ['y', 'n'], option_labels: ['allow once', 'reject'] } },
+    })
+    expect(wrapper.text()).not.toContain('Verified')
+    await wrapper.findAll('.appr-btn')[1].trigger('click')
+    expect(seq).toHaveBeenCalledWith(['Down', 'Enter'])
+    seq.mockRestore()
+  })
+
+  it('shows Verified only when the relay sent a prompt id', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const plain = mount(TermInput, { props: { pane: { ...blockedPane, prompt_id: 'abc' } } })
+    expect(plain.text()).not.toContain('Verified')
+    plain.unmount()
+    useConnectionStore().setHello('t', ['prompt-guard'])
+    const wrapper = mount(TermInput, { props: { pane: blockedPane } })
+    expect(wrapper.text()).not.toContain('Verified')
+    await wrapper.setProps({ pane: { ...blockedPane, prompt_id: 'abc' } })
+    expect(wrapper.text()).toContain('Verified')
+  })
+
+  it('hides a password prompt, skips history and drafts, and checks the tail', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    term.setContent('p1', 'hello\n[sudo] password for testuser:\n')
+    const plain = mount(TermInput, { props: { pane } })
+    expect(plain.find('textarea.cmd').exists()).toBe(true)
+    plain.unmount()
+
+    useConnectionStore().setHello('t', ['secret-input', 'send-ack'])
+    term.setInputDraft('p1', 'keep me')
+    const history = useCmdHistoryStore()
+    const wrapper = mount(TermInput, { props: { pane } })
+    expect(wrapper.find('textarea.cmd').exists()).toBe(false)
+    const input = wrapper.get('input[type="password"]')
+    expect((input.element as HTMLInputElement).value).toBe('')
+    expect(term.getInputDraft('p1')).toBe('keep me')
+
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    await input.setValue('s3cret')
+    await wrapper.get('form.input-row').trigger('submit')
+    expect(sendText).toHaveBeenCalledWith('s3cret', true, {
+      requestId: expect.any(String),
+      expectTail: '[sudo] password for testuser:',
+    })
+    expect((input.element as HTMLInputElement).value).toBe('')
+    expect(history.entries.map((e) => e.c)).not.toContain('s3cret')
+    expect(term.getInputDraft('p1')).toBe('keep me')
+
+    const sendKey = vi.spyOn(term, 'sendKey').mockReturnValue(true)
+    await input.setValue('again')
+    await wrapper.get('button[aria-label="Cancel"]').trigger('click')
+    expect(sendKey).toHaveBeenCalledWith('Ctrl+c')
+    expect((wrapper.get('input[type="password"]').element as HTMLInputElement).value).toBe('')
+
+    term.setContent('p1', '$ ')
+    await nextTick()
+    expect((wrapper.get('textarea.cmd').element as HTMLTextAreaElement).value).toBe('keep me')
   })
 })

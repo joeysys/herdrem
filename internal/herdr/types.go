@@ -26,6 +26,7 @@ type Pane struct {
 	Prompt                string      `json:"prompt,omitempty"`
 	Options               []string    `json:"options,omitempty"`          // approval payloads
 	OptionLabels          []string    `json:"option_labels,omitempty"`    // approval display labels
+	PromptID              string      `json:"prompt_id,omitempty"`        // sha256 of the visible screen at menu parse; feature prompt-guard
 	LastActive            int64       `json:"last_active,omitempty"`      // epoch seconds of last content change
 	Revision              int         `json:"revision,omitempty"`         // herdr pane revision (content version)
 	StateChangeSeq        int         `json:"state_change_seq,omitempty"` // herdr agent state change sequence; in 0.9+ it lives on AgentInfo and is merged onto Pane from the api snapshot

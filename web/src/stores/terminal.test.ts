@@ -76,6 +76,18 @@ describe('useTerminalStore setContent', () => {
 })
 
 describe('useTerminalStore content bounds', () => {
+  it('trims retained lines to the relay baseline window', () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const lines = Array.from({ length: 100_060 }, () => 'a').join('\n') + '\n'
+    term.setContent('p1', lines)
+    const n = term.content.endsWith('\n')
+      ? term.content.split('\n').length - 1
+      : term.content.split('\n').length
+    expect(n).toBe(99_950)
+    expect(term.content.startsWith('a\n')).toBe(true)
+  })
+
   it('caps in-memory content at MAX_CONTENT_CHARS', () => {
     const term = useTerminalStore()
     term.activePane = 'p1' as any
@@ -215,6 +227,27 @@ describe('setContent poll mode', () => {
     send.mockRestore()
   })
 
+  it('coalesces observe appends after a poll drops rev into one resync, then applies once rev returns', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    const lines = Array.from({ length: 80 }, (_, i) => `line-${i}`)
+    term.setContent('p1', lines.join('\n') + '\n', false, 5)
+    const tail = [...lines.slice(40), 'from-poll'].join('\n') + '\n'
+    term.setContent('p1', tail, false, undefined, undefined, true)
+    send.mockClear()
+    term.setContent('p1', 'obs-1\n', true, 5, 5)
+    term.setContent('p1', 'obs-2\n', true, 5, 5)
+    const reads = send.mock.calls.filter((c) => (c[0] as { type?: string }).type === 'read_pane')
+    expect(reads).toHaveLength(1)
+    term.setContent('p1', lines.join('\n') + '\nfrom-poll\n', false, 5)
+    send.mockClear()
+    term.setContent('p1', 'obs-3\n', true, 5, 5)
+    expect(term.content.endsWith('obs-3\n')).toBe(true)
+    expect(send).not.toHaveBeenCalled()
+    send.mockRestore()
+  })
+
   it('poll full response with matching rev does not replace delta-grown content', () => {
     const term = useTerminalStore()
     term.activePane = 'p1' as any
@@ -226,6 +259,21 @@ describe('setContent poll mode', () => {
     // poll full response (truncated tail, rev 11 matches) → content unchanged
     term.setContent('p1', 'line4\n', false, 11, undefined, true)
     expect(term.content).toBe('line1\nline2\nline3\nline4\n')
+  })
+
+  it('keeps an in-flight resync locked when a later poll also mismatches', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'content-a\n', false, 5)
+    send.mockClear()
+    term.setContent('p1', 'tail-1\n', false, 9, undefined, true)
+    term.setContent('p1', 'tail-2\n', false, 9, undefined, true)
+    term.setContent('p1', 'delta\n', true, 10, 9)
+    const reads = send.mock.calls.filter((c) => (c[0] as { type?: string }).type === 'read_pane')
+    expect(reads).toHaveLength(1)
+    expect(term.content).toBe('content-a\n')
+    send.mockRestore()
   })
 
   it('poll full response with mismatched rev clears the baseline (does not adopt it)', () => {
@@ -253,6 +301,60 @@ describe('setContent poll mode', () => {
     term.setContent('p1', 'CCC\n', true, 12, 11)
     // must NOT splice onto the stale content — rev 11's content would be lost
     expect(term.content).toBe('AAA\n')
+  })
+
+  it('applies an observe refresh baseline and the following append once', () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'alpha\n', false, 7, undefined, false, 1)
+    term.setContent('p1', 'beta\n', true, 7, 7, false, 2, 1)
+    expect(term.content).toBe('alpha\nbeta\n')
+  })
+
+  it('drops a refresh that races behind a newer observe append', () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'alpha\n', false, 7, undefined, false, 1)
+    term.setContent('p1', 'beta\n', true, 7, 7, false, 2, 1)
+    term.setContent('p1', 'alpha\n', false, 7, undefined, false, 1)
+    expect(term.content).toBe('alpha\nbeta\n')
+  })
+
+  it('adopts a snapshot from a new relay epoch when gen restarts', () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'alpha\n', false, 7, undefined, false, 4, undefined, 1)
+    term.setContent('p1', 'fresh\n', false, 7, undefined, false, 1, undefined, 2)
+    expect(term.content).toBe('fresh\n')
+  })
+
+  it('does not splice an append whose generation extends a different baseline', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    term.setContent('p1', 'alpha\n', false, 7, undefined, false, 1)
+    term.setContent('p1', 'beta\n', true, 7, 7, false, 3, 2)
+    expect(term.content).toBe('alpha\n')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'read_pane', refresh: true }))
+    send.mockRestore()
+  })
+})
+
+describe('useTerminalStore sendKeySequence', () => {
+  it('sends an approval sequence as one frame', () => {
+    const send = vi.spyOn(ws, 'send').mockReturnValue(true)
+    const term = useTerminalStore()
+    term.activePane = 'p1' as any
+    expect(term.sendKeySequence(['Down', 'Enter'], { promptId: 'abc', requestId: 'r1' })).toBe(true)
+    expect(send).toHaveBeenCalledWith({
+      type: 'send_keys',
+      pane_id: 'p1',
+      keys: '',
+      sequence: ['Down', 'Enter'],
+      prompt_id: 'abc',
+      request_id: 'r1',
+    })
+    send.mockRestore()
   })
 })
 

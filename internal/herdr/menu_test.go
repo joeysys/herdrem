@@ -199,3 +199,69 @@ func TestDetectOptions_ParenShortcutsMustShareALine(t *testing.T) {
 		t.Errorf("opts = %v, want [y n]", opts)
 	}
 }
+
+func TestPromptID_ClaudeWorkLineIsStable(t *testing.T) {
+	base := "Allow this edit?\n1. Yes\n2. No\n"
+	a := base + "✢ Tempering… (1s · ↓ 10 tokens)\n"
+	b := base + "✶ Tempering… (1m 55s · ↑ 10.0k tokens)\n"
+	if PromptID(a, "claude") != PromptID(b, "claude") {
+		t.Fatal("timer and token changes on the one working line must keep the id")
+	}
+	// the action words stay in the id
+	c := base + "✢ Deleting… (1s · ↓ 10 tokens)\n"
+	if PromptID(a, "claude") == PromptID(c, "claude") {
+		t.Fatal("a different action must change the id")
+	}
+	// a different menu changes the id
+	d := "Allow something else?\n1. Yes\n2. No\n✢ Tempering… (1s · ↓ 10 tokens)\n"
+	if PromptID(a, "claude") == PromptID(d, "claude") {
+		t.Fatal("a different screen must change the id")
+	}
+}
+
+func TestPromptID_OnlyExactlyOneClaudeWorkLineIsNormalized(t *testing.T) {
+	line := "✢ Tempering… (1s · ↓ 10 tokens)"
+	later := "✶ Tempering… (9s · ↑ 2k tokens)"
+	one := "menu\n" + line + "\n"
+	two := one + later + "\n"
+	if PromptID(one, "claude") != PromptID("menu\n"+later+"\n", "claude") {
+		t.Fatal("one working line is normalized, so the spinner frame and the timer must not change the id")
+	}
+	rawA := PromptID(two, "claude")
+	rawB := PromptID("menu\n"+line+"\n"+"✳ Tempering… (3s · ↓ 4 tokens)\n", "claude")
+	if rawA == rawB {
+		t.Fatal("two working lines are hashed as-is, so a timer change must change the id")
+	}
+	// other agents never normalize
+	if PromptID(one, "codex") == PromptID("menu\n"+later+"\n", "codex") {
+		t.Fatal("non-claude screens are hashed as read")
+	}
+	// the line number is part of the hash, so a screen that already shows the
+	// placeholder text is not the same card as the normalized working line
+	normalized := "menu\n* Tempering… (<time> · <tokens>)\n"
+	if PromptID(one, "claude") == PromptID(normalized, "claude") {
+		t.Fatal("work line index must distinguish a real working line from placeholder text")
+	}
+}
+
+func TestPromptID_BorderAndInterruptHint(t *testing.T) {
+	plain := "✢ Tempering… (1s · ↓ 10 tokens · esc to interrupt)"
+	boxed := "│ ✢ Tempering… (4s · ↑ 20 tokens · esc to interrupt) │"
+	if PromptID(plain, "Claude") != PromptID(boxed, "claude") {
+		t.Fatal("one box border and case of the agent name must not change the id")
+	}
+	noHint := "✢ Tempering… (1s · ↓ 10 tokens)"
+	if PromptID(plain, "claude") == PromptID(noHint, "claude") {
+		t.Fatal("the interrupt hint is part of the line and must change the id")
+	}
+}
+
+func TestLastNonEmptyLine(t *testing.T) {
+	screen := "hello\n\n  [sudo] password for testuser:  \n\n"
+	if got := LastNonEmptyLine(screen); got != "[sudo] password for testuser:" {
+		t.Fatalf("tail = %q", got)
+	}
+	if NormalizeTail("  Password:  ") != LastNonEmptyLine("Password:") {
+		t.Fatal("client and relay tails must compare equal after normalize")
+	}
+}

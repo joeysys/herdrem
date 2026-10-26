@@ -78,6 +78,18 @@ func hasFeature(hello map[string]any, f string) bool {
 	return false
 }
 
+func TestHelloAdvertisesSendGuardFeatures(t *testing.T) {
+	msgs := readMsgs(t, historyServer(t, nil), 1)
+	if len(msgs) == 0 || msgs[0]["type"] != "hello" {
+		t.Fatalf("first message = %v", msgs)
+	}
+	for _, f := range []string{"send-ack", "prompt-guard", "secret-input", "terminal-observe"} {
+		if !hasFeature(msgs[0], f) {
+			t.Errorf("hello features lack %s: %v", f, msgs[0]["features"])
+		}
+	}
+}
+
 func TestHelloAdvertisesInputHistoryAndSendsASnapshot(t *testing.T) {
 	hs, err := store.NewHistoryStore(t.TempDir() + "/history.json")
 	if err != nil {

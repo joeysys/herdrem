@@ -90,9 +90,22 @@ func (c *CLIClient) exec(ctx context.Context, host string, args ...string) ([]by
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("herdr %s (host=%s): %w (stderr: %s)",
-			strings.Join(args, " "), hostLabel(host), err, strings.TrimSpace(stderr.String()))
+			strings.Join(redactArgs(args), " "), hostLabel(host), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// redactArgs hides the positional text of `pane send-text`. herdr 0.9.3 has
+// no other send form, so a failed command's error must not keep the secret.
+func redactArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i+3 < len(out); i++ {
+		if out[i] == "pane" && out[i+1] == "send-text" {
+			out[i+3] = "<redacted>"
+			return out
+		}
+	}
+	return out
 }
 
 func hostLabel(host string) string {
@@ -295,6 +308,77 @@ func (c *CLIClient) SendKeys(ctx context.Context, host, paneID, keys string) err
 	_, err := c.exec(ctx, host, "pane", "send-keys", paneID, keys)
 	return err
 }
+
+// ObservePane runs `herdr terminal session observe` on the local machine until
+// ctx is cancelled. Stdout is not returned: any read that yields bytes calls
+// onData once, as a "new output" signal. --cols and --rows are omitted so the
+// observer grid is herdr's default, never a browser viewport. The command does
+// not resize the pane. It is not `terminal attach`. SSH targets are not
+// supported here; the caller must not invoke this for a remote pane.
+func (c *CLIClient) ObservePane(ctx context.Context, paneID string, onData func()) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if paneID == "" {
+		return fmt.Errorf("observe pane: empty pane id")
+	}
+	if onData == nil {
+		onData = func() {}
+	}
+	cmd := exec.CommandContext(ctx, c.bin, "terminal", "session", "observe", paneID)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("observe pane %s: stdout: %w", paneID, err)
+	}
+	var stderr tailBuf
+	stderr.max = 512
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("observe pane %s: start: %w", paneID, err)
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := stdout.Read(buf)
+		if n > 0 && ctx.Err() == nil {
+			onData()
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if waitErr != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("observe pane %s: %w (stderr: %s)", paneID, waitErr, msg)
+		}
+		return fmt.Errorf("observe pane %s: %w", paneID, waitErr)
+	}
+	return fmt.Errorf("observe pane %s: stream ended", paneID)
+}
+
+// tailBuf keeps at most max bytes of a stream so a noisy stderr cannot grow
+// without bound. The oldest bytes are dropped.
+type tailBuf struct {
+	buf []byte
+	max int
+}
+
+func (t *tailBuf) Write(p []byte) (int, error) {
+	if t.max <= 0 {
+		return len(p), nil
+	}
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuf) String() string { return string(t.buf) }
 
 // StatusServer is an alias for Alive (interface compatibility).
 func (c *CLIClient) StatusServer(ctx context.Context, host string) (bool, error) {

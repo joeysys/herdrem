@@ -55,6 +55,49 @@ type ContentSubscriber interface {
 	// InvalidateMenu drops the poller's cached blocked-menu for a pane; called
 	// after a send so the next poll re-reads the post-response screen.
 	InvalidateMenu(paneID string)
+	// PaneAgent is the agent name last seen for the pane, used to hash a
+	// prompt id the same way the menu was issued. Empty if unknown.
+	PaneAgent(paneID string) string
+	// TriggerPoll asks for a poll cycle now, so a stale card is re-read
+	// without waiting out the snapshot interval.
+	TriggerPoll()
+	// ObserveSnapshot is the cached content, herdr revision, monotonic
+	// generation, and process epoch for a pane whose output is being observed,
+	// taken together from one lock when that cache was read recently. ok is
+	// false when the pane is not observed or the cache is missing or stale.
+	// Callers must not pair a direct read with this revision: the next delta
+	// extends this content.
+	ObserveSnapshot(paneID string) (content string, rev int, gen int, epoch int, ok bool)
+	// WidenObserveBaseline re-reads an observed pane out to `lines` and stores
+	// that read as the delta baseline under the same lock as gen. truncated is
+	// true when the request was cut at the relay cap and the read filled it.
+	// ok is false when the pane is not observed or the read failed; the caller
+	// must not serve the shorter cache in place of this snapshot.
+	WidenObserveBaseline(ctx context.Context, paneID string, lines int) (content string, rev int, gen int, epoch int, truncated bool, ok bool)
+}
+
+// maxKeySequence caps one cursor approval. keySequenceGap is the pause
+// between those keys so the menu can apply each arrow. Tests set the gap to 0.
+const maxKeySequence = 8
+
+var keySequenceGap = 55 * time.Millisecond
+
+// VisualLines counts lines the way TailLines does. A trailing newline
+// terminates the last visual line rather than adding an empty one.
+func VisualLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			n++
+		}
+	}
+	if s[len(s)-1] != '\n' {
+		n++
+	}
+	return n
 }
 
 // TailLines returns the trailing `lines` lines of `s`. A trailing newline
@@ -63,21 +106,12 @@ func TailLines(s string, lines int) string {
 	if lines <= 0 || s == "" {
 		return s
 	}
-	n := len(s)
-	newlines := 0
-	for i := 0; i < n; i++ {
-		if s[i] == '\n' {
-			newlines++
-		}
-	}
-	visual := newlines
-	if s[n-1] != '\n' {
-		visual++
-	}
+	visual := VisualLines(s)
 	if visual <= lines {
 		return s
 	}
 	drop := visual - lines
+	n := len(s)
 	idx := 0
 	seen := 0
 	for i := 0; i < n && seen < drop; i++ {
@@ -249,19 +283,49 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 	var err error
 	var rev int
 	var hasRev bool
+	var gen int
+	var epoch int
+	var replyTruncated bool
 	served := false
-	// A refresh request always reads directly from herdr (bypassing the poller
-	// cache) so the client gets the authoritative current content, not a
-	// possibly-stale cached snapshot.
-	if !msg.Refresh && s.subscriber != nil {
+	// Poll and refresh of an observed pane answer from the cache the next
+	// delta extends. Content, rev, and gen come from one lock. A direct read
+	// stamped with that rev splits the baseline: the following append is then
+	// applied to different bytes and duplicates or drops a line. An ordinary
+	// read does not take this path. A refresh whose cache is shorter than the
+	// request widens that baseline; the short tail is not served in its place.
+	if s.subscriber != nil && (msg.Poll || msg.Refresh) {
+		if cached, crev, cgen, cepoch, ok := s.subscriber.ObserveSnapshot(msg.PaneID); ok {
+			shortOfRequest := msg.Refresh && VisualLines(cached) < lines
+			if shortOfRequest {
+				if widened, wrev, wgen, wepoch, truncated, wok := s.subscriber.WidenObserveBaseline(ctx, msg.PaneID, lines); wok {
+					content = widened
+					rev = wrev
+					gen = wgen
+					epoch = wepoch
+					hasRev = true
+					served = true
+					replyTruncated = truncated
+				}
+			} else {
+				content = TailLines(cached, lines)
+				rev = crev
+				gen = cgen
+				epoch = cepoch
+				hasRev = true
+				served = true
+			}
+		}
+	}
+	// A refresh of a pane that is not being observed still reads herdr
+	// directly, so the reply is not a stale ContentSnapshot.
+	if !served && !msg.Refresh && s.subscriber != nil {
 		switch msg.Purpose {
 		case "term":
 			if msg.Poll {
-				// Poll reads always read directly. herdr's pane revision and
-				// state_change_seq only move on metadata/state changes — not on
-				// streamed output — so a version-confirmed baseline can hide
-				// live content indefinitely. The unversioned tail response is
-				// what lets the client merge + repaint while an agent works.
+				// Not observed, or the observe cache is stale. Read herdr
+				// directly and leave the reply unversioned: streamed output
+				// does not move rev/seq, and pairing this read with a cached
+				// rev would split the delta baseline.
 				break
 			}
 			content, rev, hasRev = s.subscriber.ContentSnapshot(msg.PaneID)
@@ -302,6 +366,13 @@ func (s *Service) handleReadPane(ctx context.Context, conn *websocket.Conn, data
 	if hasRev {
 		reply.Rev = protocol.IntPtr(rev)
 	}
+	if gen > 0 {
+		reply.Gen = protocol.IntPtr(gen)
+	}
+	if epoch > 0 {
+		reply.Epoch = protocol.IntPtr(epoch)
+	}
+	reply.Truncated = replyTruncated
 	s.sendJSON(ctx, conn, reply)
 }
 
@@ -325,8 +396,19 @@ func (s *Service) handleSendText(ctx context.Context, conn *websocket.Conn, data
 		return
 	}
 	if msg.PaneID == "" {
-		s.sendError(ctx, conn, "send_text", "missing pane_id")
+		s.failSend(ctx, conn, "send_text", msg.RequestID, "missing pane_id", "invalid")
 		return
+	}
+	if msg.ExpectTail != "" {
+		screen, err := s.readVisible(ctx, msg.PaneID)
+		if err != nil {
+			s.failSend(ctx, conn, "send_text", msg.RequestID, err.Error(), "unavailable")
+			return
+		}
+		if herdr.NormalizeTail(msg.ExpectTail) != herdr.LastNonEmptyLine(screen) {
+			s.failSend(ctx, conn, "send_text", msg.RequestID, "Prompt changed, not sent", "stale")
+			return
+		}
 	}
 	text := msg.Text
 	if msg.Paste && strings.ContainsAny(text, "\r\n") {
@@ -338,9 +420,16 @@ func (s *Service) handleSendText(ctx context.Context, conn *websocket.Conn, data
 		text += "\n"
 	}
 	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {
-		s.sendError(ctx, conn, "send_text", err.Error())
+		// expect_tail marks a secret send. The CLI error string contains the
+		// positional text, so the client only hears that the send did not leave.
+		message := err.Error()
+		if msg.ExpectTail != "" {
+			message = "Send failed, not delivered"
+		}
+		s.failSend(ctx, conn, "send_text", msg.RequestID, message, "")
 		return
 	}
+	s.ackSend(ctx, conn, "send_text", msg.PaneID, msg.RequestID)
 	// The screen is about to change — the next poll must re-read the menu
 	// rather than serve the pre-response options from cache.
 	if s.subscriber != nil {
@@ -355,16 +444,113 @@ func (s *Service) handleSendKeys(ctx context.Context, conn *websocket.Conn, data
 		return
 	}
 	if msg.PaneID == "" {
-		s.sendError(ctx, conn, "send_keys", "missing pane_id")
+		s.failSend(ctx, conn, "send_keys", msg.RequestID, "missing pane_id", "invalid")
 		return
 	}
-	if err := s.client.SendKeys(ctx, s.hostFor(msg.PaneID), msg.PaneID, msg.Keys); err != nil {
-		s.sendError(ctx, conn, "send_keys", err.Error())
-		return
+	keys := []string{msg.Keys}
+	if len(msg.Sequence) > 0 {
+		if len(msg.Sequence) > maxKeySequence {
+			s.failSend(ctx, conn, "send_keys", msg.RequestID, "too many keys", "invalid")
+			return
+		}
+		keys = make([]string, 0, len(msg.Sequence))
+		for _, k := range msg.Sequence {
+			if strings.TrimSpace(k) == "" {
+				s.failSend(ctx, conn, "send_keys", msg.RequestID, "empty key", "invalid")
+				return
+			}
+			keys = append(keys, k)
+		}
 	}
+	if msg.PromptID != "" {
+		stale, err := s.promptStale(ctx, msg.PaneID, msg.PromptID)
+		if err != nil {
+			s.failSend(ctx, conn, "send_keys", msg.RequestID, err.Error(), "unavailable")
+			return
+		}
+		if stale {
+			s.rejectStalePrompt(ctx, conn, "send_keys", msg.PaneID, msg.RequestID)
+			return
+		}
+	}
+	for i, k := range keys {
+		if err := s.client.SendKeys(ctx, s.hostFor(msg.PaneID), msg.PaneID, k); err != nil {
+			s.failSend(ctx, conn, "send_keys", msg.RequestID, err.Error(), "")
+			return
+		}
+		if i+1 == len(keys) || keySequenceGap <= 0 {
+			continue
+		}
+		timer := time.NewTimer(keySequenceGap)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			s.failSend(ctx, conn, "send_keys", msg.RequestID, ctx.Err().Error(), "")
+			return
+		case <-timer.C:
+		}
+	}
+	s.ackSend(ctx, conn, "send_keys", msg.PaneID, msg.RequestID)
 	if s.subscriber != nil {
 		s.subscriber.InvalidateMenu(msg.PaneID)
 	}
+}
+
+// promptStale re-reads the visible screen and reports whether promptID still
+// matches. A read error is returned to the caller; it is not treated as stale.
+func (s *Service) promptStale(ctx context.Context, paneID, promptID string) (bool, error) {
+	screen, err := s.readVisible(ctx, paneID)
+	if err != nil {
+		return false, err
+	}
+	agent := ""
+	if s.subscriber != nil {
+		agent = s.subscriber.PaneAgent(paneID)
+	}
+	return herdr.PromptID(screen, agent) != promptID, nil
+}
+
+func (s *Service) rejectStalePrompt(ctx context.Context, conn *websocket.Conn, op, paneID, requestID string) {
+	if s.subscriber != nil {
+		s.subscriber.InvalidateMenu(paneID)
+		s.subscriber.TriggerPoll()
+	}
+	s.failSend(ctx, conn, op, requestID, "Prompt changed, please confirm again", "stale")
+}
+
+// readVisible reads the same trailing window menu detection hashes.
+func (s *Service) readVisible(ctx context.Context, paneID string) (string, error) {
+	return s.client.ReadPane(ctx, s.hostFor(paneID), paneID, herdr.VisibleScreenLines)
+}
+
+// failSend reports a send_text / send_keys / respond failure. requestID is
+// echoed when the client asked for send-ack. A nil conn is a test path that
+// only checks whether herdr was called.
+func (s *Service) failSend(ctx context.Context, conn *websocket.Conn, op, requestID, message, key string) {
+	if conn == nil {
+		return
+	}
+	s.sendJSON(ctx, conn, protocol.ErrorMsg{
+		Type:      "error",
+		Op:        op,
+		Message:   message,
+		Key:       key,
+		RequestID: requestID,
+	})
+}
+
+// ackSend writes the sent receipt after herdr has returned. No request id
+// means an old client: success stays silent.
+func (s *Service) ackSend(ctx context.Context, conn *websocket.Conn, op, paneID, requestID string) {
+	if conn == nil || requestID == "" {
+		return
+	}
+	s.sendJSON(ctx, conn, protocol.Sent{
+		Type:      "sent",
+		Op:        op,
+		PaneID:    paneID,
+		RequestID: requestID,
+	})
 }
 
 // isNumericChoice reports whether s represents a numeric option selection (e.g. "1", "2").
@@ -391,8 +577,19 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 		return
 	}
 	if msg.PaneID == "" {
-		s.sendError(ctx, conn, "respond", "missing pane_id")
+		s.failSend(ctx, conn, "respond", msg.RequestID, "missing pane_id", "invalid")
 		return
+	}
+	if msg.PromptID != "" {
+		stale, err := s.promptStale(ctx, msg.PaneID, msg.PromptID)
+		if err != nil {
+			s.failSend(ctx, conn, "respond", msg.RequestID, err.Error(), "unavailable")
+			return
+		}
+		if stale {
+			s.rejectStalePrompt(ctx, conn, "respond", msg.PaneID, msg.RequestID)
+			return
+		}
 	}
 	text := msg.Text
 	if msg.Submit {
@@ -409,9 +606,10 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 		text += "\n"
 	}
 	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {
-		s.sendError(ctx, conn, "respond", err.Error())
+		s.failSend(ctx, conn, "respond", msg.RequestID, err.Error(), "")
 		return
 	}
+	s.ackSend(ctx, conn, "respond", msg.PaneID, msg.RequestID)
 	if s.subscriber != nil {
 		s.subscriber.InvalidateMenu(msg.PaneID)
 	}

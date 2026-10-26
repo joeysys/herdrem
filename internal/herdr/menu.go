@@ -1,10 +1,17 @@
 package herdr
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"strconv"
 	"strings"
 )
+
+// VisibleScreenLines is how many trailing lines count as the screen for a
+// prompt id and a secret-line check. Menu detection reads the same window,
+// so a card's id and the re-check before respond hash the same text.
+const VisibleScreenLines = 30
 
 // Agent-safe approve shortcuts used when the pane text reveals no menu.
 var (
@@ -201,4 +208,75 @@ func containsString(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// claudeWorkLineRE is Claude Code's working line, whole: one spinner frame,
+// the action ending in an ellipsis, and in parentheses the elapsed time, a
+// middle dot, and the token count. Optional interrupt hint stays in the id.
+// Shape matches herdr-web-ui steadyReader (WORKING_LINE_RE):
+// "✢ Tempering… (1m 55s · ↓ 10.0k tokens)".
+var claudeWorkLineRE = regexp.MustCompile(`^[·✢✳✶✻✽*] (\S(?:.*\S)?…) \((?:\d+h )?(?:\d+m )?\d+s · [↑↓] [\d.,]+[kKmM]? tokens( · esc to interrupt)?\)$`)
+
+// PromptID is the sha256 hex of the visible screen. For a claude pane with
+// exactly one working line, that line's elapsed time and token count are
+// replaced with fixed placeholders and the line number is part of the hash.
+// Zero matches, more than one match, or any other agent: the screen is hashed
+// as read, with no replacement.
+func PromptID(screen, agent string) string {
+	text := normalizeNewlines(StripANSI(screen))
+	lines := strings.Split(text, "\n")
+	work := -1
+	if strings.EqualFold(strings.TrimSpace(agent), "claude") {
+		var hits []int
+		for i, line := range lines {
+			if claudeWorkLineRE.MatchString(cleanScreenLine(line)) {
+				hits = append(hits, i)
+			}
+		}
+		if len(hits) == 1 {
+			work = hits[0]
+		}
+	}
+	payload := text
+	if work >= 0 {
+		lines[work] = claudeWorkLineRE.ReplaceAllString(cleanScreenLine(lines[work]), "* ${1} (<time> · <tokens>${2})")
+		payload = strings.Join(lines, "\n") + "\n#workline:" + strconv.Itoa(work)
+	}
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
+}
+
+// cleanScreenLine trims one leading and one trailing box border so a working
+// line drawn inside Claude's frame still matches.
+func cleanScreenLine(line string) string {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "│") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "│"))
+	}
+	if strings.HasSuffix(line, "│") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "│"))
+	}
+	return strings.TrimSpace(line)
+}
+
+// NormalizeTail collapses whitespace after ANSI stripping. The client and the
+// relay both compare secret prompts in this form.
+func NormalizeTail(line string) string {
+	return strings.Join(strings.Fields(StripANSI(line)), " ")
+}
+
+// LastNonEmptyLine returns the normalized last non-empty line of a screen.
+func LastNonEmptyLine(screen string) string {
+	lines := strings.Split(normalizeNewlines(StripANSI(screen)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return NormalizeTail(lines[i])
+		}
+	}
+	return ""
 }

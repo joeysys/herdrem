@@ -4,7 +4,8 @@ import { bucket, paneKind, paneTitle, shellLabel } from '../../stores/connection
 import { usePreviewsStore } from '../../stores/preview'
 import { useHaptic } from '../../composables/useHaptic'
 import { menuLabel, isStickyChoice } from '../../utils/menu'
-import { ws } from '../../api/ws'
+import { dispatchRespond, promptChecked } from '../../utils/guard'
+import { approvalNotes } from '../../stores/sendAck'
 import type { Pane } from '../../api/types'
 import AgentIcon from '../agent/AgentIcon.vue'
 
@@ -108,7 +109,7 @@ function previewText(p: Pane): string {
 
 function approve(p: Pane, payload: string) {
   haptic(18)
-  ws.send({ type: 'respond', pane_id: p.pane_id, text: payload })
+  dispatchRespond(p.pane_id, payload, { promptId: p.prompt_id })
 }
 
 function tone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
@@ -143,6 +144,8 @@ function tone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
       <pre class="g-preview" :class="{ empty: !previews.hasPreview(p.pane_id) }">{{ previewText(p) }}</pre>
 
       <footer v-if="bucket(p.status) === 'blocked'" class="g-actions" @click.stop>
+        <span v-if="promptChecked(p)" class="qa-checked">Verified</span>
+        <p v-if="approvalNotes[p.pane_id]" class="qa-note" role="status">{{ approvalNotes[p.pane_id] }}</p>
         <template v-if="p.options && p.options.length">
           <button
             v-for="(opt, i) in p.options.slice(0, 3)"

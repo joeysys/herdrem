@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { bucket, paneKind, canMarkRead, paneTitle, spaceTitle, displayAgent, shellLabel, relTime } from '../../stores/connection'
 import { ws } from '../../api/ws'
+import { dispatchRespond, promptChecked } from '../../utils/guard'
+import { approvalNotes } from '../../stores/sendAck'
 import { useHaptic } from '../../composables/useHaptic'
 import { safeStorage } from '../../utils/storage'
 import type { Pane } from '../../api/types'
@@ -145,7 +147,10 @@ const { haptic } = useHaptic()
 function quickApprove(paneId: string, answer: string) {
   haptic(18)
   const pane = props.agents.find((a) => a.pane_id === paneId)
-  ws.send({ type: 'respond', pane_id: paneId, text: answer, submit: pane ? paneKind(pane) === 'shell' : undefined })
+  dispatchRespond(paneId, answer, {
+    submit: pane ? paneKind(pane) === 'shell' : undefined,
+    promptId: pane?.prompt_id,
+  })
 }
 function qaTone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
   const s = `${payload} ${label || ''}`.toLowerCase()
@@ -223,6 +228,8 @@ function newTab() {
               <span v-if="p.host && p.host !== 'local'" class="host">{{ p.host }}</span>
             </div>
             <pre v-if="bucket(p.status) === 'blocked' && p.prompt" class="qa-prompt">{{ p.prompt }}</pre>
+            <span v-if="bucket(p.status) === 'blocked' && promptChecked(p)" class="qa-checked">Verified</span>
+            <p v-if="bucket(p.status) === 'blocked' && approvalNotes[p.pane_id]" class="qa-note" role="status">{{ approvalNotes[p.pane_id] }}</p>
             <div v-if="bucket(p.status) === 'blocked'" class="quick-approve" @click.stop>
               <template v-if="p.options && p.options.length">
                 <button

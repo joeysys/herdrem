@@ -5,6 +5,7 @@ import { useTodoStore } from './todo';
 import { useRelaysStore } from './relays';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
+import { applyServerMessage, noteDisconnect, syncApprovalNotes } from './sendAck';
 import { extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
@@ -202,6 +203,7 @@ export const useConnectionStore = defineStore('connection', () => {
     // Clear agent state to prevent stale data from old relay bleeding through
     const agents = useAgentsStore();
     agents.setAgents([]);
+    syncApprovalNotes([]);
     agents.resetSnapshotKey();
     features.value = [];
     if (unsubStatus) unsubStatus();
@@ -221,6 +223,7 @@ export const useConnectionStore = defineStore('connection', () => {
       status.value = s as typeof status.value;
       if (s === 'connected') startSessionSlide();
       else stopSessionSlide();
+      if (s === 'disconnected') noteDisconnect();
     });
   }
 
@@ -493,12 +496,17 @@ export function handleMessage(msg: ServerMessage) {
   switch (msg.type) {
     case 'agents':
       agents.setAgents(msg.agents || []);
+      syncApprovalNotes(msg.agents || []);
       break;
     case 'hello':
       conn.setHello(msg.server_version, msg.features || []);
       break;
+    case 'sent':
+      applyServerMessage(msg);
+      break;
     case 'error':
       console.error('server error:', msg.op, msg.message);
+      applyServerMessage(msg);
       break;
   }
 }

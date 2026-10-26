@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { agentTypeName, paneTitle, useConnectionStore } from '../../stores/connection'
@@ -16,6 +16,10 @@ import {
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
 import type { Pane } from '../../api/types'
+import { uid } from '../../utils/id'
+import { promptChecked } from '../../utils/guard'
+import { isSecretPrompt, lastNonEmptyLine } from '../../utils/secret'
+import { approvalNotes, waitAck, type AckResult } from '../../stores/sendAck'
 import { useKeyRowConfig } from '../../composables/useKeyRowConfig'
 import ArrowPad from './ArrowPad.vue'
 import HistorySuggest from './HistorySuggest.vue'
@@ -30,7 +34,14 @@ const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
 
 const text = ref('')
+const filledText = ref('')
+const phase = ref<'idle' | 'sending'>('idle')
+const sendNote = ref('')
 const cmdInputEl = ref<HTMLTextAreaElement | null>(null)
+const secretInputEl = ref<HTMLInputElement | null>(null)
+const conn = useConnectionStore()
+let alive = true
+let sendGen = 0
 const showArrows = ref(false)
 const arrowBtnEl = ref<HTMLElement | null>(null)
 const rootEl = ref<HTMLElement | null>(null)
@@ -54,17 +65,71 @@ function toggleArrows() {
   }
 }
 
-// Restore draft when pane changes
+const secretLine = computed(() => {
+  if (!conn.hasFeature('secret-input')) return ''
+  const line = lastNonEmptyLine(term.content)
+  return isSecretPrompt(line) ? line : ''
+})
+const secretMode = computed(() => secretLine.value !== '')
+const capturedTail = ref('')
+const checked = computed(() => promptChecked(props.pane))
+const paneNote = computed(() => (props.pane ? approvalNotes.value[props.pane.pane_id] || '' : ''))
+
+// Restore draft when pane changes. A password field never shows the draft.
 watch(
   () => props.pane?.pane_id,
   (id) => {
-    if (id) text.value = term.getInputDraft(id)
+    capturedTail.value = ''
+    filledText.value = ''
+    sendNote.value = ''
+    phase.value = 'idle'
+    sendGen++
+    if (!id) {
+      text.value = ''
+      return
+    }
+    text.value = secretMode.value ? '' : term.getInputDraft(id)
+    if (secretMode.value) capturedTail.value = secretLine.value
   },
   { immediate: true },
 )
-// Persist draft on change
+// Persist draft on change. Secret text stays out of drafts and history.
 watch(text, (t) => {
+  if (secretMode.value) return
   if (props.pane?.pane_id) term.setInputDraft(props.pane.pane_id, t)
+})
+
+// Remember the prompt line when it is recognized. A later prompt clears what
+// was typed for the previous one and keeps the new line for expect_tail.
+watch(secretLine, (line, prev) => {
+  if (line === prev) return
+  if (prev) text.value = ''
+  capturedTail.value = line
+  if (line) filledText.value = ''
+}, { immediate: true })
+watch(secretMode, (on, was) => {
+  if (on) {
+    text.value = ''
+    filledText.value = ''
+    return
+  }
+  if (was && props.pane?.pane_id) text.value = term.getInputDraft(props.pane.pane_id)
+})
+
+function blankSecret() {
+  if (!secretMode.value) return
+  text.value = ''
+}
+function onPageHide() {
+  if (document.visibilityState === 'hidden') blankSecret()
+}
+onMounted(() => document.addEventListener('visibilitychange', onPageHide))
+onUnmounted(() => {
+  alive = false
+  document.removeEventListener('visibilitychange', onPageHide)
+})
+watch(() => conn.status, (s) => {
+  if (s === 'disconnected') blankSecret()
 })
 
 const isBlocked = computed(() => (props.pane?.status || '').toLowerCase().includes('block'))
@@ -182,10 +247,36 @@ function approve(opt: ApproveOption) {
   haptic(18)
   filledText.value = ''
   if (isCursor.value) {
-    term.sendKeySequence(cursorKeySequence(opt.index))
-  } else {
-    term.respond(opt.payload, opt.index)
+    approveCursor(opt.index)
+    return
   }
+  term.respond(opt.payload, opt.index)
+}
+
+// Cursor menus move by arrow keys. One relay call checks prompt_id, then
+// sends the whole sequence and stops if a key fails. Old relays have neither
+// prompt-guard nor send-ack: keep the per-key path, and the card is not
+// shown as checked.
+function approveCursor(index: number) {
+  const keys = cursorKeySequence(index)
+  const guard = conn.hasFeature('prompt-guard')
+  const ack = conn.hasFeature('send-ack')
+  if (!guard && !ack) {
+    term.sendKeySequence(keys)
+    return
+  }
+  const paneId = props.pane?.pane_id || ''
+  const requestId = ack ? uid() : undefined
+  const ok = term.sendKeySequence(keys, {
+    promptId: guard ? props.pane?.prompt_id : undefined,
+    requestId,
+  })
+  if (!requestId) return
+  if (!ok) {
+    approvalNotes.value = { ...approvalNotes.value, [paneId]: 'Unconfirmed' }
+    return
+  }
+  void waitAck(requestId, paneId, 'respond')
 }
 
 // --- keys & input ---
@@ -200,8 +291,7 @@ function openConfig() {
 
 // Two-phase send: first click fills text into term (no Enter),
 // second click sends Enter to execute.
-const filledText = ref('')
-const isArmed = computed(() => filledText.value !== '')
+const isArmed = computed(() => filledText.value !== '' && !secretMode.value)
 
 // Remember a prompt once it is actually submitted (Enter), not when it is
 // merely filled into the agent's input.
@@ -219,7 +309,14 @@ function sendKey(key: string) {
   haptic(8)
   const k = consumeCtrl(key)
   // The Enter key button also submits whatever was filled in.
-  if (k === 'Enter' && filledText.value) recordPrompt(filledText.value)
+  // Other keys stay fire-and-forget so the row does not wait on a receipt.
+  if (k === 'Enter' && filledText.value) {
+    if (conn.hasFeature('send-ack')) {
+      confirmArmed()
+      return
+    }
+    recordPrompt(filledText.value)
+  }
   term.sendKey(k)
   filledText.value = '' // any key press disarms
 }
@@ -234,8 +331,124 @@ function onArrowKey(key: string) {
   filledText.value = ''
 }
 
+function failNote(result: AckResult) {
+  sendNote.value = result.ok ? '' : result.reason === 'unconfirmed' ? 'Unconfirmed' : result.message
+}
+
+// Follow one composer send. The callback runs only if this pane is still current.
+function trackInput(requestId: string, onDone: (result: AckResult) => void) {
+  const paneId = props.pane?.pane_id
+  const gen = ++sendGen
+  phase.value = 'sending'
+  sendNote.value = 'Sending'
+  void waitAck(requestId, paneId || '', 'input').then((result) => {
+    if (!alive || gen !== sendGen || props.pane?.pane_id !== paneId) return
+    releaseSendFocus()
+    onDone(result)
+  })
+}
+
+// readonly keeps the field focused while a receipt is in flight. If focus
+// still landed on body, put it back when the receipt arrives.
+function releaseSendFocus() {
+  phase.value = 'idle'
+  if (document.activeElement === document.body) focusInput()
+}
+
+function markUnconfirmed() {
+  releaseSendFocus()
+  sendNote.value = 'Unconfirmed'
+}
+
+function submitSecret(body: string) {
+  const ack = conn.hasFeature('send-ack')
+  const requestId = ack ? uid() : undefined
+  const extra = requestId || capturedTail.value ? { requestId, expectTail: capturedTail.value || undefined } : undefined
+  const ok = extra ? term.sendText(body, true, extra) : term.sendText(body, true)
+  text.value = ''
+  filledText.value = ''
+  if (!ack || !requestId) {
+    sendNote.value = ''
+    return
+  }
+  if (!ok) {
+    markUnconfirmed()
+    return
+  }
+  trackInput(requestId, (result) => {
+    if (result.ok) sendNote.value = ''
+    else failNote(result)
+  })
+}
+
+function cancelSecret() {
+  sendGen++
+  phase.value = 'idle'
+  sendNote.value = ''
+  text.value = ''
+  filledText.value = ''
+  term.sendKey('Ctrl+c')
+}
+
+function confirmArmed() {
+  const remembered = filledText.value
+  if (!conn.hasFeature('send-ack')) {
+    recordPrompt(remembered)
+    term.sendKey('Enter')
+    text.value = ''
+    filledText.value = ''
+    return
+  }
+  const id = uid()
+  const ok = term.sendKey('Enter', id)
+  if (!ok) {
+    markUnconfirmed()
+    return
+  }
+  trackInput(id, (result) => {
+    if (!result.ok) {
+      failNote(result)
+      return
+    }
+    sendNote.value = ''
+    recordPrompt(remembered)
+    text.value = ''
+    filledText.value = ''
+  })
+}
+
+function deliverFill(body: string) {
+  if (!conn.hasFeature('send-ack')) {
+    term.sendText(body, false)
+    filledText.value = body
+    text.value = ''
+    return
+  }
+  const id = uid()
+  const ok = term.sendText(body, false, { requestId: id })
+  if (!ok) {
+    markUnconfirmed()
+    return
+  }
+  trackInput(id, (result) => {
+    if (!result.ok) {
+      failNote(result)
+      return
+    }
+    sendNote.value = ''
+    filledText.value = body
+    text.value = ''
+  })
+}
+
 function submit() {
+  if (phase.value === 'sending') return
   haptic()
+  if (secretMode.value) {
+    if (!text.value) return
+    submitSecret(text.value)
+    return
+  }
   const rawText = text.value.trim()
   // Use !tunnel prefix instead of /tunnel to avoid hijacking shell input.
   // The ! prefix is a common command-mode convention and won't conflict with
@@ -253,24 +466,17 @@ function submit() {
   }
 
   if (isArmed.value) {
-    // Second click: send Enter to execute
-    recordPrompt(filledText.value)
-    term.sendKey('Enter')
-    text.value = ''
-    filledText.value = ''
-  } else {
-    // First click: fill text into term without submitting
-    const t = text.value
-    if (!t) return
-    term.sendText(t, false)
-    filledText.value = t
-    text.value = '' // clear input after fill
+    confirmArmed()
+    return
   }
+  // First click: fill text into term without submitting
+  const t = text.value
+  if (!t) return
+  deliverFill(t)
 }
 
 // Enter submits (like the form's own submit); long text wraps; Shift+Enter
 // adds a line where the relay can paste multi-line text.
-const conn = useConnectionStore()
 const canMultiline = () => conn.hasFeature('send-text-paste')
 const wrap = useWrappingInput(cmdInputEl, text, () => submit(), canMultiline)
 
@@ -283,11 +489,17 @@ function onInput() {
   wrap.onInput()
   // New text typed — disarm so next send re-fills
   filledText.value = ''
+  if (phase.value !== 'sending') sendNote.value = ''
+}
+
+function onSecretInput() {
+  if (phase.value !== 'sending') sendNote.value = ''
 }
 
 // Ctrl+Enter: quick send — fill text + Enter in one shot (skips two-phase)
 function focusInput() {
-  cmdInputEl.value?.focus()
+  if (secretMode.value) secretInputEl.value?.focus()
+  else cmdInputEl.value?.focus()
 }
 
 function insertText(ch: string) {
@@ -306,13 +518,37 @@ function insertText(ch: string) {
 defineExpose({ focusInput, insertText })
 
 function quickSend() {
+  if (phase.value === 'sending') return
   haptic()
   const t = text.value
   if (!t) return
-  term.sendText(t, true)
-  recordPrompt(t)
-  text.value = ''
-  filledText.value = ''
+  if (secretMode.value) {
+    submitSecret(t)
+    return
+  }
+  if (!conn.hasFeature('send-ack')) {
+    term.sendText(t, true)
+    recordPrompt(t)
+    text.value = ''
+    filledText.value = ''
+    return
+  }
+  const id = uid()
+  const ok = term.sendText(t, true, { requestId: id })
+  if (!ok) {
+    markUnconfirmed()
+    return
+  }
+  trackInput(id, (result) => {
+    if (!result.ok) {
+      failNote(result)
+      return
+    }
+    sendNote.value = ''
+    recordPrompt(t)
+    text.value = ''
+    filledText.value = ''
+  })
 }
 
 function onFill(t: string) {
@@ -348,6 +584,7 @@ function insertIntoInput(snippet: string, kind: 'append' | 'prepend' | 'replace'
 watch(
   () => term.fillSignal,
   (sig) => {
+    if (secretMode.value) return
     if (sig) insertIntoInput(sig.text, sig.kind)
   },
 )
@@ -362,7 +599,7 @@ const suggest = useHistorySuggest({
   text,
   kind: 'ag',
   where: () => whereOf(props.pane),
-  enabled: () => inputFocused.value,
+  enabled: () => inputFocused.value && !secretMode.value,
   accept: acceptSuggestion,
   openHistory: () => emit('history'),
 })
@@ -372,6 +609,8 @@ const suggest = useHistorySuggest({
   <div ref="rootEl" class="term-input">
     <div v-if="isBlocked" class="approve-bar" role="group" aria-label="Approve agent">
       <span class="approve-label">waiting</span>
+      <span v-if="checked" class="qa-checked">Verified</span>
+      <p v-if="paneNote" class="qa-note" role="status">{{ paneNote }}</p>
       <button
         v-for="opt in approveOptions"
         :key="opt.payload + opt.index"
@@ -491,6 +730,7 @@ const suggest = useHistorySuggest({
 
     <!-- Floats above the input (absolute): showing it never shifts the layout. -->
     <HistorySuggest
+      v-if="!secretMode"
       class="suggest-float"
       :items="suggest.suggestions.value"
       :typed="text"
@@ -498,9 +738,31 @@ const suggest = useHistorySuggest({
       @pick="acceptSuggestion"
     />
 
+    <p v-if="sendNote" class="send-note" role="status">{{ sendNote }}</p>
     <form class="input-row" @submit.prevent="submit">
       <span class="prompt" aria-hidden="true">❯</span>
+      <input
+        v-if="secretMode"
+        ref="secretInputEl"
+        v-model="text"
+        class="cmd"
+        type="password"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        enterkeyhint="send"
+        aria-label="Password"
+        placeholder="password"
+        :readonly="phase === 'sending'"
+        @input="onSecretInput"
+        @focus="inputFocused = true"
+        @blur="inputFocused = false"
+        @keydown.ctrl.enter.prevent="quickSend"
+        @keydown.meta.enter.prevent="quickSend"
+      />
       <textarea
+        v-else
         ref="cmdInputEl"
         v-model="text"
         class="cmd"
@@ -512,6 +774,7 @@ const suggest = useHistorySuggest({
         spellcheck="false"
         enterkeyhint="send"
         aria-label="Command to send to pane"
+        :readonly="phase === 'sending'"
         @beforeinput="wrap.onBeforeInput"
         @input="onInput"
         @focus="inputFocused = true"
@@ -520,8 +783,9 @@ const suggest = useHistorySuggest({
         @keydown.meta.enter.prevent="quickSend"
         @keydown="onCmdKeydown"
       ></textarea>
-      <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="!text.length && !isArmed" :aria-label="isArmed ? 'Send command to pane' : 'Fill command into terminal'">
-        {{ isArmed ? 'send' : 'fill' }}
+      <button v-if="secretMode" type="button" class="send-btn" aria-label="Cancel" @click="cancelSecret">Cancel</button>
+      <button type="submit" class="send-btn" :class="{ armed: isArmed }" :disabled="phase === 'sending' || (!text.length && !isArmed)" :aria-label="secretMode ? 'Send password' : (isArmed ? 'Send command to pane' : 'Fill command into terminal')">
+        {{ secretMode || isArmed ? 'send' : 'fill' }}
       </button>
     </form>
 
@@ -575,6 +839,20 @@ const suggest = useHistorySuggest({
   color: var(--red);
   animation: pulse 1.2s ease-in-out infinite;
 }
+.qa-checked {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  color: var(--green);
+}
+.qa-note,
+.send-note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--amber);
+}
+.send-note { margin: 0 0 6px; }
 .appr-btn {
   font-family: var(--font-mono);
   font-size: var(--text-sm);

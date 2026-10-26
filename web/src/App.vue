@@ -39,6 +39,8 @@ import {
   closeTopRegisteredLayer,
 } from './composables/useShortcuts';
 import { ws } from './api/ws';
+import { dispatchRespond, promptChecked } from './utils/guard';
+import { approvalNotes } from './stores/sendAck';
 import type { ServerMessage, Pane } from './api/types';
 import { relayHostLabel, relayHttpBase, relayMatchesPageOrigin, relayNeedsToken, sessionTokenFor } from './utils/relay';
 import { createAutoHideScroll, autoHideStep, AUTO_HIDE } from './utils/autoHideHeader';
@@ -723,7 +725,10 @@ let unbindShortcuts: (() => void) | null = null;
 function quickApprove(paneId: string, answer: string) {
   haptic(18);
   const pane = agents.agents.find((a) => a.pane_id === paneId);
-  ws.send({ type: 'respond', pane_id: paneId, text: answer, submit: pane ? paneKind(pane) === 'shell' : undefined });
+  dispatchRespond(paneId, answer, {
+    submit: pane ? paneKind(pane) === 'shell' : undefined,
+    promptId: pane?.prompt_id,
+  });
 }
 
 function qaTone(payload: string, label?: string): 'yes' | 'no' | 'neutral' {
@@ -914,7 +919,17 @@ onMounted(() => {
       // route preview reads to the previews store, terminal reads to the terminal
       if (msg.purpose === 'preview') previews.setPreview(msg.pane_id, msg.content);
       else if (conn.hasFeature('incremental-terminal'))
-        term.setContent(msg.pane_id, msg.content, msg.append === true, msg.rev, msg.base_rev, msg.poll === true);
+        term.setContent(
+          msg.pane_id,
+          msg.content,
+          msg.append === true,
+          msg.rev,
+          msg.base_rev,
+          msg.poll === true,
+          msg.gen,
+          msg.base_gen,
+          msg.epoch,
+        );
       else term.setContent(msg.pane_id, msg.content);
     }
     if (msg.type === 'agents') {
@@ -1341,6 +1356,8 @@ onUnmounted(() => {
                     <span v-if="a.host && a.host !== 'local'" class="host">{{ a.host }}</span>
                   </div>
                   <pre v-if="bucket(a.status) === 'blocked' && a.prompt" class="qa-prompt">{{ a.prompt }}</pre>
+                  <span v-if="bucket(a.status) === 'blocked' && promptChecked(a)" class="qa-checked">Verified</span>
+                  <p v-if="bucket(a.status) === 'blocked' && approvalNotes[a.pane_id]" class="qa-note" role="status">{{ approvalNotes[a.pane_id] }}</p>
 
                   <div v-if="bucket(a.status) === 'blocked'" class="quick-approve" @click.stop>
                     <template v-if="a.options && a.options.length">

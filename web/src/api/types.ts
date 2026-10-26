@@ -18,6 +18,7 @@ export interface Pane {
   prompt?: string
   options?: string[] // approval payloads
   option_labels?: string[] // approval display labels
+  prompt_id?: string // prompt-guard: sha256 of the visible screen when the menu was parsed
   last_active?: number // epoch seconds of last content change
   valid_paths?: string[] // file paths in last content that exist on disk
 }
@@ -54,8 +55,16 @@ export interface PaneContent {
   rev?: number
   /** for append: revision of the snapshot the delta extends */
   base_rev?: number
+  /** monotonic generation of these bytes; orders a snapshot against a delta while rev stays put */
+  gen?: number
+  /** for append: generation of the snapshot the delta extends */
+  base_gen?: number
+  /** relay process that issued gen; a new value starts the sequence over */
+  epoch?: number
   /** echoed: subscription refresh — the client must not replace its content with this */
   poll?: boolean
+  /** snapshot was cut at the relay baseline cap while the client asked for more */
+  truncated?: boolean
 }
 
 export interface TodoBinding {
@@ -89,6 +98,14 @@ export interface ErrorMsg {
   message: string
   key?: string
   req_id?: string
+  request_id?: string // echoed for send-ack
+}
+
+export interface Sent {
+  type: 'sent'
+  op: string
+  pane_id?: string
+  request_id: string
 }
 
 export interface FileContent {
@@ -217,6 +234,8 @@ export interface Respond {
   pane_id: string
   opt_index?: number
   submit?: boolean
+  request_id?: string
+  prompt_id?: string
 }
 
 export interface SendText {
@@ -226,12 +245,20 @@ export interface SendText {
   submit?: boolean
   /** multi-line text goes as a bracketed paste (feature "send-text-paste") */
   paste?: boolean
+  request_id?: string
+  /** secret-input: normalized last line the password field was shown for */
+  expect_tail?: string
 }
 
 export interface SendKeys {
   type: 'send_keys'
   keys: string
   pane_id: string
+  request_id?: string
+  /** prompt-guard: checked once before sequence is sent */
+  prompt_id?: string
+  /** one approval; the relay sends these in order and stops on the first error */
+  sequence?: string[]
 }
 
 export interface ReadPane {
@@ -566,6 +593,7 @@ export type ServerMessage =
   | GitLogViewResult
   | PrefsSnapshot
   | ErrorMsg
+  | Sent
   | TunnelsSnapshot
   | TunnelUpdated
   | PaneCreated

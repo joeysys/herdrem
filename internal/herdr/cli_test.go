@@ -2,10 +2,12 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -124,6 +126,31 @@ func TestBuildCmdSSHQuotesRemoteArgs(t *testing.T) {
 	}
 }
 
+func TestSendTextErrorRedactsPayload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake requires POSIX")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewCLIClient(bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.SendText(context.Background(), "", "p1", "s3cret-hunter")
+	if err == nil {
+		t.Fatal("expected send-text failure")
+	}
+	if strings.Contains(err.Error(), "s3cret-hunter") {
+		t.Fatalf("error leaked payload: %v", err)
+	}
+	if !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("error = %v, want <redacted>", err)
+	}
+}
+
 func TestHostLabel(t *testing.T) {
 	if hostLabel("") != "local" || hostLabel("local") != "local" {
 		t.Error("local host should map to 'local'")
@@ -172,4 +199,70 @@ esac
 		t.Fatal(err)
 	}
 	return bin
+}
+
+func TestObservePaneSignalsWithoutGridOrAttach(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake requires POSIX")
+	}
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	bin := filepath.Join(dir, "herdr")
+	script := `#!/bin/sh
+printf '%s\n' "$1" "$2" "$3" "$4" "$5" > "$HERDR_ARGV_FILE"
+printf 'x'
+exec sleep 30
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ARGV_FILE", argv)
+	c, err := NewCLIClient(bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan struct{})
+	var once sync.Once
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.ObservePane(ctx, "pane-1", func() {
+			once.Do(func() { close(got) })
+		})
+	}()
+	select {
+	case <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("observe produced no signal")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("after cancel: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("observe did not return after cancel")
+	}
+
+	body, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if strings.Contains(text, "attach") || strings.Contains(text, "--cols") || strings.Contains(text, "--rows") {
+		t.Fatalf("observe argv must not resize or attach: %q", text)
+	}
+	gotArgs := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	want := []string{"terminal", "session", "observe", "pane-1"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("argv lines = %q", gotArgs)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("argv = %q, want %q", gotArgs, want)
+		}
+	}
 }

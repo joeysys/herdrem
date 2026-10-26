@@ -66,15 +66,18 @@ type Poller struct {
 	menuGen             map[string]int64          // pane_id → generation, bumped by InvalidateMenu to invalidate in-flight reads
 
 	// incremental terminal content: pane_id → last seen content snapshot
-	contentMu       sync.Mutex
-	contentCache    map[string]string       // pane_id → last full content
-	contentRevs     map[string]int          // pane_id → revision of the cached content
-	contentSeqs     map[string]int          // pane_id → state_change_seq of the cached content
-	contentAt       map[string]time.Time    // pane_id → when the cached content was last read
-	contentVerAt    map[string]time.Time    // pane_id → when the cached rev/seq was last confirmed by a snapshot
-	subscribers     map[string]int64        // pane_id → unix ts of last read_pane request (TTL-based subscription)
-	previewCache    map[string]previewEntry // pane_id → short-lived unversioned preview read
-	previewInflight map[string]*previewCall // pane_id → in-flight preview read (singleflight)
+	contentMu        sync.Mutex
+	contentCache     map[string]string       // pane_id → last full content
+	contentRevs      map[string]int          // pane_id → revision of the cached content
+	contentSeqs      map[string]int          // pane_id → state_change_seq of the cached content
+	contentGen       map[string]int          // pane_id → monotonic generation of the cached bytes
+	contentReadLines map[string]int          // pane_id → line window of the cached baseline
+	contentEpoch     int                     // process-local epoch sent with contentGen
+	contentAt        map[string]time.Time    // pane_id → when the cached content was last read
+	contentVerAt     map[string]time.Time    // pane_id → when the cached rev/seq was last confirmed by a snapshot
+	subscribers      map[string]int64        // pane_id → unix ts of last read_pane request (TTL-based subscription)
+	previewCache     map[string]previewEntry // pane_id → short-lived unversioned preview read
+	previewInflight  map[string]*previewCall // pane_id → in-flight preview read (singleflight)
 
 	// client-connection driven enrichment gating: path validation, blocked-menu
 	// reads, and terminal delta reads are display work — they pause when no
@@ -86,8 +89,26 @@ type Poller struct {
 	// single-flight guard so a slow pushContentDeltas goroutine is never
 	// overlapped by the next poll cycle: the previous run must finish
 	// (including its slow reads and cache writes) before a new one starts.
-	deltaMu      sync.Mutex
-	deltaRunning bool
+	// deltaForce records panes an observe signal asked to re-read once the
+	// in-flight pass finishes. Streamed output does not move revision or
+	// state_change_seq, so that follow-up pass must not use the skip.
+	// deltaPollWait records poll panes that arrived during that pass. They
+	// are read once on the follow-up, without the force bit, so a stream of
+	// observe signals cannot drop them.
+	deltaMu       sync.Mutex
+	deltaRunning  bool
+	deltaForce    map[string]bool
+	deltaPollWait map[string]herdr.Pane
+
+	// terminal session observe (scheme C). One local subprocess per pane.
+	// Stdout is only a "new output" signal; see observe.go.
+	observeMu      sync.Mutex
+	observing      map[string]*observeRun
+	observeRetry   map[string]time.Time // pane_id → earliest next start after an unexpected exit
+	observePending map[string]bool      // a coalesce timer is already armed
+	observeTimers  map[string]*time.Timer
+	observeWarned  map[string]bool
+	observeGen     uint64
 
 	// file existence checker (set after construction to avoid circular dep)
 	fileSvc   existsChecker
@@ -129,13 +150,14 @@ type existsChecker interface {
 // state change always forces a fresh read — stale approval options are never
 // shown just to save CPU.
 type menuEntry struct {
-	opts   []string
-	labels []string
-	prompt string
-	rev    int
-	seq    int
-	agent  string
-	at     time.Time
+	opts     []string
+	labels   []string
+	prompt   string
+	promptID string
+	rev      int
+	seq      int
+	agent    string
+	at       time.Time
 }
 
 // previewEntry is a short-lived unversioned preview read. Deliberately
@@ -190,11 +212,19 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 		contentCache:        make(map[string]string),
 		contentRevs:         make(map[string]int),
 		contentSeqs:         make(map[string]int),
+		contentGen:          make(map[string]int),
+		contentReadLines:    make(map[string]int),
+		contentEpoch:        newContentEpoch(),
 		contentAt:           make(map[string]time.Time),
 		contentVerAt:        make(map[string]time.Time),
 		subscribers:         make(map[string]int64),
 		previewCache:        make(map[string]previewEntry),
 		previewInflight:     make(map[string]*previewCall),
+		observing:           make(map[string]*observeRun),
+		observeRetry:        make(map[string]time.Time),
+		observePending:      make(map[string]bool),
+		observeTimers:       make(map[string]*time.Timer),
+		observeWarned:       make(map[string]bool),
 		trigger:             make(chan struct{}, 1),
 		timingNotify:        make(chan struct{}, 1),
 	}
@@ -441,6 +471,7 @@ func (p *Poller) CwdRoots(host string) []string {
 func (p *Poller) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.pollInterval())
 	defer ticker.Stop()
+	defer p.stopAllObservers()
 
 	p.pollOnce(ctx)
 	for {
@@ -525,6 +556,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			} else {
 				pane.Options = nil
 				pane.OptionLabels = nil
+				pane.PromptID = ""
 				p.activeMu.Lock()
 				delete(p.menuCache, pane.PaneID)
 				p.activeMu.Unlock()
@@ -595,12 +627,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		// asynchronously so a slow remote read (ssh) can never stall the whole
 		// poll loop, but is single-flight: if the previous run is still reading,
 		// this cycle skips rather than overlapping it.
-		if p.tryStartDelta() {
-			go func() {
-				defer p.deltaDone()
-				p.pushContentDeltas(ctx, merged)
-			}()
-		}
+		p.kickDeltaPoll(ctx, merged)
 	} else {
 		// No connected clients for a while: skip the expensive display work but
 		// keep the cached path list on the panes so broadcasts stay consistent.
@@ -620,6 +647,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			Agents: toAny(merged),
 		})
 	}
+
+	// Start or reap observe subprocesses after routing is current, including
+	// when enrichment is off, so a hidden page's expired subscription releases
+	// the process without waiting for the next connected cycle.
+	p.syncObservers()
 }
 
 // stalePanes returns the retained panes of a host whose snapshot just failed,
@@ -985,7 +1017,7 @@ func panesChanged(prev, cur []herdr.Pane) bool {
 		return true
 	}
 	fp := func(p herdr.Pane) string {
-		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + p.WorkspaceLabel + ":" + p.Prompt + ":" + strings.Join(p.Options, ",") + ":" + strings.Join(p.OptionLabels, "|") + ":" + strconv.Itoa(len(p.ValidPaths)) + ":" + strconv.FormatBool(p.Stale)
+		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + p.WorkspaceLabel + ":" + p.Prompt + ":" + strings.Join(p.Options, ",") + ":" + strings.Join(p.OptionLabels, "|") + ":" + p.PromptID + ":" + strconv.Itoa(len(p.ValidPaths)) + ":" + strconv.FormatBool(p.Stale)
 	}
 	seen := make(map[string]struct{}, len(cur))
 	for _, p := range cur {
@@ -1016,6 +1048,7 @@ func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) 
 		time.Since(e.at) < menuCacheTTL {
 		pane.Options = e.opts
 		pane.OptionLabels = e.labels
+		pane.PromptID = e.promptID
 		if pane.Prompt == "" {
 			pane.Prompt = e.prompt
 		}
@@ -1028,7 +1061,7 @@ func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) 
 	gen := p.menuGen[pane.PaneID]
 	p.activeMu.Unlock()
 
-	content, err := p.client.ReadPane(ctx, host, pane.PaneID, 30)
+	content, err := p.client.ReadPane(ctx, host, pane.PaneID, herdr.VisibleScreenLines)
 	p.metrics.mu.Lock()
 	p.metrics.paneReads++
 	p.metrics.mu.Unlock()
@@ -1040,6 +1073,10 @@ func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) 
 	opts, labels := herdr.DetectMenu(text, pane.Agent)
 	pane.Options = opts
 	pane.OptionLabels = labels
+	pane.PromptID = ""
+	if len(opts) > 0 {
+		pane.PromptID = herdr.PromptID(text, pane.Agent)
+	}
 	if pane.Prompt == "" {
 		pane.Prompt = promptExcerpt(text)
 	}
@@ -1047,7 +1084,7 @@ func (p *Poller) attachMenu(ctx context.Context, host string, pane *herdr.Pane) 
 	p.activeMu.Lock()
 	if p.menuGen[pane.PaneID] == gen {
 		p.menuCache[pane.PaneID] = menuEntry{
-			opts: opts, labels: labels, prompt: pane.Prompt,
+			opts: opts, labels: labels, prompt: pane.Prompt, promptID: pane.PromptID,
 			rev: pane.Revision, seq: pane.StateChangeSeq, agent: pane.Agent, at: time.Now(),
 		}
 	}
@@ -1067,9 +1104,23 @@ func (p *Poller) applyMenuCache(pane *herdr.Pane) {
 	}
 	pane.Options = e.opts
 	pane.OptionLabels = e.labels
+	pane.PromptID = e.promptID
 	if pane.Prompt == "" {
 		pane.Prompt = e.prompt
 	}
+}
+
+// PaneAgent returns the agent name from the latest snapshot, for prompt-id
+// checks that must hash the screen the same way the card was issued.
+func (p *Poller) PaneAgent(paneID string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range p.latest {
+		if p.latest[i].PaneID == paneID {
+			return p.latest[i].Agent
+		}
+	}
+	return ""
 }
 
 // InvalidateMenu drops the cached menu for a pane and bumps its generation,
@@ -1132,6 +1183,8 @@ func (p *Poller) pruneRemotes(seen map[string]bool) bool {
 			delete(p.contentCache, id)
 			delete(p.contentRevs, id)
 			delete(p.contentSeqs, id)
+			delete(p.contentGen, id)
+			delete(p.contentReadLines, id)
 			delete(p.contentAt, id)
 			delete(p.contentVerAt, id)
 			delete(p.subscribers, id)
@@ -1309,8 +1362,10 @@ func (p *Poller) enrichLastActive(panes []herdr.Pane) bool {
 // delta computation. The subscription is a TTL: the client refreshes it with
 // every read_pane (the frontend polls every 6s), and it expires automatically
 // a while after the last request, so disconnected clients leave no permanent
-// state behind. Note: subscription gates whether the poller reads/pushes a
-// pane's terminal traffic at all — it does not per-connection filter
+// state behind. A live subscription also keeps one local terminal-observe
+// process when the herdr client supports it; the process ends once the
+// subscription expires. Note: subscription gates whether the poller reads or
+// pushes a pane's terminal traffic at all — it does not per-connection filter
 // delivery. Both deltas and the fallback full snapshots are routed through
 // BroadcastJSONIncremental, so they reach only incremental-capable clients;
 // older clients are served via the direct read_pane response path.
@@ -1318,6 +1373,7 @@ func (p *Poller) Subscribe(paneID string) {
 	p.contentMu.Lock()
 	p.subscribers[paneID] = time.Now().Unix()
 	p.contentMu.Unlock()
+	p.ensureObserve(paneID)
 }
 
 // contentVerFreshFor is the periodic forced-probe backstop: a cached content
@@ -1325,6 +1381,16 @@ func (p *Poller) Subscribe(paneID string) {
 // rev/seq against upstream. If confirmations stop for this long (polling
 // stalled, subscriptions expired), the caller falls back to a direct read.
 const contentVerFreshFor = 30 * time.Second
+
+// observeWindowLines is the steady-state pane read. A resync may widen one
+// pane up to maxBaselineLines so the snapshot covers the history the client
+// asked to keep. The hot path stays at the smaller window.
+const observeWindowLines = 10000
+const maxBaselineLines = 100000
+
+func visualLines(s string) int {
+	return service.VisualLines(s)
+}
 
 // confirmContentVersions reconciles the content cache against the versions a
 // successful snapshot just reported. A match refreshes contentVerAt (fresh);
@@ -1449,19 +1515,22 @@ func (p *Poller) subscriberTTL() time.Duration {
 }
 
 // activeSubscription reports whether a pane currently has a live subscriber
-// and prunes expired entries opportunistically.
+// and prunes expired entries opportunistically. An expiry also stops that
+// pane's observe process, after contentMu is released.
 func (p *Poller) activeSubscription(paneID string) bool {
 	p.contentMu.Lock()
-	defer p.contentMu.Unlock()
 	ts, ok := p.subscribers[paneID]
-	if !ok {
-		return false
-	}
-	if time.Since(time.Unix(ts, 0)) > p.subscriberTTL() {
+	expired := false
+	if ok && time.Since(time.Unix(ts, 0)) > p.subscriberTTL() {
 		delete(p.subscribers, paneID)
-		return false
+		expired = true
+		ok = false
 	}
-	return true
+	p.contentMu.Unlock()
+	if expired {
+		p.stopObserve(paneID)
+	}
+	return ok
 }
 
 // diffContent decides how to transmit the new pane content given the previous
@@ -1622,26 +1691,6 @@ func classifyPaneContent(p *herdr.Pane) paneContentMode {
 	return contentIncremental
 }
 
-// tryStartDelta atomically claims the single-flight slot for a delta push.
-// Returns false if a previous run is still in flight (its reads and cache
-// writes would otherwise race with this one and could reorder rev/content).
-func (p *Poller) tryStartDelta() bool {
-	p.deltaMu.Lock()
-	defer p.deltaMu.Unlock()
-	if p.deltaRunning {
-		return false
-	}
-	p.deltaRunning = true
-	return true
-}
-
-// deltaDone releases the single-flight slot.
-func (p *Poller) deltaDone() {
-	p.deltaMu.Lock()
-	p.deltaRunning = false
-	p.deltaMu.Unlock()
-}
-
 // pushContentDeltas watches pane revisions and pushes incremental terminal
 // content to subscribed, incremental-capable clients. For each pane whose
 // revision/seq changed since the last poll, it reads the content (a generous
@@ -1650,7 +1699,15 @@ func (p *Poller) deltaDone() {
 // yield append deltas; anything else (in-place redraw, TUI, unknown pane
 // type) falls back to a full snapshot. Runs asynchronously from pollOnce so a
 // slow remote read cannot stall the poll loop.
+//
+// force lists panes that must be read even when revision and state_change_seq
+// are unchanged. Observe uses that: streamed output does not move either
+// counter, so the ordinary skip would drop the signal.
 func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
+	p.pushContentDeltasOpt(ctx, panes, nil)
+}
+
+func (p *Poller) pushContentDeltasOpt(ctx context.Context, panes []herdr.Pane, force map[string]bool) {
 	// No connected clients → nothing to push; skip the content reads entirely.
 	if p.hub.Count() == 0 {
 		return
@@ -1684,7 +1741,14 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		prevContent, havePrev := p.contentCache[pid]
 		prevRev := p.contentRevs[pid]
 		prevSeq := p.contentSeqs[pid]
-		if havePrev && rev == prevRev && seq == prevSeq {
+		n := observeWindowLines
+		if p.contentReadLines[pid] > n {
+			n = p.contentReadLines[pid]
+		}
+		if n > maxBaselineLines {
+			n = maxBaselineLines
+		}
+		if havePrev && rev == prevRev && seq == prevSeq && !force[pid] {
 			p.contentMu.Unlock()
 			p.metrics.mu.Lock()
 			p.metrics.deltaSkips++
@@ -1693,12 +1757,11 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		}
 		p.contentMu.Unlock()
 
-		// Read a generous line window. The pane's real content is usually well
-		// under this, so the read returns the full scrollback and the prefix
-		// diff produces true append deltas; only once a pane's output grows
-		// past the window (very long sessions) does it fall back to full
-		// snapshots, which is no worse than the previous behavior.
-		content, err := p.client.ReadPane(ctx, pane.Host, pid, 10000)
+		// Read the pane's baseline window. The steady state is observeWindowLines.
+		// After a resync widens it, later deltas keep that wider window so the
+		// baseline does not shrink back under the client. Past the window the
+		// read is a tail and the diff falls back to a full snapshot.
+		content, err := p.client.ReadPane(ctx, pane.Host, pid, n)
 		p.metrics.mu.Lock()
 		p.metrics.paneReads++
 		p.metrics.mu.Unlock()
@@ -1719,24 +1782,62 @@ func (p *Poller) pushContentDeltas(ctx context.Context, panes []herdr.Pane) {
 		p.logger.Debug("delta computed", "pane", pid, "rev", rev, "prev_rev", prevRev, "append", appendMode, "full", full, "delta_bytes", len(delta), "prev_len", len(prevContent), "cur_len", len(content))
 
 		p.contentMu.Lock()
+		// A resync raised the window while this narrower read was in flight.
+		// Drop it so it cannot replace the wider baseline.
+		if p.contentReadLines[pid] > n {
+			p.contentMu.Unlock()
+			continue
+		}
+		// gen moves only when the cached bytes change, so a snapshot and the
+		// delta that extends it can be ordered even while herdr's rev stays put.
+		baseGen := p.contentGen[pid]
+		gen := baseGen
+		if !havePrev || content != prevContent {
+			if baseGen == 0 {
+				gen = 1
+			} else {
+				gen = baseGen + 1
+			}
+			p.contentGen[pid] = gen
+		}
 		p.contentCache[pid] = content
 		p.contentRevs[pid] = rev
 		p.contentSeqs[pid] = seq
 		p.contentAt[pid] = time.Now()
+		if p.contentReadLines[pid] < n {
+			p.contentReadLines[pid] = n
+		}
 		p.contentMu.Unlock()
 
+		// Same bytes and the same rev/seq: nothing new to deliver. A rev change
+		// with identical text still broadcasts so the client can adopt the rev.
+		// Observe reads hit this when the signal beat a redraw that did not
+		// stick, or when the read matched the baseline.
+		if havePrev && content == prevContent && rev == prevRev && seq == prevSeq {
+			continue
+		}
 		if appendMode && delta == "" {
 			// Revision bumped but no visible change in the read window
 			// (e.g. cursor-only updates); nothing to send.
 			continue
 		}
-		p.hub.BroadcastJSONIncremental(protocol.PaneContent{
+		msg := protocol.PaneContent{
 			Type:    "pane_content",
 			PaneID:  pid,
 			Content: delta,
 			Append:  appendMode,
 			Rev:     protocol.IntPtr(rev),
 			BaseRev: protocol.IntPtr(prevRev),
-		})
+		}
+		if gen > 0 {
+			msg.Gen = protocol.IntPtr(gen)
+			if p.contentEpoch > 0 {
+				msg.Epoch = protocol.IntPtr(p.contentEpoch)
+			}
+		}
+		if appendMode && baseGen > 0 {
+			msg.BaseGen = protocol.IntPtr(baseGen)
+		}
+		p.hub.BroadcastJSONIncremental(msg)
 	}
 }

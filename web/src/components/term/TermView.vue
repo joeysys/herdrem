@@ -9,6 +9,7 @@ import { useTodoStore } from '../../stores/todo'
 import { usePrefsStore } from '../../stores/prefs'
 import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { useTermZoom } from '../../composables/useTermZoom'
+import { useWakeLockSession } from '../../composables/useWakeLock'
 import { useDoneAutoMark } from '../../composables/useDoneAutoMark'
 import { ws } from '../../api/ws'
 import TermInput from './TermInput.vue'
@@ -23,6 +24,9 @@ import { whereOf } from '../../utils/cmdHistory'
 import { tailWindow } from '../../utils/tailWindow'
 import { insertSnippet, prependSnippet } from '../../utils/inputFill'
 import { autoFocus } from '../../utils/softKeyboard'
+import { uid } from '../../utils/id'
+import { isSecretPrompt, lastNonEmptyLine } from '../../utils/secret'
+import { waitAck } from '../../stores/sendAck'
 import { caretOnEdgeLine } from '../../composables/useWrappingInput'
 import { ensureShellShortcuts, isShortcutActive, isTextInput, register, shellActions, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 import TodoPanel from '../todo/TodoPanel.vue'
@@ -150,25 +154,132 @@ const shellFocused = ref(false)
 const shellInputEl = ref<HTMLInputElement | null>(null)
 const shellKeysEl = ref<InstanceType<typeof ShellKeys> | null>(null)
 const termInputEl = ref<InstanceType<typeof TermInput> | null>(null)
+const shellNote = ref('')
+const shellPhase = ref<'idle' | 'sending'>('idle')
+const capturedTail = ref('')
+let shellGen = 0
 
-// Restore/persist shell input draft per pane
+// Shell panes use the same secret-input gate as the agent composer. The
+// visible echo is the span below, not the input (the input is opacity 0).
+const shellSecretLine = computed(() => {
+  if (!isShell.value || !conn.hasFeature('secret-input')) return ''
+  const line = lastNonEmptyLine(term.content)
+  return isSecretPrompt(line) ? line : ''
+})
+const secretMode = computed(() => shellSecretLine.value !== '')
+const shellEcho = computed(() => (secretMode.value ? '•'.repeat(shellText.value.length) : shellText.value))
+
+watch(shellSecretLine, (line, prev) => {
+  if (line === prev) return
+  if (prev) shellText.value = ''
+  capturedTail.value = line
+}, { immediate: true })
+watch(secretMode, (on, was) => {
+  if (on) {
+    shellText.value = ''
+    return
+  }
+  if (was && props.paneId) shellText.value = term.getInputDraft(props.paneId)
+})
+
+// Restore/persist shell input draft per pane. A password never enters the draft.
 watch(
   () => props.paneId,
   (id) => {
-    if (id) shellText.value = term.getInputDraft(id)
+    shellNote.value = ''
+    shellPhase.value = 'idle'
+    shellGen++
+    capturedTail.value = shellSecretLine.value
+    if (!id) {
+      shellText.value = ''
+      return
+    }
+    shellText.value = secretMode.value ? '' : term.getInputDraft(id)
   },
   { immediate: true },
 )
 watch(shellText, (t) => {
+  if (secretMode.value) return
   if (props.paneId) term.setInputDraft(props.paneId, t)
+})
+watch(() => conn.status, (s) => {
+  if (s === 'disconnected' && secretMode.value) shellText.value = ''
 })
 
 function shellSubmit() {
+  if (shellPhase.value === 'sending') return
   const t = shellText.value
   if (!t) return
-  term.sendText(t, true)
-  history.record(t, { kind: 'sh', ...whereOf(pane.value) })
+  if (secretMode.value) {
+    submitShellSecret(t)
+    return
+  }
+  const where = whereOf(pane.value)
+  if (!conn.hasFeature('send-ack')) {
+    term.sendText(t, true)
+    history.record(t, { kind: 'sh', ...where })
+    shellText.value = ''
+    return
+  }
+  const requestId = uid()
+  const ok = term.sendText(t, true, { requestId })
+  if (!ok) {
+    shellNote.value = 'Unconfirmed'
+    return
+  }
+  const paneId = props.paneId
+  const gen = ++shellGen
+  shellPhase.value = 'sending'
+  shellNote.value = 'Sending'
+  void waitAck(requestId, paneId, 'input').then((result) => {
+    if (gen !== shellGen || props.paneId !== paneId) return
+    shellPhase.value = 'idle'
+    if (result.ok) {
+      history.record(t, { kind: 'sh', ...where })
+      if (shellText.value === t) shellText.value = ''
+      shellNote.value = ''
+      return
+    }
+    shellNote.value = result.reason === 'unconfirmed' ? 'Unconfirmed' : (result.message || 'Send failed')
+  })
+}
+
+// Clear the password immediately. send-ack, when advertised, only surfaces
+// stale/error on the note — the secret is not kept until the receipt.
+function submitShellSecret(body: string) {
+  const ack = conn.hasFeature('send-ack')
+  const requestId = ack ? uid() : undefined
+  const extra = requestId || capturedTail.value
+    ? { requestId, expectTail: capturedTail.value || undefined }
+    : undefined
+  const ok = extra ? term.sendText(body, true, extra) : term.sendText(body, true)
   shellText.value = ''
+  if (!ack || !requestId) {
+    shellNote.value = ''
+    return
+  }
+  if (!ok) {
+    shellPhase.value = 'idle'
+    shellNote.value = 'Unconfirmed'
+    return
+  }
+  const paneId = props.paneId
+  const gen = ++shellGen
+  shellPhase.value = 'sending'
+  shellNote.value = 'Sending'
+  void waitAck(requestId, paneId, 'input').then((result) => {
+    if (gen !== shellGen || props.paneId !== paneId) return
+    shellPhase.value = 'idle'
+    shellNote.value = result.ok ? '' : result.reason === 'unconfirmed' ? 'Unconfirmed' : result.message
+  })
+}
+
+function cancelShellSecret() {
+  shellGen++
+  shellPhase.value = 'idle'
+  shellNote.value = ''
+  shellText.value = ''
+  term.sendKey('Ctrl+c')
 }
 
 // The shell's active text input: the ShellKeys input box when it is toggled
@@ -181,6 +292,7 @@ function activeShellInput(): HTMLInputElement | HTMLTextAreaElement | null {
 // the command at the front with a trailing space; 'append' (todo items, file
 // paths) inserts at the cursor with space padding. Focus lands after it.
 function fillShellInput(snippet: string, kind: 'append' | 'prepend') {
+  if (secretMode.value) return
   const el = activeShellInput()
   const r = kind === 'prepend'
     ? prependSnippet(shellText.value, snippet)
@@ -222,6 +334,7 @@ const showHistory = ref(false)
 
 // Replace the whole shell input with `cmd`, caret at the end.
 function setShellText(cmd: string) {
+  if (secretMode.value) return
   const el = activeShellInput()
   shellText.value = cmd
   nextTick(() => {
@@ -232,6 +345,7 @@ function setShellText(cmd: string) {
 }
 
 function openHistory() {
+  if (secretMode.value) return
   showTodo.value = false
   showHistory.value = true
 }
@@ -243,6 +357,7 @@ function closeHistory() {
 // agent prompt can be reused in a shell and vice versa.
 function pickHistory(text: string) {
   showHistory.value = false
+  if (secretMode.value) return
   if (isShell.value) setShellText(text)
   else term.requestFill(text, 'replace')
 }
@@ -253,7 +368,7 @@ const shellSuggest = useHistorySuggest({
   text: shellText,
   kind: 'sh',
   where: () => whereOf(pane.value),
-  enabled: () => isShell.value && (shellFocused.value || boxFocused.value) && !showHistory.value,
+  enabled: () => isShell.value && !secretMode.value && (shellFocused.value || boxFocused.value) && !showHistory.value,
   accept: setShellText,
   openHistory,
 })
@@ -287,7 +402,7 @@ function recallShellHistory(dir: 1 | -1): boolean {
 }
 
 function onShellKeydown(e: KeyboardEvent) {
-  if (e.isComposing) return
+  if (e.isComposing || secretMode.value) return
   if (!suggestions.value.length && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey) {
     // in multi-line text ↑ / ↓ move between lines until the first / last
     const up = e.key === 'ArrowUp'
@@ -439,6 +554,11 @@ function bindTermShortcuts() {
     if (inputHasSelection(e)) return false
     term.sendKey('Ctrl+c')
     shellText.value = ''
+    if (secretMode.value) {
+      shellGen++
+      shellPhase.value = 'idle'
+      shellNote.value = ''
+    }
     return true
   }
   shellActions.eof = (e) => {
@@ -601,6 +721,8 @@ const isDone = computed(() => statusBucket.value === 'done')
 const autoMarkReadMs = computed(() => prefs.autoMarkReadMs)
 const paneIdentity = computed(() => props.paneId)
 useDoneAutoMark(isDone, autoMarkReadMs, paneIdentity, markDone)
+// Screen wake lock follows this view. The device switch defaults off.
+useWakeLockSession()
 
 function onTodoFill(text: string) {
   term.requestFill(text)
@@ -636,6 +758,7 @@ watch(pollMs, () => {
 function onVisibility() {
   if (document.hidden) {
     stopPoll()
+    if (secretMode.value) shellText.value = ''
   } else {
     term.requestRead(50, false, true)
     startPoll()
@@ -805,18 +928,19 @@ onUnmounted(() => {
           >
             <!-- Shell: inline input inside <pre>, directly after content on same line -->
             <span v-if="isShell" class="inline-input-wrap" :class="{ focused: shellFocused }" @click.stop="focusShellInput">
-              <span class="inline-text">{{ shellText }}<span class="inline-cursor" aria-hidden="true"></span></span>
+              <span class="inline-text">{{ shellEcho }}<span class="inline-cursor" aria-hidden="true"></span></span>
               <input
                 ref="shellInputEl"
                 v-model="shellText"
                 class="inline-input"
-                type="text"
+                :type="secretMode ? 'password' : 'text'"
                 autocomplete="off"
                 autocapitalize="off"
                 autocorrect="off"
                 spellcheck="false"
                 enterkeyhint="send"
-                aria-label="Command input"
+                :aria-label="secretMode ? 'Password' : 'Command input'"
+                :readonly="shellPhase === 'sending'"
                 @focus="shellFocused = true"
                 @blur="shellFocused = false"
                 @keydown.enter.prevent="shellSubmit"
@@ -849,7 +973,7 @@ onUnmounted(() => {
         @close="closeSearch"
       />
       <HistorySuggest
-        v-if="isShell"
+        v-if="isShell && !secretMode"
         class="suggest-float"
         :items="suggestions"
         :typed="shellText"
@@ -860,14 +984,19 @@ onUnmounted(() => {
 
     <!-- Shell: special keys + quick chips; the ❯ toggle reveals an optional
          input box that shares the inline prompt's draft (v-model). -->
+    <p v-if="isShell && shellNote" class="shell-note" role="status">{{ shellNote }}</p>
     <TermInput v-if="!isShell" ref="termInputEl" :pane="pane" @edit="emit('editCommands', 'skills')" @history="openHistory" />
     <ShellKeys
       v-else
       ref="shellKeysEl"
       v-model="shellText"
       :pane="pane"
+      :secret="secretMode"
+      :busy="shellPhase === 'sending'"
       @fill="onShellFill"
       @edit="emit('editCommands', 'shell_cmds')"
+      @submit="shellSubmit"
+      @cancel="cancelShellSecret"
       @input-keydown="onShellKeydown"
       @input-focus="boxFocused = $event"
     />
@@ -1067,6 +1196,13 @@ onUnmounted(() => {
   right: 8px;
   bottom: 40px;
   z-index: 15;
+}
+.shell-note {
+  margin: 0;
+  padding: 4px 12px 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--amber);
 }
 
 .term-scroll {

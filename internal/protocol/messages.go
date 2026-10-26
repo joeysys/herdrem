@@ -39,17 +39,23 @@ type BlockedNotify struct {
 // full snapshot (BaseRev is the revision that snapshot was taken at) and the
 // client should append it to its current content. When Append is false,
 // Content is the full pane content (initial load, reconnect, or after the
-// server lost its diff baseline) and Rev is its revision.
+// server lost its diff baseline) and Rev is its revision. Gen moves when the
+// cached bytes change even if Rev does not, so a late snapshot can be dropped
+// behind a newer delta.
 type PaneContent struct {
-	Type    string `json:"type"`
-	PaneID  string `json:"pane_id"`
-	Content string `json:"content"`
-	Lines   int    `json:"lines,omitempty"`    // echoed from request
-	Purpose string `json:"purpose,omitempty"`  // "term" | "preview"
-	Append  bool   `json:"append,omitempty"`   // true = content is incremental delta
-	Rev     *int   `json:"rev,omitempty"`      // revision this content represents (nil = unknown; 0 is a real revision)
-	BaseRev *int   `json:"base_rev,omitempty"` // for append: revision of the snapshot the delta extends
-	Poll    bool   `json:"poll,omitempty"`     // echoed: response is a subscription refresh, not a content replacement
+	Type      string `json:"type"`
+	PaneID    string `json:"pane_id"`
+	Content   string `json:"content"`
+	Lines     int    `json:"lines,omitempty"`     // echoed from request
+	Purpose   string `json:"purpose,omitempty"`   // "term" | "preview"
+	Append    bool   `json:"append,omitempty"`    // true = content is incremental delta
+	Rev       *int   `json:"rev,omitempty"`       // revision this content represents (nil = unknown; 0 is a real revision)
+	BaseRev   *int   `json:"base_rev,omitempty"`  // for append: revision of the snapshot the delta extends
+	Gen       *int   `json:"gen,omitempty"`       // monotonic generation of these bytes (nil = unknown)
+	BaseGen   *int   `json:"base_gen,omitempty"`  // for append: generation of the snapshot the delta extends
+	Epoch     *int   `json:"epoch,omitempty"`     // process epoch for gen; a new value starts the sequence over
+	Poll      bool   `json:"poll,omitempty"`      // echoed: response is a subscription refresh, not a content replacement
+	Truncated bool   `json:"truncated,omitempty"` // snapshot hit the relay baseline cap while the client asked for more
 }
 
 // TodoUpdated signals a todo item change.
@@ -126,11 +132,21 @@ type GitLogViewResult struct {
 
 // ErrorMsg is a generic error response.
 type ErrorMsg struct {
-	Type    string `json:"type"`
-	Op      string `json:"op"`
-	Message string `json:"message"`
-	Key     string `json:"key,omitempty"`
-	ReqID   string `json:"req_id,omitempty"` // echoed when the failing request carried one
+	Type      string `json:"type"`
+	Op        string `json:"op"`
+	Message   string `json:"message"`
+	Key       string `json:"key,omitempty"`
+	ReqID     string `json:"req_id,omitempty"`     // echoed when the failing request carried one
+	RequestID string `json:"request_id,omitempty"` // echoed for send-ack (send_text / send_keys / respond)
+}
+
+// Sent is the send-ack success receipt. It is written only when the request
+// carried request_id, after the herdr call has returned.
+type Sent struct {
+	Type      string `json:"type"` // "sent"
+	Op        string `json:"op"`   // send_text | send_keys | respond
+	PaneID    string `json:"pane_id,omitempty"`
+	RequestID string `json:"request_id"`
 }
 
 // --- C→S (client-to-server) ---
@@ -149,11 +165,13 @@ func DecodeType(data []byte) string {
 
 // Respond is a client approval/option command.
 type Respond struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	PaneID   string `json:"pane_id"`
-	OptIndex int    `json:"opt_index,omitempty"`
-	Submit   bool   `json:"submit,omitempty"` // append \n if missing
+	Type      string `json:"type"`
+	Text      string `json:"text"`
+	PaneID    string `json:"pane_id"`
+	OptIndex  int    `json:"opt_index,omitempty"`
+	Submit    bool   `json:"submit,omitempty"`     // append \n if missing
+	RequestID string `json:"request_id,omitempty"` // send-ack; absent on old clients
+	PromptID  string `json:"prompt_id,omitempty"`  // prompt-guard; checked before send when set
 }
 
 // SendText sends raw text to a pane.
@@ -165,13 +183,26 @@ type SendText struct {
 	// Paste sends text with line breaks as a bracketed paste, so they are
 	// inserted rather than taken as Enter (feature "send-text-paste").
 	Paste bool `json:"paste,omitempty"`
+	// RequestID asks for a sent receipt (feature "send-ack"). Absent means
+	// the old fire-and-forget behaviour.
+	RequestID string `json:"request_id,omitempty"`
+	// ExpectTail is the normalized last non-empty screen line the client saw
+	// for a secret prompt (feature "secret-input"). When set, the relay
+	// re-reads the pane and refuses to send if the tail no longer matches.
+	ExpectTail string `json:"expect_tail,omitempty"`
 }
 
 // SendKeys sends key sequences to a pane.
+// Sequence, when set, is one approval: the relay checks PromptID once, then
+// sends each key in order and stops on the first error. One RequestID covers
+// the whole sequence. Keys is the single-key form used by the key row.
 type SendKeys struct {
-	Type   string `json:"type"`
-	Keys   string `json:"keys"`
-	PaneID string `json:"pane_id"`
+	Type      string   `json:"type"`
+	Keys      string   `json:"keys"`
+	PaneID    string   `json:"pane_id"`
+	RequestID string   `json:"request_id,omitempty"` // send-ack; absent on old clients
+	PromptID  string   `json:"prompt_id,omitempty"`  // prompt-guard; checked once before a sequence
+	Sequence  []string `json:"sequence,omitempty"`   // cursor approval; takes precedence over Keys
 }
 
 // ReadPane requests pane content.

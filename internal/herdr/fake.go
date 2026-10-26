@@ -14,6 +14,12 @@ type FakeClient struct {
 	ReadContent    string
 	lastSentTextMu sync.RWMutex
 	lastSentText   string
+	sendTextCalls  int
+	// SendTextErr, when set, is returned from SendText after the call is recorded.
+	SendTextErr error
+	sentKeys    []string
+	// SendKeysErr, when set, is returned from SendKeys after the key is recorded.
+	SendKeysErr error
 	// paneSeq is a per-instance counter for generated pane IDs, so separate
 	// FakeClient instances do not share/race on one package-level counter.
 	paneSeq int
@@ -81,9 +87,18 @@ func (f *FakeClient) ReadPane(ctx context.Context, host, paneID string, lines in
 
 func (f *FakeClient) SendText(ctx context.Context, host, paneID, text string) error {
 	f.lastSentTextMu.Lock()
+	f.sendTextCalls++
 	f.lastSentText = text
+	err := f.SendTextErr
 	f.lastSentTextMu.Unlock()
-	return nil
+	return err
+}
+
+// SendCount returns how many times SendText has been called.
+func (f *FakeClient) SendCount() int {
+	f.lastSentTextMu.RLock()
+	defer f.lastSentTextMu.RUnlock()
+	return f.sendTextCalls
 }
 
 // SentText returns the last text passed to SendText.
@@ -94,7 +109,20 @@ func (f *FakeClient) SentText() string {
 }
 
 func (f *FakeClient) SendKeys(ctx context.Context, host, paneID, keys string) error {
-	return nil
+	f.lastSentTextMu.Lock()
+	f.sentKeys = append(f.sentKeys, keys)
+	err := f.SendKeysErr
+	f.lastSentTextMu.Unlock()
+	return err
+}
+
+// SentKeys returns the keys passed to SendKeys, in order.
+func (f *FakeClient) SentKeys() []string {
+	f.lastSentTextMu.RLock()
+	defer f.lastSentTextMu.RUnlock()
+	out := make([]string, len(f.sentKeys))
+	copy(out, f.sentKeys)
+	return out
 }
 
 func (f *FakeClient) StatusServer(ctx context.Context, host string) (bool, error) {

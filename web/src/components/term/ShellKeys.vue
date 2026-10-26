@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useTerminalStore } from '../../stores/terminal'
-import { useCmdHistoryStore } from '../../stores/cmdHistory'
 import { useHaptic } from '../../composables/useHaptic'
 import { useKeyRepeat } from '../../composables/useKeyRepeat'
 import { useQuickPopover } from '../../composables/useQuickPopover'
@@ -11,17 +10,18 @@ import {
   detectMenu, isStickyChoice, menuLabel,
 } from '../../utils/menu'
 import { safeStorage } from '../../utils/storage'
-import { whereOf } from '../../utils/cmdHistory'
 import type { Pane } from '../../api/types'
 import { useKeyRowConfig } from '../../composables/useKeyRowConfig'
 import ArrowPad from './ArrowPad.vue'
 import KeyRowConfigModal from './KeyRowConfigModal.vue'
 
-const props = defineProps<{ pane: Pane | null; modelValue?: string }>()
+const props = defineProps<{ pane: Pane | null; modelValue?: string; secret?: boolean; busy?: boolean }>()
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   fill: [text: string]
   edit: []
+  submit: []
+  cancel: []
   // The optional input box reports key/focus events so TermView can drive
   // command suggestions for it exactly as for the inline prompt.
   inputKeydown: [e: KeyboardEvent]
@@ -29,7 +29,6 @@ const emit = defineEmits<{
 }>()
 
 const term = useTerminalStore()
-const history = useCmdHistoryStore()
 const { haptic } = useHaptic()
 const { start, stop } = useKeyRepeat()
 
@@ -163,12 +162,17 @@ const text = computed({
 })
 
 const boxInputEl = ref<HTMLTextAreaElement | null>(null)
+const secretBoxEl = ref<HTMLInputElement | null>(null)
 
 function toggleInput() {
   haptic(8)
   showInput.value = !showInput.value
   if (showInput.value) {
     nextTick(() => {
+      if (props.secret) {
+        secretBoxEl.value?.focus()
+        return
+      }
       wrap.fit() // text kept from last time may need more than one line
       boxInputEl.value?.focus()
     })
@@ -177,17 +181,21 @@ function toggleInput() {
 
 function submitInput() {
   haptic()
+  if (props.busy) return
   const t = text.value
   if (!t) return
-  term.sendText(t, true)
-  history.record(t, { kind: 'sh', ...whereOf(props.pane) })
-  text.value = ''
+  // The parent owns both paths: expect_tail for a secret, and send-ack plus
+  // history for an ordinary command. Clearing the draft waits on that result.
+  emit('submit')
 }
 
 // The element the parent should treat as the shell's active text input:
 // the box when shown, otherwise null (TermView falls back to the inline one).
 defineExpose({
-  inputEl: () => (showInput.value ? boxInputEl.value : null),
+  inputEl: () => {
+    if (!showInput.value) return null
+    return props.secret ? secretBoxEl.value : boxInputEl.value
+  },
 })
 
 // Enter submits (like the form's own submit); long text wraps; Shift+Enter
@@ -320,7 +328,25 @@ function onArrowKey(key: string) {
 
     <form v-if="showInput" class="input-row" @submit.prevent="submitInput">
       <span class="prompt" aria-hidden="true">❯</span>
+      <input
+        v-if="secret"
+        ref="secretBoxEl"
+        v-model="text"
+        class="cmd"
+        type="password"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        enterkeyhint="send"
+        aria-label="Password"
+        placeholder="password"
+        :readonly="busy"
+        @focus="emit('inputFocus', true)"
+        @blur="emit('inputFocus', false)"
+      />
       <textarea
+        v-else
         ref="boxInputEl"
         v-model="text"
         class="cmd"
@@ -338,8 +364,10 @@ function onArrowKey(key: string) {
         @focus="emit('inputFocus', true)"
         @blur="emit('inputFocus', false)"
       ></textarea>
-      <button type="submit" class="send-btn" :disabled="!text.length" aria-label="Send command to shell">send</button>
+      <button v-if="secret" type="button" class="send-btn" aria-label="Cancel" @click="emit('cancel')">Cancel</button>
+      <button type="submit" class="send-btn" :disabled="busy || !text.length" :aria-label="secret ? 'Send password' : 'Send command to shell'">send</button>
     </form>
+    <button v-else-if="secret" type="button" class="send-btn secret-cancel" aria-label="Cancel" @click="emit('cancel')">Cancel</button>
 
     <Teleport to="body">
       <div v-if="qp.open.value === 'shellCmds'" class="qp-pop" :style="{ left: qp.pos.value.left + 'px', bottom: qp.pos.value.bottom + 'px' }" @click.stop @mouseenter="qp.cancelClose()" @mouseleave="qp.hoverClose()">

@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ShellKeys from './ShellKeys.vue'
 import { useTerminalStore } from '../../stores/terminal'
+import { useCmdHistoryStore } from '../../stores/cmdHistory'
 
 vi.mock('../../api/ws', () => ({
   ws: {
@@ -70,7 +71,7 @@ describe('ShellKeys', () => {
     expect(localStorage.getItem('herdrem_shell_input')).toBe('false')
   })
 
-  it('submits the box text with enter and clears the draft', async () => {
+  it('submits the box text through the parent and leaves the draft', async () => {
     const term = useTerminalStore()
     term.activePane = 'p1'
     const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
@@ -80,8 +81,30 @@ describe('ShellKeys', () => {
     })
 
     await wrapper.get('form.input-row').trigger('submit')
-    expect(sendText).toHaveBeenCalledWith('ls -la', true)
-    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([''])
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+    expect(sendText).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update:modelValue')).toBeFalsy()
+  })
+
+  it('emits submit for a secret and does not send or record it', async () => {
+    const term = useTerminalStore()
+    term.activePane = 'p1'
+    const sendText = vi.spyOn(term, 'sendText').mockReturnValue(true)
+    const history = useCmdHistoryStore()
+    localStorage.setItem('herdrem_shell_input', 'true')
+    const wrapper = mount(ShellKeys, {
+      props: { pane: { pane_id: 'p1', status: 'idle' }, modelValue: 's3cret', secret: true },
+    })
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    const input = wrapper.get('input[type="password"]')
+    expect(input.attributes('aria-label')).toBe('Password')
+    await wrapper.get('form.input-row').trigger('submit')
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+    expect(sendText).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update:modelValue')).toBeFalsy()
+    expect(history.entries.map((e) => e.c)).not.toContain('s3cret')
+    await wrapper.get('button[aria-label="Cancel"]').trigger('click')
+    expect(wrapper.emitted('cancel')).toHaveLength(1)
   })
 
   it('the box is a wrapping textarea: Enter sends, pasted line breaks are dropped', async () => {
@@ -104,7 +127,8 @@ describe('ShellKeys', () => {
     const enter = new InputEvent('beforeinput', { inputType: 'insertLineBreak', cancelable: true })
     box.element.dispatchEvent(enter)
     expect(enter.defaultPrevented).toBe(true)
-    expect(sendText).toHaveBeenCalledWith('echo aecho b', true)
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+    expect(sendText).not.toHaveBeenCalled()
   })
 
   it('opens KeyRowConfigModal when customize button is clicked', async () => {

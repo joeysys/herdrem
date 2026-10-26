@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { ws } from '../api/ws'
-import { useConnectionStore } from './connection'
-import type { ReadPane, SendText, SendKeys, Respond } from '../api/types'
+import { useAgentsStore, useConnectionStore } from './connection'
+import type { ReadPane, SendText, SendKeys } from '../api/types'
+import { dispatchRespond } from '../utils/guard'
 import { safeStorage } from '../utils/storage'
 
 const MIN_POLL_OVERLAP_LINES = 20
@@ -21,6 +22,19 @@ function lineCount(text: string): number {
     if (text[i] === '\n') lines++
   }
   return lines
+}
+
+// Keep the last `limit` lines. Same visual count as lineCount.
+function trimToLines(text: string, limit: number): string {
+  const extra = lineCount(text) - limit
+  if (extra <= 0) return text
+  let seen = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '\n') continue
+    seen++
+    if (seen === extra) return text.slice(i + 1)
+  }
+  return text
 }
 
 // Merge an unversioned 50-line poll response only when it proves continuity
@@ -59,6 +73,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   // and localStorage; keep a generous but bounded window instead.
   const MAX_CONTENT_CHARS = 1_000_000 // ~1MB in-memory cap per pane
   const MAX_CACHE_TEXT = 200_000 // ~200KB persisted cap per pane
+  // Relay observe baselines widen up to 100000 lines (maxBaselineLines).
+  // Stay 50 under that so a resync of lineCount+50 is not cut short.
+  const MAX_BASELINE_LINES = 100_000 - 50
 
   const activePane = ref('')
   const content = ref('')
@@ -151,11 +168,13 @@ export const useTerminalStore = defineStore('terminal', () => {
   function clearPaneCache(paneId: string) {
     delete contentCache.value[paneId]
     delete contentRevs.value[paneId]
+    delete contentGens.value[paneId]
+    delete contentEpochs.value[paneId]
     if (paneId === activePane.value) {
       content.value = ''
       loading.value = true
-      // Force a direct herdr read (bypass the poller cache) so a manual
-      // Refresh always shows the authoritative current content.
+      // Refresh asks for a baseline the next delta can extend. An observed
+      // pane is answered from that cache; anything else is a direct read.
       requestRead(500, true)
     }
     saveCache()
@@ -166,6 +185,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   function clearAllCache() {
     contentCache.value = {}
     contentRevs.value = {}
+    contentGens.value = {}
+    contentEpochs.value = {}
     content.value = ''
     loading.value = true
     safeStorage.removeItem(CACHE_KEY)
@@ -177,8 +198,32 @@ export const useTerminalStore = defineStore('terminal', () => {
   // computed against a different baseline (another client, a raced read) from
   // corrupting the view — the mismatch triggers a full resync instead.
   const contentRevs = ref<Record<string, number>>({})
+  // Generation of the cached bytes. herdr's rev stays put while output streams,
+  // so this is what orders a refresh reply against a delta that passed it.
+  const contentGens = ref<Record<string, number>>({})
+  // Epoch of the relay process that issued contentGens. A restart begins again
+  // at gen 1; the new epoch is a new sequence, not an older snapshot.
+  const contentEpochs = ref<Record<string, number>>({})
+  // One resync at a time. Observe appends can arrive every coalesce window
+  // while a poll has dropped the baseline; further mismatches wait until the
+  // full snapshot (or the timeout below) reopens the gate. A poll that finds
+  // a resync already running must not clear this flag.
+  let resyncInFlight = false
+  let resyncTimer: ReturnType<typeof setTimeout> | null = null
 
-  function setContent(paneId: string, text: string, append = false, rev?: number, baseRev?: number, poll = false) {
+  function setContent(
+    paneId: string,
+    text: string,
+    append = false,
+    rev?: number,
+    baseRev?: number,
+    poll = false,
+    gen?: number,
+    baseGen?: number,
+    epoch?: number,
+  ) {
+    const heldEpoch = contentEpochs.value[paneId]
+    const epochMoved = epoch !== undefined && heldEpoch !== undefined && epoch !== heldEpoch
     // Ignore reads meant for other panes (e.g. grid previews later)
     if (paneId !== activePane.value) return
     if (append) {
@@ -188,6 +233,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       // is requested so the view resyncs instead of corrupting.
       const cur = content.value
       const last = contentRevs.value[paneId]
+      const heldGen = contentGens.value[paneId]
       // A versioned delta cannot be applied to an unversioned cached/direct
       // snapshot: request a paired full snapshot first.
       if (cur === '' || (baseRev !== undefined && baseRev !== last)) {
@@ -195,13 +241,23 @@ export const useTerminalStore = defineStore('terminal', () => {
         if (paneId === activePane.value) requestResync()
         return
       }
+      // Same rule for the content generation. A missing local gen is the
+      // upgrade case: rev already matched, so adopt the generation this delta
+      // names. A mismatch means the delta extends bytes we do not hold.
+      if (epochMoved || (baseGen !== undefined && heldGen !== undefined && baseGen !== heldGen)) {
+        if (paneId === activePane.value) requestResync()
+        return
+      }
       content.value = cur + text
       if (rev !== undefined) contentRevs.value[paneId] = rev
+      if (gen !== undefined) contentGens.value[paneId] = gen
+      if (epoch !== undefined) contentEpochs.value[paneId] = epoch
     } else if (poll) {
       // Poll-mode full response (6s subscription refresh): the content is a
       // truncated tail that must NOT replace the delta-grown view. Only
       // revalidate the revision baseline; a mismatch means we are out of sync
-      // and a full resync is needed.
+      // and a full resync is needed. This branch never releases resyncInFlight:
+      // requestResync() returning false means one is already running.
       const last = contentRevs.value[paneId]
       if (rev !== undefined) {
         if (last !== undefined && rev === last) {
@@ -230,14 +286,31 @@ export const useTerminalStore = defineStore('terminal', () => {
       // proven to extend this locally merged content.
       delete contentRevs.value[paneId]
     } else {
+      const heldGen = contentGens.value[paneId]
+      // A refresh reply that left the server before a newer delta must not
+      // replace the bytes that delta already appended. herdr rev does not
+      // move on streamed output, so the generation is the order.
+      if (!epochMoved && gen !== undefined && heldGen !== undefined && gen < heldGen) {
+        releaseResync()
+        loading.value = false
+        return
+      }
       content.value = text
       if (rev !== undefined) contentRevs.value[paneId] = rev
       else delete contentRevs.value[paneId]
+      if (gen !== undefined) contentGens.value[paneId] = gen
+      else delete contentGens.value[paneId]
+      if (epoch !== undefined) contentEpochs.value[paneId] = epoch
+      else delete contentEpochs.value[paneId]
+      releaseResync()
     }
     // Bound retained content: keep the tail so the terminal keeps working
     // while the unbounded history is dropped.
     if (content.value.length > MAX_CONTENT_CHARS) {
       content.value = content.value.slice(-MAX_CONTENT_CHARS)
+    }
+    if (lineCount(content.value) > MAX_BASELINE_LINES) {
+      content.value = trimToLines(content.value, MAX_BASELINE_LINES)
     }
     loading.value = false
     lastReadAt.value = Date.now()
@@ -263,54 +336,88 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   // A corrective full snapshot must not be shorter than the history it will
   // replace. Add one poll window for output produced during the round trip.
-  // refresh=true forces a direct herdr read: a resync by definition means the
-  // local view cannot be reconciled, and the poller's ContentSnapshot can hold
-  // a version-confirmed but older baseline (in-place TUI redraws don't move
-  // rev/seq), so serving it here could hand back content older than the tail
-  // the failed merge just saw.
-  function requestResync() {
-    requestRead(Math.max(500, lineCount(content.value) + 50), true)
+  // refresh=true asks the relay for a baseline the next delta can extend.
+  // An observed pane is served from the cache that delta uses. Anything else
+  // is a direct herdr read: ContentSnapshot can hold a version-confirmed but
+  // older baseline (in-place TUI redraws don't move rev/seq).
+  function releaseResync() {
+    resyncInFlight = false
+    if (resyncTimer) {
+      clearTimeout(resyncTimer)
+      resyncTimer = null
+    }
   }
 
-  function sendText(text: string, submit = true) {
+  function requestResync() {
+    if (resyncInFlight) return false
+    resyncInFlight = true
+    const timer = setTimeout(() => {
+      resyncInFlight = false
+      resyncTimer = null
+    }, 10_000)
+    ;(timer as { unref?: () => void }).unref?.()
+    resyncTimer = timer
+    requestRead(Math.max(500, lineCount(content.value) + 50), true)
+    return true
+  }
+
+  function sendText(text: string, submit = true, extra?: { requestId?: string; expectTail?: string }) {
     if (!activePane.value) return false
     const msg: SendText = { type: 'send_text', pane_id: activePane.value, text, submit }
     // Line breaks would reach the pane as Enter; a bracketed paste inserts them.
     if (/[\r\n]/.test(text) && useConnectionStore().hasFeature('send-text-paste')) msg.paste = true
+    if (extra?.requestId) msg.request_id = extra.requestId
+    if (extra?.expectTail) msg.expect_tail = extra.expectTail
     const ok = ws.send(msg)
     if (ok) scheduleRefresh()
     return ok
   }
 
-  function sendKey(key: string) {
+  function sendKey(key: string, requestId?: string) {
     if (!activePane.value) return false
     const msg: SendKeys = { type: 'send_keys', pane_id: activePane.value, keys: key }
+    if (requestId) msg.request_id = requestId
     const ok = ws.send(msg)
     if (ok) scheduleRefresh()
     return ok
   }
 
-  // Send a sequence of keys with a gap between each (e.g. cursor approval).
-  function sendKeySequence(keys: string[], gapMs = 55) {
-    if (!activePane.value || !keys.length) return
-    let i = 0
-    const step = () => {
-      if (i >= keys.length || !activePane.value) return
-      const msg: SendKeys = { type: 'send_keys', pane_id: activePane.value, keys: keys[i] }
-      ws.send(msg)
-      i++
-      if (i < keys.length) setTimeout(step, gapMs)
-      else scheduleRefresh()
+  // Send a sequence of keys. Without opts this is the old relay path: one
+  // frame per key, timed on the client, no receipt. With opts the whole
+  // sequence is one send_keys, so the relay can check prompt_id once and
+  // stop on the first failure. One request_id covers the approval.
+  function sendKeySequence(keys: string[], opts?: { promptId?: string; requestId?: string }): boolean {
+    if (!activePane.value || !keys.length) return false
+    if (!opts) {
+      const gapMs = 55
+      let i = 0
+      const step = () => {
+        if (i >= keys.length || !activePane.value) return
+        const msg: SendKeys = { type: 'send_keys', pane_id: activePane.value, keys: keys[i] }
+        ws.send(msg)
+        i++
+        if (i < keys.length) setTimeout(step, gapMs)
+        else scheduleRefresh()
+      }
+      step()
+      return true
     }
-    step()
+    const msg: SendKeys = { type: 'send_keys', pane_id: activePane.value, keys: '', sequence: keys }
+    if (opts.promptId) msg.prompt_id = opts.promptId
+    if (opts.requestId) msg.request_id = opts.requestId
+    const ok = ws.send(msg)
+    if (ok) scheduleRefresh()
+    return ok
   }
 
   function respond(text: string, optIndex?: number, submit = false) {
     if (!activePane.value) return false
-    const msg: Respond = { type: 'respond', pane_id: activePane.value, text }
-    if (optIndex !== undefined) msg.opt_index = optIndex
-    if (submit) msg.submit = true
-    const ok = ws.send(msg)
+    const pane = useAgentsStore().agents.find((a) => a.pane_id === activePane.value)
+    const ok = dispatchRespond(activePane.value, text, {
+      optIndex,
+      submit: submit ? true : undefined,
+      promptId: pane?.prompt_id,
+    })
     if (ok) scheduleRefresh()
     return ok
   }
