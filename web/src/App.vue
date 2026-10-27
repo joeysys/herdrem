@@ -25,7 +25,7 @@ import { useCmdHistoryStore } from './stores/cmdHistory';
 import { useTunnelsStore } from './stores/tunnels';
 import { useRegisterSW } from 'virtual:pwa-register/vue';
 import { useRelayConnection } from './composables/useRelayConnection';
-import { useNotify } from './composables/useNotify';
+import { pushOpenPaneId, useNotify } from './composables/useNotify';
 import { useHaptic } from './composables/useHaptic';
 import { useHistoryTrap, isStandalone, tryLockPortrait } from './composables/useHistoryTrap';
 import {
@@ -40,6 +40,7 @@ import {
 } from './composables/useShortcuts';
 import { ws } from './api/ws';
 import { dispatchRespond, promptChecked } from './utils/guard';
+import { applySessionMessage, operationFields } from './utils/session';
 import { approvalNotes } from './stores/sendAck';
 import type { ServerMessage, Pane } from './api/types';
 import { relayHostLabel, relayHttpBase, relayMatchesPageOrigin, relayNeedsToken, sessionTokenFor } from './utils/relay';
@@ -238,6 +239,8 @@ watch([() => files.browserOpen, () => files.preview], ([browser, preview]) => {
 // Pane created via pane_create that is waiting for the poller to learn it
 // (so hostFor can route read_pane correctly) before we auto-open it.
 let pendingOpenPane: string | null = null;
+const paneFromURL = new URLSearchParams(window.location.search).get('pane');
+if (paneFromURL) pendingOpenPane = paneFromURL;
 const now = ref(Math.floor(Date.now() / 1000));
 let relativeTimeTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -391,6 +394,13 @@ function onPopState(ev: PopStateEvent) {
   }
 }
 
+function onPushMessage(ev: MessageEvent) {
+  const id = pushOpenPaneId(ev.data);
+  if (!id) return;
+  if (agents.agents.some((a) => a.pane_id === id)) openTerminal(id);
+  else pendingOpenPane = id;
+}
+
 onMounted(() => {
   unbindShortcuts = bindShortcuts();
   relativeTimeTimer = setInterval(() => {
@@ -402,6 +412,9 @@ onMounted(() => {
     history.replaceState({ view: 'root' }, '');
   }
   window.addEventListener('popstate', onPopState);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', onPushMessage);
+  }
 });
 
 onUnmounted(() => {
@@ -409,6 +422,9 @@ onUnmounted(() => {
   unbindShortcuts = null;
   if (relativeTimeTimer) clearInterval(relativeTimeTimer);
   window.removeEventListener('popstate', onPopState);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.removeEventListener('message', onPushMessage);
+  }
 });
 
 // Push history entry when entering a space (for back-button support)
@@ -810,6 +826,7 @@ function createPane(
     direction: opts.direction,
     cwd: opts.cwd,
     label: opts.label,
+    ...operationFields(),
   });
 }
 
@@ -906,6 +923,10 @@ function onBrowserDock() {
 onMounted(() => {
   unsubMsg = ws.onMessage((msg: ServerMessage) => {
     handleMessage(msg);
+    applySessionMessage(msg);
+    if (msg.type === 'error' && (msg.op === 'session_rename' || msg.op === 'workspace_move' || msg.op === 'session_close' || msg.op === 'worktree_list' || msg.op === 'worktree_create' || msg.op === 'worktree_open' || msg.op === 'worktree_remove')) {
+      notify.push({ message: msg.message, type: 'info' });
+    }
     if (msg.type === 'todos') todo.setAll(msg.todos);
     if (msg.type === 'todo_updated') todo.updateItem(msg.todo, msg.deleted);
     if (msg.type === 'history') cmdHistory.applySnapshot(msg.entries);
@@ -1315,6 +1336,8 @@ onUnmounted(() => {
               :now="now"
               :active-pane-id="splitMode ? activePaneId : ''"
               :can-create-pane="conn.hasFeature('pane-create')"
+              :can-manage="conn.hasFeature('session-manage')"
+              :can-worktree="conn.hasFeature('worktree')"
               @open-terminal="openTerminal"
               @back="onSpaceBack"
               @new-tab="onSpaceNewTab"

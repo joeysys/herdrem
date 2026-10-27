@@ -83,10 +83,14 @@ func TestHelloAdvertisesSendGuardFeatures(t *testing.T) {
 	if len(msgs) == 0 || msgs[0]["type"] != "hello" {
 		t.Fatalf("first message = %v", msgs)
 	}
-	for _, f := range []string{"send-ack", "prompt-guard", "secret-input", "terminal-observe"} {
+	for _, f := range []string{"send-ack", "prompt-guard", "secret-input", "terminal-observe", "session-manage", "worktree"} {
 		if !hasFeature(msgs[0], f) {
 			t.Errorf("hello features lack %s: %v", f, msgs[0]["features"])
 		}
+	}
+	boot, _ := msgs[0]["boot_id"].(string)
+	if boot == "" {
+		t.Fatalf("hello boot_id = %v", msgs[0]["boot_id"])
 	}
 }
 

@@ -47,6 +47,18 @@ func setupTestService(t *testing.T) (*Service, *httptest.Server) {
 	return svc, srv
 }
 
+func TestWorktreeCreateReplaysOneOperation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{}
+	svc := New(client, nil, nil, nil, nil, nil, logger)
+	body := []byte(`{"type":"worktree_create","workspace_id":"ws1","host":"local","agent":"shell","operation_id":"op-1","boot_id":"` + svc.BootID() + `"}`)
+	svc.handleWorktreeCreate(context.Background(), nil, body)
+	svc.handleWorktreeCreate(context.Background(), nil, body)
+	if client.WorktreeCreateCount() != 1 {
+		t.Fatalf("creates = %d, want 1", client.WorktreeCreateCount())
+	}
+}
+
 func TestHandleMessage_ReadPane(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := hub.New(logger)

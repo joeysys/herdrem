@@ -11,6 +11,7 @@ import { extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../u
 export const useConnectionStore = defineStore('connection', () => {
   const status = ref<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const features = ref<string[]>([]);
+  const bootId = ref('');
   const serverVersion = ref('');
   // True once the first WS hello has been received — gates the main UI
   // to avoid a flash of the empty agent list before data arrives.
@@ -206,6 +207,7 @@ export const useConnectionStore = defineStore('connection', () => {
     syncApprovalNotes([]);
     agents.resetSnapshotKey();
     features.value = [];
+    bootId.value = '';
     if (unsubStatus) unsubStatus();
     // Arm the boot timeout so a missing hello doesn't permanently
     // trap the user behind the boot splash.
@@ -223,7 +225,10 @@ export const useConnectionStore = defineStore('connection', () => {
       status.value = s as typeof status.value;
       if (s === 'connected') startSessionSlide();
       else stopSessionSlide();
-      if (s === 'disconnected') noteDisconnect();
+      if (s === 'disconnected') {
+        bootId.value = '';
+        noteDisconnect();
+      }
     });
   }
 
@@ -233,13 +238,14 @@ export const useConnectionStore = defineStore('connection', () => {
     ws.disconnect();
   }
 
-  function setHello(version: string, feats: string[]) {
+  function setHello(version: string, feats: string[], boot = '') {
     if (bootTimer) {
       clearTimeout(bootTimer);
       bootTimer = null;
     }
     serverVersion.value = version;
     features.value = feats || [];
+    bootId.value = boot || '';
     booted.value = true;
     bootTimedOut.value = false;
   }
@@ -257,6 +263,7 @@ export const useConnectionStore = defineStore('connection', () => {
     prepareAuth,
     hasFeature,
     setHello,
+    bootId,
   };
 });
 
@@ -499,7 +506,7 @@ export function handleMessage(msg: ServerMessage) {
       syncApprovalNotes(msg.agents || []);
       break;
     case 'hello':
-      conn.setHello(msg.server_version, msg.features || []);
+      conn.setHello(msg.server_version, msg.features || [], msg.boot_id || '');
       break;
     case 'sent':
       applyServerMessage(msg);

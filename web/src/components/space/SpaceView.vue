@@ -1,15 +1,25 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { bucket, paneKind, canMarkRead, paneTitle, spaceTitle, displayAgent, shellLabel, relTime } from '../../stores/connection'
 import { ws } from '../../api/ws'
 import { dispatchRespond, promptChecked } from '../../utils/guard'
 import { approvalNotes } from '../../stores/sendAck'
 import { useHaptic } from '../../composables/useHaptic'
 import { safeStorage } from '../../utils/storage'
+import { insertIndex } from '../../utils/session'
 import type { Pane } from '../../api/types'
 import AgentIcon from '../agent/AgentIcon.vue'
+import SessionMenu from './SessionMenu.vue'
 
-const props = defineProps<{ agents: Pane[]; now: number; modelValue?: string | null; activePaneId?: string; canCreatePane?: boolean }>()
+const props = defineProps<{
+  agents: Pane[]
+  now: number
+  modelValue?: string | null
+  activePaneId?: string
+  canCreatePane?: boolean
+  canManage?: boolean
+  canWorktree?: boolean
+}>()
 const emit = defineEmits<{ openTerminal: [paneId: string]; 'update:modelValue': [value: string | null]; back: []; newTab: [workspaceId: string, host?: string] }>()
 
 interface Space {
@@ -20,6 +30,8 @@ interface Space {
   status: string
   agentCount: number
   shellCount: number
+  order?: number
+  linked: boolean
 }
 
 const activeSpaceId = computed({
@@ -34,14 +46,43 @@ const spaces = computed<Space[]>(() => {
     if (!map.has(id)) map.set(id, [])
     map.get(id)!.push(a)
   }
-  return [...map.entries()].map(([id, panes]) => {
+  const rows = [...map.entries()].map(([id, panes]) => {
     const label = spaceTitle(panes)
     const host = panes[0].host || 'local'
     const agentCount = panes.filter((p) => paneKind(p) === 'agent').length
     const shellCount = panes.filter((p) => paneKind(p) === 'shell').length
-    return { id, label, host, panes, status: aggregateStatus(panes), agentCount, shellCount }
-  }).sort((a, b) => spaceRecency(b.panes) - spaceRecency(a.panes))
+    return {
+      id, label, host, panes,
+      status: aggregateStatus(panes),
+      agentCount, shellCount,
+      order: spaceOrder(panes),
+      linked: panes.some((p) => p.workspace_linked === true),
+    }
+  })
+  // A reported number, including 0, is herdr's workspace order. Until any
+  // pane carries one, keep the recency sort the grid already had.
+  if (!props.agents.some((p) => typeof p.workspace_order === 'number')) {
+    return rows.sort((a, b) => spaceRecency(b.panes) - spaceRecency(a.panes))
+  }
+  return rows.sort((a, b) => {
+    if (a.order === undefined && b.order === undefined) return spaceRecency(b.panes) - spaceRecency(a.panes)
+    if (a.order === undefined) return 1
+    if (b.order === undefined) return -1
+    if (a.order !== b.order) return a.order - b.order
+    return spaceRecency(b.panes) - spaceRecency(a.panes)
+  })
 })
+
+/** Lowest reported workspace number among the panes. Undefined when this
+ *  relay did not send one, so 0 stays a real position. */
+function spaceOrder(panes: Pane[]): number | undefined {
+  let best: number | undefined
+  for (const p of panes) {
+    if (typeof p.workspace_order !== 'number') continue
+    if (best === undefined || p.workspace_order < best) best = p.workspace_order
+  }
+  return best
+}
 
 /** Grid order follows each space's most recently active pane, independent of
  *  the input order — `filtered` pins blocked panes, which must not promote a
@@ -173,6 +214,187 @@ function newTab() {
   if (!activeSpace.value) return
   emit('newTab', activeSpace.value.id, activeSpace.value.host)
 }
+
+const finePointer = ref(false)
+const menu = ref<{ mode: 'workspace' | 'pane'; space: Space; pane: Pane | null; index: number; count: number } | null>(null)
+
+function hostRows(host: string): Space[] {
+  return spaces.value.filter((s) => s.host === host)
+}
+
+function openWorkspaceMenu(space: Space) {
+  const rows = hostRows(space.host)
+  menu.value = {
+    mode: 'workspace',
+    space,
+    pane: null,
+    index: Math.max(0, rows.findIndex((s) => s.id === space.id)),
+    count: rows.length,
+  }
+}
+
+function openActiveMenu() {
+  if (activeSpace.value) openWorkspaceMenu(activeSpace.value)
+}
+
+function openPaneMenu(pane: Pane) {
+  const space = activeSpace.value
+  if (!space) return
+  const rows = hostRows(space.host)
+  menu.value = {
+    mode: 'pane',
+    space,
+    pane,
+    index: Math.max(0, rows.findIndex((s) => s.id === space.id)),
+    count: rows.length,
+  }
+}
+
+/** Reorder within one host. herdr's insert_index is that daemon's list, not
+ *  the mixed grid, and it is the index before the workspace is removed. */
+function sendMove(space: Space, dir: -1 | 1) {
+  if (!props.canManage) return
+  const rows = hostRows(space.host)
+  const from = rows.findIndex((s) => s.id === space.id)
+  const to = from + dir
+  if (from < 0 || to < 0 || to >= rows.length) return
+  ws.send({
+    type: 'workspace_move',
+    workspace_id: space.id,
+    host: space.host,
+    insert_index: insertIndex(from, to),
+  })
+}
+
+function onMenuMove(dir: -1 | 1) {
+  if (!menu.value || menu.value.mode !== 'workspace') return
+  sendMove(menu.value.space, dir)
+  menu.value = null
+}
+
+let dragFrom = -1
+function onDragStart(index: number, e: DragEvent) {
+  if (!finePointer.value || !props.canManage) {
+    e.preventDefault()
+    return
+  }
+  dragFrom = index
+  e.dataTransfer?.setData('text/plain', String(index))
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onDrop(index: number) {
+  const from = dragFrom
+  dragFrom = -1
+  const source = spaces.value[from]
+  const target = spaces.value[index]
+  if (!source || !target || source.host !== target.host || source.id === target.id) return
+  const rows = hostRows(source.host)
+  const fromHost = rows.findIndex((s) => s.id === source.id)
+  const toHost = rows.findIndex((s) => s.id === target.id)
+  if (fromHost < 0 || toHost < 0 || fromHost === toHost || !props.canManage) return
+  ws.send({
+    type: 'workspace_move',
+    workspace_id: source.id,
+    host: source.host,
+    insert_index: insertIndex(fromHost, toHost),
+  })
+}
+
+const PRESS_MS = 450
+const PRESS_SLOP = 8
+let pressTimer = 0
+let pressFrom = -1
+let pressX = 0
+let pressY = 0
+let pressing = false
+let dragging = false
+let suppressClick = false
+
+function detachPress() {
+  const armed = dragging
+  pressing = false
+  dragging = false
+  pressFrom = -1
+  window.clearTimeout(pressTimer)
+  window.removeEventListener('pointermove', onWindowPointerMove)
+  window.removeEventListener('pointerup', onWindowPointerUp)
+  window.removeEventListener('pointercancel', cancelPress)
+  // A long-press may not be followed by a click. Drop the suppress flag on
+  // the next turn so the click that does follow pointerup is ignored, and a
+  // later tap still opens the workspace.
+  if (armed) window.setTimeout(() => { suppressClick = false }, 0)
+}
+
+function cancelPress() {
+  detachPress()
+}
+
+function onPointerDown(index: number, e: PointerEvent) {
+  if (finePointer.value || !props.canManage) return
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('.sc-menu, .pane-menu')) return
+  pressFrom = index
+  pressX = e.clientX
+  pressY = e.clientY
+  pressing = true
+  dragging = false
+  window.addEventListener('pointermove', onWindowPointerMove)
+  window.addEventListener('pointerup', onWindowPointerUp)
+  window.addEventListener('pointercancel', cancelPress)
+  pressTimer = window.setTimeout(() => {
+    if (!pressing) return
+    dragging = true
+    suppressClick = true
+    haptic(12)
+  }, PRESS_MS)
+}
+
+function onWindowPointerMove(e: PointerEvent) {
+  if (!pressing || dragging) return
+  if (Math.hypot(e.clientX - pressX, e.clientY - pressY) > PRESS_SLOP) cancelPress()
+}
+
+function onWindowPointerUp(e: PointerEvent) {
+  const from = pressFrom
+  const wasDragging = dragging
+  detachPress()
+  if (!wasDragging) return
+  const el = document.elementFromPoint(e.clientX, e.clientY)
+  const card = el?.closest('.space-card')
+  if (!card) return
+  const cards = Array.from(document.querySelectorAll('.space-grid .space-card'))
+  const to = cards.indexOf(card)
+  if (to < 0) return
+  dragFrom = from
+  onDrop(to)
+}
+
+function onCardClick(id: string) {
+  if (suppressClick) {
+    suppressClick = false
+    return
+  }
+  enter(id)
+}
+
+onMounted(() => {
+  finePointer.value = detectFinePointer()
+})
+
+onUnmounted(() => {
+  detachPress()
+})
+
+function detectFinePointer(): boolean {
+  if (typeof window.matchMedia !== 'function') return false
+  try {
+    return window.matchMedia('(pointer: fine)').matches
+  } catch {
+    return false
+  }
+}
 </script>
 
 <template>
@@ -186,6 +408,13 @@ function newTab() {
     </div>
     <div class="space-title">
       <span class="space-name">{{ activeSpace.label }}</span>
+      <button
+        v-if="canManage || canWorktree"
+        type="button"
+        class="sc-menu"
+        aria-label="Workspace actions"
+        @click.stop="openActiveMenu"
+      >⋯</button>
       <span class="space-id mono">{{ activeSpace.id }}</span>
       <span class="space-host mono">{{ activeSpace.host }}</span>
       <button
@@ -247,6 +476,13 @@ function newTab() {
             </div>
           </div>
           <div class="card-right">
+            <button
+              v-if="canManage"
+              type="button"
+              class="pane-menu"
+              aria-label="Pane actions"
+              @click.stop="openPaneMenu(p)"
+            >⋯</button>
             <span v-if="paneKind(p) === 'shell' ? shellLabel(p) : true" class="status-badge" :class="bucket(p.status)">
               <i class="dot"></i>{{ paneKind(p) === 'shell' ? shellLabel(p) : (p.status || '—') }}
             </span>
@@ -266,32 +502,64 @@ function newTab() {
 
   <!-- spaces grid -->
   <div v-else class="space-grid view-enter">
-    <button
-      v-for="s in spaces"
+    <article
+      v-for="(s, index) in spaces"
       :key="s.id"
       class="space-card"
       :class="s.status"
-      @click="enter(s.id)"
+      :draggable="finePointer && !!canManage"
+      @dragstart="onDragStart(index, $event)"
+      @dragover.prevent
+      @drop.prevent="onDrop(index)"
+      @pointerdown="onPointerDown(index, $event)"
     >
-      <div class="sc-bar" aria-hidden="true"></div>
-      <div class="sc-top">
-        <span class="sc-label">{{ s.label }}</span>
-        <span class="sc-status mono" :class="s.status">{{ s.status }}</span>
-      </div>
-      <div class="sc-id-host mono">
-        <span class="sc-id">{{ s.id }}</span>
-        <span class="sc-host">{{ s.host }}</span>
-      </div>
-      <div class="sc-counts">
-        <span class="sc-count-item"><span class="sc-n">{{ s.panes.length }}</span> panes</span>
-        <span class="sc-count-sep">·</span>
-        <span class="sc-count-item"><span class="sc-n agents">{{ s.agentCount }}</span> agents</span>
-        <span class="sc-count-sep">·</span>
-        <span class="sc-count-item"><span class="sc-n shells">{{ s.shellCount }}</span> shells</span>
-      </div>
-    </button>
+      <button type="button" class="sc-open" draggable="false" @click="onCardClick(s.id)">
+        <div class="sc-bar" aria-hidden="true"></div>
+        <div class="sc-top">
+          <span class="sc-label">{{ s.label }}</span>
+          <span class="sc-status mono" :class="s.status">{{ s.status }}</span>
+        </div>
+        <div class="sc-id-host mono">
+          <span class="sc-id">{{ s.id }}</span>
+          <span class="sc-host">{{ s.host }}</span>
+        </div>
+        <div class="sc-counts">
+          <span class="sc-count-item"><span class="sc-n">{{ s.panes.length }}</span> panes</span>
+          <span class="sc-count-sep">·</span>
+          <span class="sc-count-item"><span class="sc-n agents">{{ s.agentCount }}</span> agents</span>
+          <span class="sc-count-sep">·</span>
+          <span class="sc-count-item"><span class="sc-n shells">{{ s.shellCount }}</span> shells</span>
+        </div>
+      </button>
+      <button
+        v-if="canManage || canWorktree"
+        type="button"
+        class="sc-menu"
+        draggable="false"
+        aria-label="Workspace actions"
+        @click.stop="openWorkspaceMenu(s)"
+        @pointerdown.stop
+        @dragstart.stop.prevent
+      >⋯</button>
+    </article>
     <div v-if="spaces.length === 0" class="space-empty">No workspaces yet.</div>
   </div>
+
+  <SessionMenu
+    v-if="menu"
+    :space-id="menu.space.id"
+    :label="menu.space.label"
+    :host="menu.space.host"
+    :linked="menu.space.linked"
+    :pane="menu.pane"
+    :mode="menu.mode"
+    :index="menu.index"
+    :count="menu.count"
+    :can-manage="!!canManage"
+    :can-worktree="!!canWorktree"
+    @close="menu = null"
+    @move="onMenuMove"
+  />
 </template>
 
 <style scoped>
@@ -409,18 +677,32 @@ function newTab() {
 .space-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
 .space-card {
   position: relative; overflow: hidden;
-  display: flex; flex-direction: column; gap: 6px;
+  display: block;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: 14px; cursor: pointer; text-align: left;
   color: var(--text);
   transition: transform 0.15s, border-color 0.15s, background 0.15s;
 }
 .space-card:hover { transform: translateY(-2px); border-color: var(--border-strong); background: var(--surface-2); }
+.sc-open {
+  position: relative; display: flex; flex-direction: column; gap: 6px;
+  width: 100%; margin: 0; padding: 14px 36px 14px 14px;
+  border: 0; background: transparent; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+}
 .sc-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--faint); }
 .space-card.blocked .sc-bar { background: var(--red); }
 .space-card.working .sc-bar { background: var(--orange); }
 .space-card.done .sc-bar { background: var(--green); }
 .sc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sc-menu, .pane-menu {
+  font: inherit; border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 0 4px; line-height: 1; flex-shrink: 0;
+}
+.space-card > .sc-menu {
+  position: absolute; top: 12px; right: 8px; z-index: 1;
+}
+.sc-menu:hover, .pane-menu:hover { color: var(--text); }
+.sc-open:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 .sc-label { font-weight: 700; font-size: var(--text-md); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sc-status { font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); flex-shrink: 0; }
 .space-card.blocked .sc-status { color: var(--red); }

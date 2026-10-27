@@ -24,9 +24,14 @@ type Pane struct {
 	TerminalTitleStripped string      `json:"terminal_title_stripped,omitempty"`
 	Branch                string      `json:"branch,omitempty"`
 	Prompt                string      `json:"prompt,omitempty"`
-	Options               []string    `json:"options,omitempty"`          // approval payloads
-	OptionLabels          []string    `json:"option_labels,omitempty"`    // approval display labels
-	PromptID              string      `json:"prompt_id,omitempty"`        // sha256 of the visible screen at menu parse; feature prompt-guard
+	Options               []string    `json:"options,omitempty"`       // approval payloads
+	OptionLabels          []string    `json:"option_labels,omitempty"` // approval display labels
+	PromptID              string      `json:"prompt_id,omitempty"`     // sha256 of the visible screen at menu parse; feature prompt-guard
+	TabID                 string      `json:"tab_id,omitempty"`
+	Label                 string      `json:"label,omitempty"`
+	TabLabel              string      `json:"tab_label,omitempty"`        // filled from the snapshot tabs[], not a herdr pane field
+	WorkspaceOrder        *int        `json:"workspace_order,omitempty"`  // herdr workspace number; nil when this poll did not see the workspace
+	WorkspaceLinked       bool        `json:"workspace_linked,omitempty"` // worktree.is_linked_worktree; false is a primary checkout
 	LastActive            int64       `json:"last_active,omitempty"`      // epoch seconds of last content change
 	Revision              int         `json:"revision,omitempty"`         // herdr pane revision (content version)
 	StateChangeSeq        int         `json:"state_change_seq,omitempty"` // herdr agent state change sequence; in 0.9+ it lives on AgentInfo and is merged onto Pane from the api snapshot
@@ -86,14 +91,60 @@ type Snapshot struct {
 
 // Workspace represents a herdr workspace (from `herdr workspace list`).
 type Workspace struct {
-	WorkspaceID string `json:"workspace_id"`
-	Label       string `json:"label"`
-	Number      int    `json:"number"`
-	PaneCount   int    `json:"pane_count"`
-	TabCount    int    `json:"tab_count"`
-	AgentStatus string `json:"agent_status"`
-	Focused     bool   `json:"focused"`
-	ActiveTabID string `json:"active_tab_id"`
+	WorkspaceID string             `json:"workspace_id"`
+	Label       string             `json:"label"`
+	Number      int                `json:"number"`
+	PaneCount   int                `json:"pane_count"`
+	TabCount    int                `json:"tab_count"`
+	AgentStatus string             `json:"agent_status"`
+	Focused     bool               `json:"focused"`
+	ActiveTabID string             `json:"active_tab_id"`
+	Worktree    *WorkspaceWorktree `json:"worktree,omitempty"`
+}
+
+// WorkspaceWorktree is the snapshot's workspace.worktree object.
+// Absent or is_linked_worktree false means the primary checkout.
+type WorkspaceWorktree struct {
+	IsLinkedWorktree bool   `json:"is_linked_worktree,omitempty"`
+	RepoRoot         string `json:"repo_root,omitempty"`
+	CheckoutPath     string `json:"checkout_path,omitempty"`
+	RepoKey          string `json:"repo_key,omitempty"`
+	RepoName         string `json:"repo_name,omitempty"`
+}
+
+// WorktreeEntry is one row of `herdr worktree list`.
+type WorktreeEntry struct {
+	Path            string `json:"path"`
+	Branch          string `json:"branch,omitempty"`
+	Label           string `json:"label,omitempty"`
+	OpenWorkspaceID string `json:"open_workspace_id,omitempty"`
+	Linked          bool   `json:"is_linked_worktree,omitempty"`
+}
+
+// WorktreeCreateOpts are the flags for `herdr worktree create`.
+// The CLI is always invoked with --no-focus.
+type WorktreeCreateOpts struct {
+	WorkspaceID string
+	Branch      string
+	Base        string
+	Label       string
+}
+
+// WorktreeOpenOpts are the flags for `herdr worktree open`.
+type WorktreeOpenOpts struct {
+	WorkspaceID string
+	Path        string
+	Branch      string
+	Label       string
+}
+
+// WorktreeResult is the workspace and root pane a create or open call returned.
+type WorktreeResult struct {
+	WorkspaceID string
+	PaneID      string
+	Branch      string
+	Path        string
+	AlreadyOpen bool
 }
 
 // StatusServerResult is the parsed output of `herdr status server --json`.
@@ -140,6 +191,26 @@ type Client interface {
 	// TabCreate creates a new tab (with a root shell pane) in the given workspace
 	// and returns the new pane's ID. workspaceID is required.
 	TabCreate(ctx context.Context, host, workspaceID, cwd string) (string, error)
+	// RenameWorkspace renames a workspace. The label is one argument.
+	RenameWorkspace(ctx context.Context, host, id, label string) error
+	// RenameTab renames a tab.
+	RenameTab(ctx context.Context, host, id, label string) error
+	// RenamePane renames a pane. clear uses `pane rename --clear` and ignores label.
+	RenamePane(ctx context.Context, host, id, label string, clear bool) error
+	// CloseWorkspace closes a workspace. group passes --group, which also
+	// closes linked worktree workspaces and leaves the checkouts on disk.
+	CloseWorkspace(ctx context.Context, host, id string, group bool) error
+	CloseTab(ctx context.Context, host, id string) error
+	ClosePane(ctx context.Context, host, id string) error
+	// MoveWorkspace reorders a workspace. insertIndex is forwarded unchanged:
+	// herdr treats it as the index before the item is removed.
+	MoveWorkspace(ctx context.Context, host, id string, insertIndex int) error
+	WorktreeList(ctx context.Context, host, workspaceID string) ([]WorktreeEntry, error)
+	WorktreeCreate(ctx context.Context, host string, opts WorktreeCreateOpts) (WorktreeResult, error)
+	WorktreeOpen(ctx context.Context, host string, opts WorktreeOpenOpts) (WorktreeResult, error)
+	WorktreeRemove(ctx context.Context, host, workspaceID string, force bool) error
+	// AgentStart runs `herdr agent start` in a pane that is at a shell prompt.
+	AgentStart(ctx context.Context, host, paneID, name, kind string) error
 }
 
 // PaneRouter resolves which host a pane lives on, for command routing.

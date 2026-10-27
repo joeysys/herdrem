@@ -7,6 +7,7 @@ import { mount } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import SpaceView from './SpaceView.vue'
 import { ws } from '../../api/ws'
+import { safeStorage } from '../../utils/storage'
 
 vi.mock('../../api/ws', () => ({
   ws: {
@@ -55,7 +56,7 @@ function cardByPaneId(wrapper: ReturnType<typeof mount>, paneId: string) {
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  localStorage.clear()
+  safeStorage.clear()
   vi.mocked(ws.send).mockClear()
 })
 
@@ -213,5 +214,67 @@ describe('SpaceView inside-space cards', () => {
 
     const order = wrapper.findAll('.space-card .sc-id').map((n) => n.text())
     expect(order).toEqual(['ws-new', 'ws-old'])
+  })
+
+  it('sorts by workspace_order when any pane reports one, including 0', () => {
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        agents: [
+          { ...panes[0], pane_id: 'b1', workspace_id: 'ws-late', last_active: 100, workspace_order: 2 },
+          { ...panes[1], pane_id: 'i1', workspace_id: 'ws-early', last_active: 1, workspace_order: 0 },
+        ],
+      },
+    })
+
+    expect(wrapper.findAll('.space-card .sc-id').map((n) => n.text())).toEqual(['ws-early', 'ws-late'])
+  })
+
+  it('move up sends the index in the list before removal', async () => {
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        canManage: true,
+        agents: [
+          { ...panes[0], pane_id: 'a', workspace_id: 'ws-0', workspace_order: 0, last_active: 1 },
+          { ...panes[1], pane_id: 'b', workspace_id: 'ws-1', workspace_order: 1, last_active: 2 },
+        ],
+      },
+    })
+
+    const cards = wrapper.findAll('.space-card')
+    await cards[1].find('button[aria-label="Workspace actions"]').trigger('click')
+    await wrapper.find('[data-action="move-up"]').trigger('click')
+
+    expect(ws.send).toHaveBeenCalledWith({
+      type: 'workspace_move',
+      workspace_id: 'ws-1',
+      host: 'local',
+      insert_index: 0,
+    })
+  })
+
+  it('move down sends the index after the target', async () => {
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        canManage: true,
+        agents: [
+          { ...panes[0], pane_id: 'a', workspace_id: 'ws-0', workspace_order: 0, last_active: 1 },
+          { ...panes[1], pane_id: 'b', workspace_id: 'ws-1', workspace_order: 1, last_active: 2 },
+          { ...panes[1], pane_id: 'c', workspace_id: 'ws-2', workspace_order: 2, last_active: 3 },
+        ],
+      },
+    })
+
+    await wrapper.findAll('.space-card')[0].find('button[aria-label="Workspace actions"]').trigger('click')
+    await wrapper.find('[data-action="move-down"]').trigger('click')
+
+    expect(ws.send).toHaveBeenCalledWith({
+      type: 'workspace_move',
+      workspace_id: 'ws-0',
+      host: 'local',
+      insert_index: 2,
+    })
   })
 })

@@ -50,6 +50,14 @@ export async function showSystemNotification(title: string, opts: NotificationOp
   }
 }
 
+/** pushOpenPaneId is the pane a service-worker click asked the page to open. */
+export function pushOpenPaneId(data: unknown): string {
+  if (typeof data !== 'object' || data === null) return ''
+  const rec = data as Record<string, unknown>
+  if (rec.type !== 'webpush' || typeof rec.paneId !== 'string') return ''
+  return rec.paneId
+}
+
 export function useNotify() {
   const justDonePanes = ref<Set<string>>(new Set())
   const statusMemory = new Map<string, string>()

@@ -7,7 +7,7 @@ export type AckKind = 'input' | 'respond'
 
 export type AckResult =
   | { ok: true }
-  | { ok: false; reason: 'error'; message: string }
+  | { ok: false; reason: 'error'; message: string; key?: string }
   | { ok: false; reason: 'unconfirmed' }
 
 const ACK_MS = 10_000
@@ -38,7 +38,7 @@ export function waitAck(id: string, paneId: string, kind: AckKind): Promise<AckR
   })
 }
 
-export function applyServerMessage(msg: { type: string; request_id?: string; message?: string }) {
+export function applyServerMessage(msg: { type: string; request_id?: string; message?: string; key?: string }) {
   const id = msg.request_id
   if (!id) return
   const waiter = waiters.get(id)
@@ -53,7 +53,9 @@ export function applyServerMessage(msg: { type: string; request_id?: string; mes
   if (msg.type === 'error') {
     const message = msg.message || 'Send failed'
     if (waiter.kind === 'respond') setApprovalNote(waiter.paneId, message)
-    waiter.resolve({ ok: false, reason: 'error', message })
+    const result: AckResult = { ok: false, reason: 'error', message }
+    if (msg.key) result.key = msg.key
+    waiter.resolve(result)
   }
 }
 

@@ -19,6 +19,13 @@ export interface Pane {
   options?: string[] // approval payloads
   option_labels?: string[] // approval display labels
   prompt_id?: string // prompt-guard: sha256 of the visible screen when the menu was parsed
+  tab_id?: string
+  label?: string
+  tab_label?: string
+  /** herdr workspace number. Absent when this relay did not report an order. */
+  workspace_order?: number
+  /** true when the workspace is a linked worktree. Absent on a primary checkout. */
+  workspace_linked?: boolean
   last_active?: number // epoch seconds of last content change
   valid_paths?: string[] // file paths in last content that exist on disk
 }
@@ -28,6 +35,8 @@ export interface Hello {
   v: number
   server_version: string
   features: string[]
+  /** process start id. Present when the relay can dedupe operation_id. */
+  boot_id?: string
 }
 
 export interface AgentsSnapshot {
@@ -236,6 +245,8 @@ export interface Respond {
   submit?: boolean
   request_id?: string
   prompt_id?: string
+  operation_id?: string
+  boot_id?: string
 }
 
 export interface SendText {
@@ -510,12 +521,108 @@ export interface PaneCreate {
   direction?: 'right' | 'down'
   cwd?: string
   label?: string
+  operation_id?: string
+  boot_id?: string
 }
 
 export interface PaneCreated {
   type: 'pane_created'
   pane_id: string
   mode: 'shell' | 'workspace' | 'tab'
+  host?: string
+}
+
+export interface SessionRename {
+  type: 'session_rename'
+  target: 'workspace' | 'tab' | 'pane'
+  id: string
+  label?: string
+  host?: string
+  clear?: boolean
+}
+
+export interface WorkspaceMove {
+  type: 'workspace_move'
+  workspace_id: string
+  insert_index: number
+  host?: string
+}
+
+export interface SessionClose {
+  type: 'session_close'
+  target: 'workspace' | 'tab' | 'pane'
+  id: string
+  host?: string
+  group?: boolean
+  operation_id?: string
+  boot_id?: string
+}
+
+export interface SessionOK {
+  type: 'session_ok'
+  op: string
+  id?: string
+}
+
+export interface WorktreeListReq {
+  type: 'worktree_list'
+  workspace_id: string
+  host?: string
+}
+
+export interface WorktreeEntry {
+  path: string
+  branch?: string
+  label?: string
+  open_workspace_id?: string
+  linked?: boolean
+}
+
+export interface WorktreesMsg {
+  type: 'worktrees'
+  workspace_id: string
+  host?: string
+  entries: WorktreeEntry[]
+}
+
+export interface WorktreeCreateReq {
+  type: 'worktree_create'
+  workspace_id: string
+  host?: string
+  branch?: string
+  base?: string
+  label?: string
+  agent?: string
+  operation_id?: string
+  boot_id?: string
+}
+
+export interface WorktreeOpenReq {
+  type: 'worktree_open'
+  workspace_id?: string
+  host?: string
+  path: string
+  branch?: string
+  label?: string
+}
+
+export interface WorktreeRemoveReq {
+  type: 'worktree_remove'
+  workspace_id: string
+  host?: string
+  force?: boolean
+  operation_id?: string
+  boot_id?: string
+}
+
+export interface WorktreeReady {
+  type: 'worktree_ready'
+  op: 'worktree_create' | 'worktree_open'
+  workspace_id: string
+  pane_id?: string
+  branch?: string
+  path?: string
+  already_open?: boolean
   host?: string
 }
 
@@ -597,6 +704,9 @@ export type ServerMessage =
   | TunnelsSnapshot
   | TunnelUpdated
   | PaneCreated
+  | SessionOK
+  | WorktreesMsg
+  | WorktreeReady
 
 export type ClientMessage =
   | GitStatusReq
@@ -629,3 +739,10 @@ export type ClientMessage =
   | TunnelClose
   | TunnelsList
   | PaneCreate
+  | SessionRename
+  | WorkspaceMove
+  | SessionClose
+  | WorktreeListReq
+  | WorktreeCreateReq
+  | WorktreeOpenReq
+  | WorktreeRemoveReq

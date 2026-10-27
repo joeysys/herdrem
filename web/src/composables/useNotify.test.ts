@@ -2,7 +2,7 @@
 // notifications must go through the service worker registration there.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useNotify } from './useNotify'
+import { pushOpenPaneId, useNotify } from './useNotify'
 import type { Pane } from '../api/types'
 
 const showNotification = vi.fn((_title: string, _opts?: NotificationOptions) => Promise.resolve())
@@ -99,5 +99,14 @@ describe('useNotify system notifications', () => {
     expect(requestPermission).toHaveBeenCalledTimes(1)
     document.dispatchEvent(new Event('pointerdown'))
     expect(requestPermission).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('pushOpenPaneId', () => {
+  it('reads only a webpush message', () => {
+    expect(pushOpenPaneId({ type: 'webpush', paneId: 'p1' })).toBe('p1')
+    expect(pushOpenPaneId({ type: 'other', paneId: 'p1' })).toBe('')
+    expect(pushOpenPaneId(null)).toBe('')
+    expect(pushOpenPaneId({ type: 'webpush' })).toBe('')
   })
 })

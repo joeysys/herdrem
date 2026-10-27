@@ -24,6 +24,7 @@ import (
 	"herdrem/internal/protocol"
 	"herdrem/internal/service"
 	"herdrem/internal/store"
+	"herdrem/internal/webpush"
 	webdist "herdrem/webdist"
 )
 
@@ -217,8 +218,27 @@ func main() {
 	svc.SetContentSubscriber(poller)
 	svc.SetAllowedHosts(cfg.Hosts())
 
+	// Web Push is off until a browser on a stable origin turns it on.
+	// Status transitions from the poller (events or the snapshot fallback)
+	// are the only trigger.
+	var pushNote *webpush.Notifier
+	if wp, err := store.OpenWebPush(cfg.DataDir + "/webpush.json"); err != nil {
+		logger.Error("webpush store", "err", err)
+	} else {
+		pushNote = webpush.NewNotifier(wp, func(id string) (herdr.Pane, bool) {
+			for _, pane := range poller.Snapshot() {
+				if pane.PaneID == id {
+					return pane, true
+				}
+			}
+			return herdr.Pane{}, false
+		}, logger)
+		poller.SetStatusWatcher(pushNote.OnTransition)
+	}
+
 	// HTTP server
 	srv := httpserver.New(cfg, h, client, todoStore, svc, fileSvc, poller, staticFS, logger)
+	srv.SetWebPush(pushNote)
 	portInt, err := cfg.ParsePort()
 	if err != nil {
 		logger.Error("invalid port", "port", cfg.Port, "err", err)

@@ -99,6 +99,26 @@ func TestPollerBroadcastsAgentsWithOptions(t *testing.T) {
 	t.Fatal("no agents snapshot with parsed blocked options received within deadline")
 }
 
+func TestPanesChangedSeesSessionFields(t *testing.T) {
+	order := 2
+	base := []herdr.Pane{{PaneID: "p", WorkspaceLabel: "a"}}
+	if panesChanged(base, append([]herdr.Pane(nil), base...)) {
+		t.Fatal("identical panes reported as changed")
+	}
+	if !panesChanged(base, []herdr.Pane{{PaneID: "p", WorkspaceLabel: "a", Label: "renamed"}}) {
+		t.Fatal("pane label change was ignored")
+	}
+	if !panesChanged(base, []herdr.Pane{{PaneID: "p", WorkspaceLabel: "a", WorkspaceOrder: &order}}) {
+		t.Fatal("workspace order change was ignored")
+	}
+	if !panesChanged(base, []herdr.Pane{{PaneID: "p", WorkspaceLabel: "a", WorkspaceLinked: true}}) {
+		t.Fatal("linked change was ignored")
+	}
+	if !panesChanged(base, []herdr.Pane{{PaneID: "p", WorkspaceLabel: "a", TabID: "t", TabLabel: "tab"}}) {
+		t.Fatal("tab label change was ignored")
+	}
+}
+
 func TestPollerSetTiming(t *testing.T) {
 	p := New(nil, nil, nil, nil, nil, time.Second)
 
@@ -176,6 +196,22 @@ func TestPollerEnrichLastActiveKeepsWorkingAgentsFresh(t *testing.T) {
 	}
 	if panes[1].LastActive != 1 {
 		t.Fatal("idle shell should keep last_active when its revision is unchanged")
+	}
+}
+
+func TestPollerEnrichLastActiveSeesStatusOnlyChange(t *testing.T) {
+	p := New(nil, nil, nil, nil, nil, time.Second)
+	panes := []herdr.Pane{{
+		PaneID: "a", Kind: "agent", Status: "working", Revision: 4, StateChangeSeq: 4,
+	}}
+	p.enrichLastActive(panes)
+	p.lastActive["a"] = 1
+	panes[0].Status = "blocked"
+	if !p.enrichLastActive(panes) {
+		t.Fatal("status change with the same revision and seq was ignored")
+	}
+	if panes[0].LastActive <= 1 {
+		t.Fatal("status change did not refresh last_active")
 	}
 }
 

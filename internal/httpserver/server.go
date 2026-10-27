@@ -31,6 +31,7 @@ import (
 	"herdrem/internal/protocol"
 	"herdrem/internal/service"
 	"herdrem/internal/store"
+	"herdrem/internal/webpush"
 )
 
 // Server is the HTTP server with WS + static + health.
@@ -149,6 +150,7 @@ type Server struct {
 	// signing key derives from it instead, so sessions survive restarts.
 	sessionKey []byte
 	rejectLog  rejectLogThrottle
+	webPush    *webpush.Notifier
 }
 
 // paneSnapshotter returns the latest pane list for initial WS snapshots.
@@ -192,6 +194,11 @@ func (s *Server) SetTunnels(tunnels *service.TunnelService) {
 	s.tunnels = tunnels
 }
 
+// SetWebPush registers optional Web Push routes. Nil leaves them absent.
+func (s *Server) SetWebPush(n *webpush.Notifier) {
+	s.webPush = n
+}
+
 // Routes returns the configured http.Handler.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -206,6 +213,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/session-auth", s.handleSessionAuth)
 	mux.HandleFunc("/session-logout", s.handleSessionLogout)
 	mux.HandleFunc("/api/tunnel-gate/", s.handleTunnelGate)
+	if s.webPush != nil {
+		mux.HandleFunc("/webpush/status", s.handleWebPushStatus)
+		mux.HandleFunc("/webpush/enabled", s.handleWebPushEnabled)
+		mux.HandleFunc("/webpush/subscribe", s.handleWebPushSubscribe)
+		mux.HandleFunc("/webpush/unsubscribe", s.handleWebPushUnsubscribe)
+		mux.HandleFunc("/webpush/prefs", s.handleWebPushPrefs)
+		mux.HandleFunc("/webpush/test", s.handleWebPushTest)
+	}
 	// Static SPA — catch-all
 	if s.staticFS != nil {
 		mux.Handle("/", fixMimeTypes(http.FileServer(http.FS(s.staticFS))))
@@ -1101,7 +1116,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
 			"pane-create", "incremental-terminal", "git-diff", "git-commit", "git-sync", "git-name-status", "git-log-view", "git-range", "send-text-paste",
 			"send-ack", "prompt-guard", "secret-input", "terminal-observe",
+			"session-manage", "worktree",
 		},
+	}
+	if s.svc != nil {
+		hello.BootID = s.svc.BootID()
 	}
 	if s.tunnels != nil && s.tunnels.DirectAllowed() {
 		hello.Features = append(hello.Features, "tunnel-direct")

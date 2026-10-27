@@ -17,6 +17,10 @@ type Hello struct {
 	V             int      `json:"v"`
 	ServerVersion string   `json:"server_version"`
 	Features      []string `json:"features"`
+	// BootID is generated when the relay process starts. A request that
+	// carries operation_id must carry the boot_id from the hello that was
+	// current when the client minted that id.
+	BootID string `json:"boot_id,omitempty"`
 }
 
 // AgentsSnapshot is the full pane/agent list broadcast.
@@ -165,13 +169,15 @@ func DecodeType(data []byte) string {
 
 // Respond is a client approval/option command.
 type Respond struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	PaneID    string `json:"pane_id"`
-	OptIndex  int    `json:"opt_index,omitempty"`
-	Submit    bool   `json:"submit,omitempty"`     // append \n if missing
-	RequestID string `json:"request_id,omitempty"` // send-ack; absent on old clients
-	PromptID  string `json:"prompt_id,omitempty"`  // prompt-guard; checked before send when set
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	PaneID      string `json:"pane_id"`
+	OptIndex    int    `json:"opt_index,omitempty"`
+	Submit      bool   `json:"submit,omitempty"`       // append \n if missing
+	RequestID   string `json:"request_id,omitempty"`   // send-ack; absent on old clients
+	PromptID    string `json:"prompt_id,omitempty"`    // prompt-guard; checked before send when set
+	OperationID string `json:"operation_id,omitempty"` // idempotency key; absent on old clients
+	BootID      string `json:"boot_id,omitempty"`      // hello boot_id from when operation_id was minted
 }
 
 // SendText sends raw text to a pane.
@@ -372,6 +378,8 @@ type PaneCreate struct {
 	Direction   string `json:"direction,omitempty"`    // "right" | "down" (shell mode)
 	Cwd         string `json:"cwd,omitempty"`          // working directory override
 	Label       string `json:"label,omitempty"`        // workspace label (workspace mode)
+	OperationID string `json:"operation_id,omitempty"` // idempotency key; absent on old clients
+	BootID      string `json:"boot_id,omitempty"`      // hello boot_id from when operation_id was minted
 }
 
 // PaneCreated confirms a new pane was created, carrying the new pane's ID.
@@ -380,6 +388,120 @@ type PaneCreated struct {
 	PaneID string `json:"pane_id"`
 	Mode   string `json:"mode"` // "shell" | "workspace" | "tab" (normalized; empty → "shell")
 	Host   string `json:"host,omitempty"`
+}
+
+// SessionRename renames a workspace, tab, or pane.
+// Target is "workspace", "tab", or "pane". Clear with an empty label
+// clears a pane name (`pane rename --clear`).
+type SessionRename struct {
+	Type   string `json:"type"`
+	Target string `json:"target"`
+	ID     string `json:"id"`
+	Label  string `json:"label,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Clear  bool   `json:"clear,omitempty"`
+}
+
+// WorkspaceMove reorders a workspace. InsertIndex is the index in the
+// list before the workspace is removed. The relay forwards it unchanged.
+type WorkspaceMove struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id"`
+	InsertIndex int    `json:"insert_index"`
+	Host        string `json:"host,omitempty"`
+}
+
+// SessionClose closes a workspace, tab, or pane. operation_id and boot_id
+// are required; a request without them is rejected and not executed.
+// Group is only for target workspace: it passes `workspace close --group`.
+type SessionClose struct {
+	Type        string `json:"type"`
+	Target      string `json:"target"`
+	ID          string `json:"id"`
+	Host        string `json:"host,omitempty"`
+	Group       bool   `json:"group,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	BootID      string `json:"boot_id,omitempty"`
+}
+
+// SessionOK acknowledges a session mutation that has no other payload.
+type SessionOK struct {
+	Type string `json:"type"` // "session_ok"
+	Op   string `json:"op"`
+	ID   string `json:"id,omitempty"`
+}
+
+// WorktreeList asks for the worktrees of one workspace.
+type WorktreeList struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id"`
+	Host        string `json:"host,omitempty"`
+}
+
+// WorktreeEntryMsg is one worktree row sent to the client.
+type WorktreeEntryMsg struct {
+	Path            string `json:"path"`
+	Branch          string `json:"branch,omitempty"`
+	Label           string `json:"label,omitempty"`
+	OpenWorkspaceID string `json:"open_workspace_id,omitempty"`
+	Linked          bool   `json:"linked,omitempty"`
+}
+
+// Worktrees is the reply to worktree_list. WorkspaceID is the workspace
+// the list was requested for, so a menu does not show another workspace's rows.
+type Worktrees struct {
+	Type        string             `json:"type"` // "worktrees"
+	WorkspaceID string             `json:"workspace_id"`
+	Host        string             `json:"host,omitempty"`
+	Entries     []WorktreeEntryMsg `json:"entries"`
+}
+
+// WorktreeCreate creates a worktree from a workspace and optionally starts an agent.
+// Agent "shell" or empty starts nothing. Branch empty asks the relay to pick
+// worktree/<adjective>-<noun>-<4 hex>.
+type WorktreeCreate struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id"`
+	Host        string `json:"host,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	Base        string `json:"base,omitempty"`
+	Label       string `json:"label,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+	OperationID string `json:"operation_id,omitempty"` // idempotency key; absent on old clients
+	BootID      string `json:"boot_id,omitempty"`      // hello boot_id from when operation_id was minted
+}
+
+// WorktreeOpen opens an existing checkout.
+type WorktreeOpen struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Host        string `json:"host,omitempty"`
+	Path        string `json:"path"`
+	Branch      string `json:"branch,omitempty"`
+	Label       string `json:"label,omitempty"`
+}
+
+// WorktreeRemove deletes a checkout and keeps the branch.
+// operation_id and boot_id are required. Force passes --force.
+type WorktreeRemove struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id"`
+	Host        string `json:"host,omitempty"`
+	Force       bool   `json:"force,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	BootID      string `json:"boot_id,omitempty"`
+}
+
+// WorktreeReady is the success reply for create and open.
+type WorktreeReady struct {
+	Type        string `json:"type"` // "worktree_ready"
+	Op          string `json:"op"`   // worktree_create | worktree_open
+	WorkspaceID string `json:"workspace_id"`
+	PaneID      string `json:"pane_id,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	Path        string `json:"path,omitempty"`
+	AlreadyOpen bool   `json:"already_open,omitempty"`
+	Host        string `json:"host,omitempty"`
 }
 
 // TunnelsSnapshot carries all port tunnels.

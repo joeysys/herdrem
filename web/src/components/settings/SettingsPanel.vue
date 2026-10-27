@@ -7,6 +7,7 @@ import RelayManager from './RelayManager.vue'
 import PreferencesSection from './PreferencesSection.vue'
 import TimingSection from './TimingSection.vue'
 import WakeLockSection from './WakeLockSection.vue'
+import WebPushSection from './WebPushSection.vue'
 import HistorySection from './HistorySection.vue'
 import { useBackground } from '../../composables/useBackground'
 import { useNotify } from '../../composables/useNotify'
@@ -128,6 +129,8 @@ async function reloadPage() {
         <section class="sp-section">
           <WakeLockSection />
         </section>
+
+        <WebPushSection />
 
         <section class="sp-section">
           <HistorySection />

@@ -55,6 +55,7 @@ type Poller struct {
 	activeMu            sync.Mutex
 	prevRevisions       map[string]int            // pane_id → last seen revision
 	prevSeq             map[string]int            // pane_id → last seen state_change_seq
+	prevStatus          map[string]string         // pane_id → last seen status (status-only changes count)
 	lastActive          map[string]int64          // pane_id → epoch seconds
 	acknowledgedDone    map[string]bool           // pane_id → done seen by a relay client
 	prevValidPathsRevs  map[string]int            // pane_id → last checked revision for valid paths
@@ -114,8 +115,23 @@ type Poller struct {
 	fileSvc   existsChecker
 	fileSvcMu sync.RWMutex
 
-	// trigger channel for immediate poll (e.g. after AckDone)
+	// trigger channel for immediate poll (e.g. after AckDone).
+	// Status events do not use this; see statusDirty.
 	trigger chan struct{}
+
+	// cycleMu serializes pollOnce and the local status refresh.
+	cycleMu          sync.Mutex
+	statusMu         sync.Mutex
+	statusDirty      map[string]struct{}
+	statusCancel     context.CancelFunc
+	statusGen        uint64
+	subscribedIDs    []string
+	statusHealthy    atomic.Bool
+	forceLocal       atomic.Bool // TriggerPoll: next pollOnce must snapshot local
+	localCalibAt     time.Time
+	statusMergeEvery time.Duration // tests; 0 uses statusMergeInterval
+	statusRedialWait time.Duration // tests; 0 uses statusReconnectWait
+	statusWatcher    func(pane herdr.Pane, from, to string)
 
 	// persistence: state file path and in-process writer serialization
 	statePath   string
@@ -200,6 +216,7 @@ func New(client herdr.Client, hosts []string, kinds map[string]bool, h *hub.Hub,
 		branchExpiry:        make(map[string]time.Time),
 		prevRevisions:       make(map[string]int),
 		prevSeq:             make(map[string]int),
+		prevStatus:          make(map[string]string),
 		lastActive:          make(map[string]int64),
 		acknowledgedDone:    make(map[string]bool),
 		prevValidPathsRevs:  make(map[string]int),
@@ -307,10 +324,11 @@ func (p *Poller) SetStatePath(path string) {
 
 // persistedState is the JSON shape for the state file.
 type persistedState struct {
-	LastActive       map[string]int64 `json:"last_active"`
-	PrevRevisions    map[string]int   `json:"prev_revisions"`
-	PrevSeq          map[string]int   `json:"prev_seq"`
-	AcknowledgedDone map[string]bool  `json:"acknowledged_done,omitempty"`
+	LastActive       map[string]int64  `json:"last_active"`
+	PrevRevisions    map[string]int    `json:"prev_revisions"`
+	PrevSeq          map[string]int    `json:"prev_seq"`
+	PrevStatus       map[string]string `json:"prev_status,omitempty"`
+	AcknowledgedDone map[string]bool   `json:"acknowledged_done,omitempty"`
 }
 
 func (p *Poller) loadState() {
@@ -339,6 +357,9 @@ func (p *Poller) loadState() {
 	for k, v := range ps.PrevSeq {
 		p.prevSeq[k] = v
 	}
+	for k, v := range ps.PrevStatus {
+		p.prevStatus[k] = v
+	}
 	for k, v := range ps.AcknowledgedDone {
 		p.acknowledgedDone[k] = v
 	}
@@ -358,6 +379,7 @@ func (p *Poller) saveState() {
 		LastActive:       make(map[string]int64, len(p.lastActive)),
 		PrevRevisions:    make(map[string]int, len(p.prevRevisions)),
 		PrevSeq:          make(map[string]int, len(p.prevSeq)),
+		PrevStatus:       make(map[string]string, len(p.prevStatus)),
 		AcknowledgedDone: make(map[string]bool, len(p.acknowledgedDone)),
 	}
 	for k, v := range p.lastActive {
@@ -368,6 +390,9 @@ func (p *Poller) saveState() {
 	}
 	for k, v := range p.prevSeq {
 		ps.PrevSeq[k] = v
+	}
+	for k, v := range p.prevStatus {
+		ps.PrevStatus[k] = v
 	}
 	for k, v := range p.acknowledgedDone {
 		ps.AcknowledgedDone[k] = v
@@ -474,6 +499,11 @@ func (p *Poller) Run(ctx context.Context) {
 	defer p.stopAllObservers()
 
 	p.pollOnce(ctx)
+	// After the first snapshot the local pane ids are known, so the status
+	// subscription can include them. Clients without the optional source
+	// make both loops return immediately.
+	go p.runStatusEvents(ctx)
+	go p.runStatusMerge(ctx)
 	for {
 		select {
 		case <-ticker.C:
@@ -500,9 +530,18 @@ func (p *Poller) Run(ctx context.Context) {
 // deleted. Runtime-tunable via prefs timing.host_retry_ms (defaultHostRetry).
 
 func (p *Poller) pollOnce(ctx context.Context) {
+	p.cycleMu.Lock()
+	defer p.cycleMu.Unlock()
+	// Consume the flag once per cycle so every local host in this pass is
+	// forced, and a later ticker tick is not.
+	forceLocal := p.forceLocal.Swap(false)
+
 	var merged []herdr.Pane
 	seen := make(map[string]bool)
-	wsLabels := make(map[string]map[string]string) // host → workspace_id → label
+	polled := make(map[string]bool)
+	beforeStatus := p.statusByID()
+	wsMetaByHost := make(map[string]map[string]wsMeta) // host → workspace_id → order and link
+	tabLabels := make(map[string]map[string]string)    // host → tab_id → label
 
 	now := time.Now()
 	if p.hub != nil && p.hub.Count() > 0 {
@@ -519,9 +558,18 @@ func (p *Poller) pollOnce(ctx context.Context) {
 
 	for _, host := range p.hosts {
 		if t, ok := p.hostNextTry[host]; ok && now.Before(t) {
+			polled[host] = true
 			merged = append(merged, p.stalePanes(host, seen)...)
 			continue
 		}
+		if p.skipLocalSnapshot(host, forceLocal) {
+			// Event connection is healthy. Keep the last local panes without
+			// treating this tick as a poll of that host, so prune cannot drop
+			// them. SSH hosts still snapshot below.
+			merged = append(merged, p.retainedPanes(host)...)
+			continue
+		}
+		polled[host] = true
 		p.metrics.mu.Lock()
 		p.metrics.snapshots++
 		p.metrics.mu.Unlock()
@@ -536,7 +584,8 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			continue
 		}
 		delete(p.hostNextTry, host)
-		wsLabels[hostLabel(host)] = workspaceLabels(snap.Workspaces)
+		wsMetaByHost[hostLabel(host)] = workspaceMeta(snap.Workspaces)
+		tabLabels[hostLabel(host)] = tabLabelIndex(snap.Tabs)
 
 		var hostPanes []herdr.Pane
 		for i := range snap.Panes {
@@ -569,16 +618,24 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.mu.Lock()
 		p.hostPanes[host] = hostPanes
 		p.mu.Unlock()
+		if localHost(host) {
+			p.localCalibAt = now
+			ids := make([]string, len(hostPanes))
+			for i := range hostPanes {
+				ids[i] = hostPanes[i].PaneID
+			}
+			p.maybeResubscribe(ids)
+		}
 	}
 
-	stateChanged := p.pruneRemotes(seen)
+	stateChanged := p.pruneRemotes(polled, seen)
 	stateChanged = p.applyDoneAcknowledgements(merged) || stateChanged
 
 	// Enrich panes with git branch info (cached, refreshed every 15s)
 	p.enrichBranches(ctx, merged)
 
-	// Apply workspace labels collected from the same snapshots (no extra call)
-	p.applyWorkspaceLabels(merged, wsLabels)
+	// Apply workspace label, order, link, and tab label from the same snapshots.
+	p.applyWorkspaceMeta(merged, wsMetaByHost, tabLabels)
 
 	// Track last active time from pane revisions and agent state
 	activeChanged := p.enrichLastActive(merged)
@@ -652,6 +709,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	// when enrichment is off, so a hidden page's expired subscription releases
 	// the process without waiting for the next connected cycle.
 	p.syncObservers()
+	p.deliverStatusChanges(beforeStatus, merged)
 }
 
 // stalePanes returns the retained panes of a host whose snapshot just failed,
@@ -671,11 +729,32 @@ func (p *Poller) stalePanes(host string, seen map[string]bool) []herdr.Pane {
 	return prev
 }
 
-// workspaceLabels flattens a snapshot's workspaces into workspace_id → label.
-func workspaceLabels(wss []herdr.Workspace) map[string]string {
-	m := make(map[string]string, len(wss))
+type wsMeta struct {
+	label  string
+	order  int
+	linked bool
+}
+
+// workspaceMeta flattens a snapshot's workspaces. order is herdr's number,
+// including 0. linked is worktree.is_linked_worktree.
+func workspaceMeta(wss []herdr.Workspace) map[string]wsMeta {
+	m := make(map[string]wsMeta, len(wss))
 	for _, ws := range wss {
-		m[ws.WorkspaceID] = ws.Label
+		meta := wsMeta{label: ws.Label, order: ws.Number}
+		if ws.Worktree != nil {
+			meta.linked = ws.Worktree.IsLinkedWorktree
+		}
+		m[ws.WorkspaceID] = meta
+	}
+	return m
+}
+
+func tabLabelIndex(tabs []herdr.Tab) map[string]string {
+	m := make(map[string]string, len(tabs))
+	for _, tab := range tabs {
+		if tab.Label != "" {
+			m[tab.TabID] = tab.Label
+		}
 	}
 	return m
 }
@@ -1017,7 +1096,11 @@ func panesChanged(prev, cur []herdr.Pane) bool {
 		return true
 	}
 	fp := func(p herdr.Pane) string {
-		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + p.WorkspaceLabel + ":" + p.Prompt + ":" + strings.Join(p.Options, ",") + ":" + strings.Join(p.OptionLabels, "|") + ":" + p.PromptID + ":" + strconv.Itoa(len(p.ValidPaths)) + ":" + strconv.FormatBool(p.Stale)
+		order := ""
+		if p.WorkspaceOrder != nil {
+			order = strconv.Itoa(*p.WorkspaceOrder)
+		}
+		return p.PaneID + ":" + p.Status + ":" + strconv.FormatInt(p.LastActive, 10) + ":" + p.Branch + ":" + p.WorkspaceLabel + ":" + p.Label + ":" + p.TabID + ":" + p.TabLabel + ":" + order + ":" + strconv.FormatBool(p.WorkspaceLinked) + ":" + p.Prompt + ":" + strings.Join(p.Options, ",") + ":" + strings.Join(p.OptionLabels, "|") + ":" + p.PromptID + ":" + strconv.Itoa(len(p.ValidPaths)) + ":" + strconv.FormatBool(p.Stale)
 	}
 	seen := make(map[string]struct{}, len(cur))
 	for _, p := range cur {
@@ -1148,9 +1231,20 @@ func (p *Poller) setRemote(paneID, host string) {
 	p.mu.Unlock()
 }
 
-func (p *Poller) pruneRemotes(seen map[string]bool) bool {
+// pruneRemotes drops bookkeeping only for hosts this cycle actually polled.
+// A remote-only cycle must not delete local panes, and a local status refresh
+// must not delete SSH panes. seen lists the panes those polled hosts still have.
+func (p *Poller) pruneRemotes(polled map[string]bool, seen map[string]bool) bool {
 	p.mu.Lock()
-	for id := range p.paneRemote {
+	keep := make(map[string]bool, len(seen)+len(p.paneRemote))
+	for id := range seen {
+		keep[id] = true
+	}
+	for id, host := range p.paneRemote {
+		if !polled[host] {
+			keep[id] = true
+			continue
+		}
 		if !seen[id] {
 			delete(p.paneRemote, id)
 		}
@@ -1160,36 +1254,39 @@ func (p *Poller) pruneRemotes(seen map[string]bool) bool {
 	p.activeMu.Lock()
 	changed := false
 	for id := range p.prevRevisions {
-		if !seen[id] {
-			changed = true
-			delete(p.prevRevisions, id)
-			delete(p.prevSeq, id)
-			delete(p.lastActive, id)
-			delete(p.acknowledgedDone, id)
-			delete(p.prevValidPathsRevs, id)
-			delete(p.prevValidPathsSeq, id)
-			delete(p.cachedValidPaths, id)
-			delete(p.missingPathItems, id)
-			delete(p.validPathsLastCheck, id)
-			delete(p.menuCache, id)
-			delete(p.menuGen, id)
+		if keep[id] {
+			continue
 		}
+		changed = true
+		delete(p.prevRevisions, id)
+		delete(p.prevSeq, id)
+		delete(p.prevStatus, id)
+		delete(p.lastActive, id)
+		delete(p.acknowledgedDone, id)
+		delete(p.prevValidPathsRevs, id)
+		delete(p.prevValidPathsSeq, id)
+		delete(p.cachedValidPaths, id)
+		delete(p.missingPathItems, id)
+		delete(p.validPathsLastCheck, id)
+		delete(p.menuCache, id)
+		delete(p.menuGen, id)
 	}
 	p.activeMu.Unlock()
 
 	p.contentMu.Lock()
 	for id := range p.contentCache {
-		if !seen[id] {
-			delete(p.contentCache, id)
-			delete(p.contentRevs, id)
-			delete(p.contentSeqs, id)
-			delete(p.contentGen, id)
-			delete(p.contentReadLines, id)
-			delete(p.contentAt, id)
-			delete(p.contentVerAt, id)
-			delete(p.subscribers, id)
-			delete(p.previewCache, id)
+		if keep[id] {
+			continue
 		}
+		delete(p.contentCache, id)
+		delete(p.contentRevs, id)
+		delete(p.contentSeqs, id)
+		delete(p.contentGen, id)
+		delete(p.contentReadLines, id)
+		delete(p.contentAt, id)
+		delete(p.contentVerAt, id)
+		delete(p.subscribers, id)
+		delete(p.previewCache, id)
 	}
 	p.contentMu.Unlock()
 	return changed
@@ -1308,30 +1405,41 @@ func gitBranch(ctx context.Context, cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// applyWorkspaceLabels fills in WorkspaceLabel for each pane from the label
-// maps collected in the same poll cycle's api snapshot — no extra herdr call.
-// Panes on hosts whose snapshot failed keep the label from their retained
-// (stale) copy.
-func (p *Poller) applyWorkspaceLabels(panes []herdr.Pane, wsLabels map[string]map[string]string) {
+// applyWorkspaceMeta fills label, order, link, and tab label from the snapshot
+// collected in the same poll. No extra herdr call. A host whose snapshot
+// failed is absent from the maps, so its retained panes keep the fields they
+// already had.
+func (p *Poller) applyWorkspaceMeta(panes []herdr.Pane, metas map[string]map[string]wsMeta, tabs map[string]map[string]string) {
 	for i := range panes {
 		h := panes[i].Host
 		if h == "" {
 			h = "local"
 		}
-		labels, ok := wsLabels[h]
-		if !ok {
-			continue
+		if mm, ok := metas[h]; ok {
+			if meta, ok := mm[panes[i].WorkspaceID]; ok {
+				if meta.label != "" {
+					panes[i].WorkspaceLabel = meta.label
+				}
+				n := meta.order
+				panes[i].WorkspaceOrder = &n
+				panes[i].WorkspaceLinked = meta.linked
+			}
 		}
-		if label, ok := labels[panes[i].WorkspaceID]; ok && label != "" {
-			panes[i].WorkspaceLabel = label
+		if panes[i].TabID != "" {
+			if tl, ok := tabs[h]; ok {
+				if label, ok := tl[panes[i].TabID]; ok {
+					panes[i].TabLabel = label
+				}
+			}
 		}
 	}
 }
 
-// enrichLastActive tracks pane activity by detecting changes in revision or
-// state_change_seq. Working agents stay active because herdr may leave both
-// counters unchanged while an agent is running. Returns true if any timestamp
-// changed.
+// enrichLastActive tracks pane activity by detecting changes in revision,
+// state_change_seq, or status. Status can move with both counters unchanged.
+// Working agents stay active because herdr may leave the counters unchanged
+// while an agent is running. Returns true if any timestamp changed because
+// the pane was new or a counter or status moved.
 func (p *Poller) enrichLastActive(panes []herdr.Pane) bool {
 	p.activeMu.Lock()
 	defer p.activeMu.Unlock()
@@ -1344,11 +1452,13 @@ func (p *Poller) enrichLastActive(panes []herdr.Pane) bool {
 		seq := panes[i].StateChangeSeq
 		prev, seen := p.prevRevisions[pid]
 		working := panes[i].Kind == "agent" && strings.EqualFold(panes[i].Status, "working")
-		stateChanged := !seen || rev != prev || seq != p.prevSeq[pid]
+		statusChanged := seen && panes[i].Status != p.prevStatus[pid]
+		stateChanged := !seen || rev != prev || seq != p.prevSeq[pid] || statusChanged
 		if stateChanged || working {
 			p.lastActive[pid] = now
 			p.prevRevisions[pid] = rev
 			p.prevSeq[pid] = seq
+			p.prevStatus[pid] = panes[i].Status
 			changed = changed || stateChanged
 		}
 		if ts, ok := p.lastActive[pid]; ok {
@@ -1493,8 +1603,11 @@ func (p *Poller) PreviewSnapshot(ctx context.Context, paneID string, lines int) 
 }
 
 // TriggerPoll requests an immediate poll cycle (e.g. on first client connect
-// or after an acknowledgement), without waiting for the ticker.
+// or after a session mutation), without waiting for the ticker. It also
+// forces the next local snapshot: rename and workspace move do not emit the
+// pane events the healthy-connection skip relies on.
 func (p *Poller) TriggerPoll() {
+	p.forceLocal.Store(true)
 	select {
 	case p.trigger <- struct{}{}:
 	default:

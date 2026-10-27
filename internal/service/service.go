@@ -36,6 +36,8 @@ type Service struct {
 	subscriber   ContentSubscriber
 	allowedHosts map[string]bool
 	logger       *slog.Logger
+	bootID       string
+	ops          *opCache
 }
 
 // ContentSubscriber lets the service tell the poller which panes a client is
@@ -128,7 +130,10 @@ func New(client herdr.Client, router herdr.PaneRouter, todo *store.Store, prefs 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{client: client, router: router, todoStore: todo, prefsStore: prefs, files: files, hub: h, logger: logger}
+	return &Service{
+		client: client, router: router, todoStore: todo, prefsStore: prefs, files: files, hub: h, logger: logger,
+		bootID: newBootID(), ops: newOpCache(),
+	}
 }
 
 // SetAllowedHosts sets the set of hosts the relay may act on (e.g.
@@ -250,6 +255,20 @@ func (s *Service) HandleMessage(ctx context.Context, conn *websocket.Conn, data 
 		s.handleTunnelsList(ctx, conn)
 	case "pane_create":
 		s.handlePaneCreate(ctx, conn, data)
+	case "session_rename":
+		s.handleSessionRename(ctx, conn, data)
+	case "workspace_move":
+		s.handleWorkspaceMove(ctx, conn, data)
+	case "session_close":
+		s.handleSessionClose(ctx, conn, data)
+	case "worktree_list":
+		s.handleWorktreeList(ctx, conn, data)
+	case "worktree_create":
+		s.handleWorktreeCreate(ctx, conn, data)
+	case "worktree_open":
+		s.handleWorktreeOpen(ctx, conn, data)
+	case "worktree_remove":
+		s.handleWorktreeRemove(ctx, conn, data)
 	default:
 		s.sendError(ctx, conn, msgType, "unknown message type")
 	}
@@ -576,43 +595,48 @@ func (s *Service) handleRespond(ctx context.Context, conn *websocket.Conn, data 
 		s.sendError(ctx, conn, "respond", "invalid message: "+err.Error())
 		return
 	}
-	if msg.PaneID == "" {
-		s.failSend(ctx, conn, "respond", msg.RequestID, "missing pane_id", "invalid")
-		return
-	}
-	if msg.PromptID != "" {
-		stale, err := s.promptStale(ctx, msg.PaneID, msg.PromptID)
-		if err != nil {
-			s.failSend(ctx, conn, "respond", msg.RequestID, err.Error(), "unavailable")
-			return
+	s.once(ctx, conn, "respond", msg.OperationID, msg.BootID, msg.RequestID, false, func() (any, error) {
+		if msg.PaneID == "" {
+			return nil, &opError{key: "invalid", msg: "missing pane_id"}
 		}
-		if stale {
-			s.rejectStalePrompt(ctx, conn, "respond", msg.PaneID, msg.RequestID)
-			return
+		if msg.PromptID != "" {
+			stale, err := s.promptStale(ctx, msg.PaneID, msg.PromptID)
+			if err != nil {
+				return nil, &opError{key: "unavailable", msg: err.Error()}
+			}
+			if stale {
+				if s.subscriber != nil {
+					s.subscriber.InvalidateMenu(msg.PaneID)
+					s.subscriber.TriggerPoll()
+				}
+				return nil, &opError{key: "stale", msg: "Prompt changed, please confirm again"}
+			}
 		}
-	}
-	text := msg.Text
-	if msg.Submit {
-		if text != "" && text[len(text)-1] != '\n' {
+		text := msg.Text
+		if msg.Submit {
+			if text != "" && text[len(text)-1] != '\n' {
+				text += "\n"
+			}
+		} else if isNumericChoice(text) {
+			// TUI numbered select choices act on the digit keypress directly;
+			// normalizing surrounding whitespace prevents an unconsumed Enter from
+			// spilling into the next input prompt as a blank line.
+			text = strings.TrimSpace(text)
+		} else if text != "" && text[len(text)-1] != '\n' {
+			// Line-buffered shell prompts (e.g. y/n) require Enter to submit.
 			text += "\n"
 		}
-	} else if isNumericChoice(text) {
-		// TUI numbered select choices act on the digit keypress directly;
-		// normalizing surrounding whitespace prevents an unconsumed Enter from
-		// spilling into the next input prompt as a blank line.
-		text = strings.TrimSpace(text)
-	} else if text != "" && text[len(text)-1] != '\n' {
-		// Line-buffered shell prompts (e.g. y/n) require Enter to submit.
-		text += "\n"
-	}
-	if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {
-		s.failSend(ctx, conn, "respond", msg.RequestID, err.Error(), "")
-		return
-	}
-	s.ackSend(ctx, conn, "respond", msg.PaneID, msg.RequestID)
-	if s.subscriber != nil {
-		s.subscriber.InvalidateMenu(msg.PaneID)
-	}
+		if err := s.client.SendText(ctx, s.hostFor(msg.PaneID), msg.PaneID, text); err != nil {
+			return nil, err
+		}
+		if s.subscriber != nil {
+			s.subscriber.InvalidateMenu(msg.PaneID)
+		}
+		if msg.RequestID == "" {
+			return nil, nil
+		}
+		return protocol.Sent{Type: "sent", Op: "respond", PaneID: msg.PaneID, RequestID: msg.RequestID}, nil
+	})
 }
 
 func (s *Service) handleTodoGet(ctx context.Context, conn *websocket.Conn) {
@@ -825,47 +849,42 @@ func (s *Service) handlePaneCreate(ctx context.Context, conn *websocket.Conn, da
 		s.sendError(ctx, conn, "pane_create", "invalid message: "+err.Error())
 		return
 	}
-	host := msg.Host
-	if host == "" && msg.FromPaneID != "" {
-		host = s.hostFor(msg.FromPaneID)
-	}
-	// Security: only route to configured/local hosts. A client-supplied host
-	// string also reaches ssh's argument list, so reject anything that could
-	// be parsed as an option (leading dash) even if it matches a name.
-	if !s.allowedHost(host) || strings.HasPrefix(host, "-") {
-		s.sendError(ctx, conn, "pane_create", "unauthorized host")
-		return
-	}
-
-	var paneID string
-	var err error
-	switch msg.Mode {
-	case "workspace":
-		paneID, err = s.client.WorkspaceCreate(ctx, host, msg.Label, msg.Cwd)
-	case "tab":
-		if msg.WorkspaceID == "" {
-			s.sendError(ctx, conn, "pane_create", "missing workspace_id for tab mode")
-			return
+	s.once(ctx, conn, "pane_create", msg.OperationID, msg.BootID, "", false, func() (any, error) {
+		host := msg.Host
+		if host == "" && msg.FromPaneID != "" {
+			host = s.hostFor(msg.FromPaneID)
 		}
-		paneID, err = s.client.TabCreate(ctx, host, msg.WorkspaceID, msg.Cwd)
-	case "shell", "":
-		paneID, err = s.client.PaneSplit(ctx, host, msg.FromPaneID, msg.Direction, msg.Cwd)
-	default:
-		s.sendError(ctx, conn, "pane_create", "invalid mode: "+msg.Mode)
-		return
-	}
-	if err != nil {
-		s.sendError(ctx, conn, "pane_create", err.Error())
-		return
-	}
-	// Normalize the echoed mode: shell/empty both mean split, but the client
-	// (and docs) expect a concrete value.
-	echoMode := normalizePaneMode(msg.Mode)
-	s.sendJSON(ctx, conn, protocol.PaneCreated{
-		Type:   "pane_created",
-		PaneID: paneID,
-		Mode:   echoMode,
-		Host:   host,
+		// Security: only route to configured/local hosts. A client-supplied host
+		// string also reaches ssh's argument list, so reject anything that could
+		// be parsed as an option (leading dash) even if it matches a name.
+		if !s.allowedHost(host) || strings.HasPrefix(host, "-") {
+			return nil, &opError{key: "invalid", msg: "unauthorized host"}
+		}
+		var paneID string
+		var err error
+		switch msg.Mode {
+		case "workspace":
+			paneID, err = s.client.WorkspaceCreate(ctx, host, msg.Label, msg.Cwd)
+		case "tab":
+			if msg.WorkspaceID == "" {
+				return nil, &opError{key: "invalid", msg: "missing workspace_id for tab mode"}
+			}
+			paneID, err = s.client.TabCreate(ctx, host, msg.WorkspaceID, msg.Cwd)
+		case "shell", "":
+			paneID, err = s.client.PaneSplit(ctx, host, msg.FromPaneID, msg.Direction, msg.Cwd)
+		default:
+			return nil, &opError{key: "invalid", msg: "invalid mode: " + msg.Mode}
+		}
+		if err != nil {
+			return nil, err
+		}
+		s.triggerPoll()
+		return protocol.PaneCreated{
+			Type:   "pane_created",
+			PaneID: paneID,
+			Mode:   normalizePaneMode(msg.Mode),
+			Host:   host,
+		}, nil
 	})
 }
 

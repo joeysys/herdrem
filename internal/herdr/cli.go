@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -80,7 +81,16 @@ func shellQuote(s string) string {
 }
 
 func (c *CLIClient) exec(ctx context.Context, host string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	return c.execTimeout(ctx, 10*time.Second, host, args...)
+}
+
+// execTimeout runs one herdr command. Worktree and agent start need longer
+// than the 10s default: git checkout and the agent ready-wait both outlast it.
+// A JSON error envelope or stderr is returned as the error text so a git
+// refusal reaches the user unchanged. The argv fallback still redacts
+// pane send-text.
+func (c *CLIClient) execTimeout(ctx context.Context, timeout time.Duration, host string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := c.buildCmd(ctx, host, args...)
@@ -89,8 +99,14 @@ func (c *CLIClient) exec(ctx context.Context, host string, args ...string) ([]by
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("herdr %s (host=%s): %w (stderr: %s)",
-			strings.Join(redactArgs(args), " "), hostLabel(host), err, strings.TrimSpace(stderr.String()))
+		if msg := rpcErrorMessage(stdout.Bytes()); msg != "" {
+			return nil, errors.New(msg)
+		}
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			return nil, errors.New(text)
+		}
+		return nil, fmt.Errorf("herdr %s (host=%s): %w",
+			strings.Join(redactArgs(args), " "), hostLabel(host), err)
 	}
 	return stdout.Bytes(), nil
 }
