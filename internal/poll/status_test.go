@@ -2,6 +2,7 @@ package poll
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -16,17 +17,29 @@ import (
 // snapClient serves a different pane list per host and counts snapshots.
 type snapClient struct {
 	herdr.FakeClient
-	mu    sync.Mutex
-	panes map[string][]herdr.Pane
-	calls map[string]int
+	mu         sync.Mutex
+	panes      map[string][]herdr.Pane
+	workspaces map[string][]herdr.Workspace
+	tabs       map[string][]herdr.Tab
+	calls      map[string]int
+	err        error
 }
 
 func (s *snapClient) Snapshot(ctx context.Context, host string) (*herdr.Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls[host]++
+	if s.err != nil {
+		return nil, s.err
+	}
 	panes := append([]herdr.Pane(nil), s.panes[host]...)
-	return &herdr.Snapshot{Panes: panes, Protocol: herdr.MinProtocol, Version: "fake"}, nil
+	return &herdr.Snapshot{
+		Panes:      panes,
+		Workspaces: append([]herdr.Workspace(nil), s.workspaces[host]...),
+		Tabs:       append([]herdr.Tab(nil), s.tabs[host]...),
+		Protocol:   herdr.MinProtocol,
+		Version:    "fake",
+	}, nil
 }
 
 func (s *snapClient) setStatus(host, id, status string) {
@@ -44,6 +57,12 @@ func (s *snapClient) callCount(host string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls[host]
+}
+
+func (s *snapClient) setErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
 }
 
 type burstSource struct {
@@ -307,6 +326,121 @@ func TestTriggerPollRefreshesLocalLabelWhileEventsHealthy(t *testing.T) {
 	if labelOf(p, "L") != "renamed" {
 		t.Fatalf("label after trigger = %q", labelOf(p, "L"))
 	}
+}
+
+// Herdr panes carry workspace_id only. The title comes from the snapshot's
+// workspaces[]. A skipped local poll and the status refresh that follows must
+// keep that title; otherwise the spaces grid shows the id on both lines.
+func TestWorkspaceTitleSurvivesEventSkip(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	src := &snapClient{
+		panes: map[string][]herdr.Pane{
+			"local": {{
+				PaneID: "L", WorkspaceID: "w1", TabID: "t1",
+				Status: "idle", Kind: "shell", Host: "local",
+			}},
+		},
+		workspaces: map[string][]herdr.Workspace{
+			"local": {{
+				WorkspaceID: "w1", Label: "herdrem", Number: 3,
+				Worktree: &herdr.WorkspaceWorktree{IsLinkedWorktree: true},
+			}},
+		},
+		tabs: map[string][]herdr.Tab{
+			"local": {{TabID: "t1", WorkspaceID: "w1", Label: "shell"}},
+		},
+		calls: map[string]int{},
+	}
+	p := New(src, []string{"local"}, nil, hub.New(logger), logger, time.Hour)
+	ctx := context.Background()
+	p.pollOnce(ctx)
+	assertSpaceMeta(t, p, "L", "after snapshot")
+
+	p.statusHealthy.Store(true)
+	p.localCalibAt = time.Now()
+	before := src.callCount("local")
+	p.pollOnce(ctx)
+	if src.callCount("local") != before {
+		t.Fatalf("skip path snapshotted local: %d -> %d", before, src.callCount("local"))
+	}
+	assertSpaceMeta(t, p, "L", "after skip")
+
+	p.refreshLocal(ctx)
+	p.pollOnce(ctx)
+	if src.callCount("local") != before+1 {
+		t.Fatalf("refresh snapshots = %d, want %d", src.callCount("local"), before+1)
+	}
+	assertSpaceMeta(t, p, "L", "after refresh then skip")
+}
+
+// A failed host snapshot must keep the title, order, link, and tab label that
+// the last successful snapshot wrote back onto hostPanes. Those fields are
+// stored only by keepWorkspaceFields; stalePanes copies hostPanes as they are.
+func TestWorkspaceMetaSurvivesSnapshotFailure(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	src := &snapClient{
+		panes: map[string][]herdr.Pane{
+			"box": {{
+				PaneID: "B", WorkspaceID: "w1", TabID: "t1",
+				Status: "idle", Kind: "shell", Host: "box",
+			}},
+		},
+		workspaces: map[string][]herdr.Workspace{
+			"box": {{
+				WorkspaceID: "w1", Label: "herdrem", Number: 3,
+				Worktree: &herdr.WorkspaceWorktree{IsLinkedWorktree: true},
+			}},
+		},
+		tabs: map[string][]herdr.Tab{
+			"box": {{TabID: "t1", WorkspaceID: "w1", Label: "shell"}},
+		},
+		calls: map[string]int{},
+	}
+	p := New(src, []string{"box"}, nil, hub.New(logger), logger, time.Hour)
+	ctx := context.Background()
+	p.pollOnce(ctx)
+	assertSpaceMeta(t, p, "B", "after snapshot")
+	if paneByID(t, p, "B", "after snapshot").Stale {
+		t.Fatal("after snapshot: pane marked stale")
+	}
+
+	src.setErr(errors.New("snapshot down"))
+	p.pollOnce(ctx)
+	if src.callCount("box") != 2 {
+		t.Fatalf("failed host snapshots = %d, want 2", src.callCount("box"))
+	}
+	assertSpaceMeta(t, p, "B", "after snapshot error")
+	if !paneByID(t, p, "B", "after snapshot error").Stale {
+		t.Fatal("after snapshot error: pane not marked stale")
+	}
+}
+
+func assertSpaceMeta(t *testing.T, p *Poller, paneID, when string) {
+	t.Helper()
+	pane := paneByID(t, p, paneID, when)
+	if pane.WorkspaceLabel != "herdrem" {
+		t.Fatalf("%s: workspace label = %q, want herdrem", when, pane.WorkspaceLabel)
+	}
+	if pane.WorkspaceOrder == nil || *pane.WorkspaceOrder != 3 {
+		t.Fatalf("%s: workspace order = %v, want 3", when, pane.WorkspaceOrder)
+	}
+	if !pane.WorkspaceLinked {
+		t.Fatalf("%s: workspace linked = false, want true", when)
+	}
+	if pane.TabLabel != "shell" {
+		t.Fatalf("%s: tab label = %q, want shell", when, pane.TabLabel)
+	}
+}
+
+func paneByID(t *testing.T, p *Poller, paneID, when string) herdr.Pane {
+	t.Helper()
+	for _, item := range p.Snapshot() {
+		if item.PaneID == paneID {
+			return item
+		}
+	}
+	t.Fatalf("%s: pane %s missing", when, paneID)
+	return herdr.Pane{}
 }
 
 func labelOf(p *Poller, id string) string {

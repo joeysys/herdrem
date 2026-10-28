@@ -577,7 +577,7 @@ function onSpaceBack() {
   history.replaceState({ view: 'root' }, '');
 }
 
-/** Create a new tab in a space from within the space view */
+/** Create a shell pane in a space. The relay still asks herdr for a tab. */
 function onSpaceNewTab(workspaceId: string, host?: string) {
   createPane('tab', { workspaceId, host });
 }
@@ -1001,7 +1001,7 @@ onMounted(() => {
       } else {
         pendingOpenPane = msg.pane_id;
       }
-      const label = msg.mode === 'workspace' ? 'workspace' : msg.mode === 'tab' ? 'tab' : 'shell';
+      const label = msg.mode === 'workspace' ? 'workspace' : 'shell';
       notify.push({ message: `new ${label} pane created`, type: 'info' });
     }
     if (msg.type === 'error' && msg.op === 'pane_create') {

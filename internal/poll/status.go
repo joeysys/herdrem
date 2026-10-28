@@ -278,6 +278,9 @@ func (p *Poller) refreshLocal(ctx context.Context) {
 	}, map[string]map[string]string{
 		hostLabel(host): tabLabelIndex(snap.Tabs),
 	})
+	// ingest stored panes before the label fill. Put the title back so the
+	// next skipped poll does not replace it with the workspace id.
+	p.keepWorkspaceFields(host, merged)
 	activeChanged := p.enrichLastActive(merged)
 	if activeChanged {
 		p.saveState()

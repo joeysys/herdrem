@@ -208,7 +208,7 @@ function markRead(paneId: string) {
   ws.send({ type: 'mark_pane_read', pane_id: paneId })
 }
 
-/** Create a new tab in the current space */
+/** Create a shell pane in the current space. Herdr opens it as a tab; the list stays flat. */
 function newTab() {
   haptic(12)
   if (!activeSpace.value) return
@@ -403,7 +403,7 @@ function detectFinePointer(): boolean {
     <div class="space-topbar">
       <button class="space-back" title="Back to all spaces" @click="goBack">‹ all spaces</button>
       <div v-if="props.canCreatePane" class="space-actions">
-        <button class="split-btn" title="New tab (shell)" @click="newTab">+ tab</button>
+        <button class="split-btn" title="New pane" @click="newTab">+ pane</button>
       </div>
     </div>
     <div class="space-title">

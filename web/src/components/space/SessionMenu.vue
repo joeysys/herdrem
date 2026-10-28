@@ -23,7 +23,7 @@ const emit = defineEmits<{ close: []; move: [dir: -1 | 1] }>()
 const AGENTS = ['shell', 'claude', 'codex', 'cursor', 'grok', 'gemini', 'opencode', 'pi'] as const
 const AGENT_KEY = 'herdrem_worktree_agent'
 
-type Dialog = '' | 'rename' | 'close' | 'create' | 'open' | 'remove' | 'rename-pane' | 'rename-tab' | 'close-pane' | 'close-tab'
+type Dialog = '' | 'rename' | 'close' | 'create' | 'open' | 'remove' | 'rename-pane' | 'close-pane'
 const dialog = ref<Dialog>('')
 const draft = ref('')
 const branch = ref('')
@@ -41,10 +41,8 @@ const dialogTitle = computed(() => {
   switch (dialog.value) {
     case 'rename': return 'Rename workspace'
     case 'rename-pane': return 'Rename pane'
-    case 'rename-tab': return 'Rename tab'
     case 'close': return 'Close workspace'
     case 'close-pane': return 'Close pane'
-    case 'close-tab': return 'Close tab'
     case 'create': return 'New worktree'
     case 'open': return 'Open worktree'
     case 'remove': return 'Remove worktree'
@@ -75,7 +73,7 @@ function requireOp() {
 
 function openDialog(next: Dialog) {
   dialog.value = next
-  draft.value = next === 'rename' ? props.label : next === 'rename-pane' ? (props.pane?.label || '') : next === 'rename-tab' ? (props.pane?.tab_label || '') : ''
+  draft.value = next === 'rename' ? props.label : next === 'rename-pane' ? (props.pane?.label || '') : ''
   removeError.value = ''
   formError.value = ''
   waiting.value = ''
@@ -87,8 +85,8 @@ function openDialog(next: Dialog) {
 function submitRename() {
   const label = draft.value.trim()
   if (!label) return
-  const target = dialog.value === 'rename-pane' ? 'pane' : dialog.value === 'rename-tab' ? 'tab' : 'workspace'
-  const id = target === 'pane' ? props.pane?.pane_id : target === 'tab' ? props.pane?.tab_id : props.spaceId
+  const target = dialog.value === 'rename-pane' ? 'pane' : 'workspace'
+  const id = target === 'pane' ? props.pane?.pane_id : props.spaceId
   if (!id) return
   waiting.value = 'session_rename'
   ws.send({ type: 'session_rename', target, id, label, host: props.host })
@@ -106,11 +104,6 @@ function submitClose() {
   if (dialog.value === 'close-pane' && props.pane) {
     waiting.value = 'session_close'
     ws.send({ type: 'session_close', target: 'pane', id: props.pane.pane_id, host: props.host, ...fields })
-    return
-  }
-  if (dialog.value === 'close-tab' && props.pane?.tab_id) {
-    waiting.value = 'session_close'
-    ws.send({ type: 'session_close', target: 'tab', id: props.pane.tab_id, host: props.host, ...fields })
     return
   }
   if (dialog.value !== 'close') return
@@ -170,9 +163,7 @@ function submitRemove(force: boolean) {
       </template>
       <template v-else>
         <button v-if="canManage" type="button" role="menuitem" data-action="rename-pane" @click="openDialog('rename-pane')">Rename pane</button>
-        <button v-if="canManage && pane?.tab_id" type="button" role="menuitem" data-action="rename-tab" @click="openDialog('rename-tab')">Rename tab</button>
         <button v-if="canManage" type="button" role="menuitem" data-action="close-pane" @click="openDialog('close-pane')">Close pane</button>
-        <button v-if="canManage && pane?.tab_id" type="button" role="menuitem" data-action="close-tab" @click="openDialog('close-tab')">Close tab</button>
       </template>
       <button type="button" role="menuitem" data-action="dismiss" @click="emit('close')">Cancel</button>
     </div>
@@ -181,7 +172,7 @@ function submitRemove(force: boolean) {
       <h2 :id="titleId" class="session-title">{{ dialogTitle }}</h2>
       <pre v-if="formError" class="session-error">{{ formError }}</pre>
 
-      <form v-if="dialog === 'rename' || dialog === 'rename-pane' || dialog === 'rename-tab'" @submit.prevent="submitRename">
+      <form v-if="dialog === 'rename' || dialog === 'rename-pane'" @submit.prevent="submitRename">
         <label class="session-label">Name <input v-model="draft" name="label" required maxlength="200" /></label>
         <div class="session-actions">
           <button type="button" @click="dialog = ''">Back</button>
@@ -190,10 +181,10 @@ function submitRemove(force: boolean) {
         </div>
       </form>
 
-      <div v-else-if="dialog === 'close' || dialog === 'close-pane' || dialog === 'close-tab'">
+      <div v-else-if="dialog === 'close' || dialog === 'close-pane'">
         <p v-if="dialog === 'close' && !linked">Close this workspace and the workspaces of its open worktrees. Checkouts on disk stay.</p>
         <p v-else-if="dialog === 'close'">Close this worktree workspace. The checkout stays. To delete the checkout, use Remove worktree.</p>
-        <p v-else>Close this {{ dialog === 'close-tab' ? 'tab' : 'pane' }}. This cannot be undone from here.</p>
+        <p v-else>Close this pane. This cannot be undone from here.</p>
         <div class="session-actions">
           <button type="button" @click="dialog = ''">Back</button>
           <button type="button" data-action="confirm-close" :disabled="!canCommit" @click="submitClose">Close</button>

@@ -539,6 +539,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	var merged []herdr.Pane
 	seen := make(map[string]bool)
 	polled := make(map[string]bool)
+	var snapshotted []string
 	beforeStatus := p.statusByID()
 	wsMetaByHost := make(map[string]map[string]wsMeta) // host → workspace_id → order and link
 	tabLabels := make(map[string]map[string]string)    // host → tab_id → label
@@ -618,6 +619,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.mu.Lock()
 		p.hostPanes[host] = hostPanes
 		p.mu.Unlock()
+		snapshotted = append(snapshotted, host)
 		if localHost(host) {
 			p.localCalibAt = now
 			ids := make([]string, len(hostPanes))
@@ -636,6 +638,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 
 	// Apply workspace label, order, link, and tab label from the same snapshots.
 	p.applyWorkspaceMeta(merged, wsMetaByHost, tabLabels)
+	// hostPanes was stored before this fill. A later skip has no workspace
+	// list, so copy the fields back or the spaces grid falls through to the id.
+	for _, host := range snapshotted {
+		p.keepWorkspaceFields(host, merged)
+	}
 
 	// Track last active time from pane revisions and agent state
 	activeChanged := p.enrichLastActive(merged)
@@ -1431,6 +1438,34 @@ func (p *Poller) applyWorkspaceMeta(panes []herdr.Pane, metas map[string]map[str
 					panes[i].TabLabel = label
 				}
 			}
+		}
+	}
+}
+
+// keepWorkspaceFields copies the workspace title, order, link, and tab label
+// onto the panes retained for this host. Those panes are saved before
+// applyWorkspaceMeta, and a skipped local poll has no fresh workspace list.
+func (p *Poller) keepWorkspaceFields(host string, merged []herdr.Pane) {
+	byID := make(map[string]herdr.Pane, len(merged))
+	for _, pane := range merged {
+		byID[pane.PaneID] = pane
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	panes := p.hostPanes[host]
+	for i := range panes {
+		src, ok := byID[panes[i].PaneID]
+		if !ok {
+			continue
+		}
+		panes[i].WorkspaceLabel = src.WorkspaceLabel
+		panes[i].WorkspaceLinked = src.WorkspaceLinked
+		panes[i].TabLabel = src.TabLabel
+		if src.WorkspaceOrder != nil {
+			n := *src.WorkspaceOrder
+			panes[i].WorkspaceOrder = &n
+		} else {
+			panes[i].WorkspaceOrder = nil
 		}
 	}
 }
