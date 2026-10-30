@@ -113,6 +113,10 @@ the same precedence systemd applies between `Environment=` and
 HERDREM_PORT=9000 ./herdrem serve --web     # env vars still override the file
 ```
 
+`./herdrem doctor` runs read-only diagnostics (herdr in PATH and per-host
+version, token vs bind address, cloudflared) and exits non-zero on failure —
+useful before first install or when setting up on a new machine.
+
 | Env | Default | Description |
 |-----|---------|-------------|
 | `HERDREM_PORT` | `8766` | Listen port |

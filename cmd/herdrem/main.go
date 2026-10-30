@@ -33,10 +33,13 @@ func main() {
 	var subcmd string
 	rawArgs := os.Args[1:]
 	if len(rawArgs) > 0 && !strings.HasPrefix(rawArgs[0], "-") {
+		if rawArgs[0] == "doctor" {
+			os.Exit(runDoctor(rawArgs[1:], os.Stdout))
+		}
 		subcmd = rawArgs[0]
 		os.Args = append(os.Args[:1], rawArgs[1:]...)
 	}
-	_ = subcmd // "serve" is the default/only command for now
+	_ = subcmd // "serve" is the default/only serve-mode command for now
 
 	// Flags
 	web := flag.Bool("web", false, "serve embedded SPA")

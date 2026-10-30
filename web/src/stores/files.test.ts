@@ -191,4 +191,17 @@ describe('useFilesStore', () => {
     files.setListing('/workspace', [{ name: 'fresh.txt', type: 'file', size: 0 }], files.listReqId)
     expect(files.entries[0]?.name).toBe('fresh.txt')
   })
+
+  it('preserves and propagates paneId through openBrowser and openFile', () => {
+    const files = useFilesStore()
+    files.openBrowser('/workspace', 'local', 'pane-abc')
+    expect(files.paneId).toBe('pane-abc')
+
+    files.openFile('/workspace/main.go')
+    expect(files.preview?.paneId).toBe('pane-abc')
+
+    files.openPath('/other/file.txt', '/other', 'local', null, 'pane-override')
+    expect(files.preview?.paneId).toBe('pane-override')
+    expect(files.paneId).toBe('pane-override')
+  })
 })

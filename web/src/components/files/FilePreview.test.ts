@@ -1058,4 +1058,76 @@ describe('FilePreview capability freshness and authorization lifecycle', () => {
     expect(iframe.attributes('src')).not.toContain('/preview-open/')
     wrapper.unmount()
   })
+
+  it('selects lines on click, extends with Shift+click, and clears when file changes', async () => {
+    const files = useFilesStore()
+    files.openPath('/workspace/sample.txt', '/workspace', 'local', null, 'pane-1')
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/sample.txt',
+      content: 'line1\nline2\nline3\nline4\nline5',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      size: 30,
+    })
+
+    const wrapper = mount(FilePreview, { props: { directoryOpen: false }, attachTo: document.body })
+    await flushPromises()
+
+    const lineRows = wrapper.findAll('.fp-code tr')
+    expect(lineRows).toHaveLength(5)
+
+    // one roving tab stop; the td itself is not a keyboard target
+    expect(wrapper.findAll('.lnb[tabindex="0"]')).toHaveLength(1)
+    expect(lineRows[0].find('.ln').attributes('tabindex')).toBeUndefined()
+    expect(lineRows[0].find('.ln').attributes('role')).toBeUndefined()
+
+    await lineRows[1].find('.lnb').trigger('click')
+    expect(lineRows[1].classes()).toContain('sel')
+    expect(wrapper.findComponent({ name: 'LineCommentBar' }).exists()).toBe(true)
+    // clicking a line also moves the roving tab stop to it
+    expect(wrapper.findAll('.lnb[tabindex="0"]')).toHaveLength(1)
+    expect(lineRows[1].find('.lnb').attributes('tabindex')).toBe('0')
+
+    await lineRows[3].find('.lnb').trigger('click', { shiftKey: true })
+    expect(lineRows[0].classes()).not.toContain('sel')
+    expect(lineRows[1].classes()).toContain('sel')
+    expect(lineRows[2].classes()).toContain('sel')
+    expect(lineRows[3].classes()).toContain('sel')
+    expect(lineRows[4].classes()).not.toContain('sel')
+
+    // same-path re-read also resets: the content may differ, so the old
+    // selection and roving tab stop must not survive it
+    files.openPath('/workspace/sample.txt', '/workspace', 'local', null, 'pane-1')
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/sample.txt',
+      content: 'only\nthree\nlines',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      size: 15,
+    })
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'LineCommentBar' }).exists()).toBe(false)
+    expect(wrapper.findAll('.lnb[tabindex="0"]')).toHaveLength(1)
+
+    files.openPath('/workspace/other.txt', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/other.txt',
+      content: 'other',
+      encoding: 'utf-8',
+      mime_type: 'text/plain',
+      is_text: true,
+      is_image: false,
+      size: 5,
+    })
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'LineCommentBar' }).exists()).toBe(false)
+    wrapper.unmount()
+  })
 })

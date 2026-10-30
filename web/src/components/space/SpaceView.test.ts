@@ -301,4 +301,20 @@ describe('SpaceView inside-space cards', () => {
       insert_index: 2,
     })
   })
+
+  it('opens workspace menu when menuSpaceId prop is set and emits menu-opened', async () => {
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        canManage: true,
+        agents: [
+          { ...panes[0], pane_id: 'a', workspace_id: 'ws-0', last_active: 1 },
+        ],
+        menuSpaceId: 'ws-0',
+      },
+    })
+
+    expect(wrapper.emitted('menu-opened')).toHaveLength(1)
+    expect(wrapper.findComponent({ name: 'SessionMenu' }).exists()).toBe(true)
+  })
 })

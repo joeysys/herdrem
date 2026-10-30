@@ -8,6 +8,9 @@ export interface PreviewState {
   path: string
   root: string
   host: string
+  /** pane the preview belongs to; the line-comment send target. '' when the
+   *  opener did not come from a pane (e.g. status list without context). */
+  paneId: string
   reqId: string
   content: string
   encoding: 'utf-8' | 'base64'
@@ -36,6 +39,9 @@ export const useFilesStore = defineStore('files', () => {
   const listReqId = ref('') // request id of the in-flight file_list
   const preview = ref<PreviewState | null>(null)
   const scrollToFile = ref<string | null>(null) // file name to scroll to in tree
+  /** pane context of the last open* call ('' = unknown) — the send target for
+   *  line comments in the previews. */
+  const paneId = ref('')
 
   const breadcrumbs = computed(() => {
     // Show relative path from root; strip the root prefix
@@ -52,9 +58,10 @@ export const useFilesStore = defineStore('files', () => {
 
   const canGoUp = computed(() => normalize(path.value) !== normalize(root.value))
 
-  function openBrowser(paneCwd: string, paneHost: string) {
+  function openBrowser(paneCwd: string, paneHost: string, pane = '') {
     const newRoot = paneCwd || '/'
     const newHost = paneHost || 'local'
+    paneId.value = pane
 
     // Check if re-opening within the same root & host, and path is still valid under root
     const sameRootHost = host.value === newHost && normalize(root.value) === normalize(newRoot)
@@ -75,10 +82,11 @@ export const useFilesStore = defineStore('files', () => {
     }
   }
 
-  function openBrowserAt(dirPath: string, paneRoot: string, paneHost: string) {
+  function openBrowserAt(dirPath: string, paneRoot: string, paneHost: string, pane = '') {
     const base = paneRoot || '/'
     const target = dirPath || base
     host.value = paneHost || 'local'
+    paneId.value = pane
     // The dir is listable whenever it sits inside any pane-cwd sandbox root —
     // not necessarily this pane's cwd. Up-navigation is bounded by root, so a
     // target outside it must self-root: otherwise ".." no-ops and system back
@@ -104,6 +112,7 @@ export const useFilesStore = defineStore('files', () => {
     listReqId.value = ''
     preview.value = null
     scrollToFile.value = null
+    paneId.value = ''
   }
 
   /** Close only the preview, back to the file tree */
@@ -136,18 +145,20 @@ export const useFilesStore = defineStore('files', () => {
     navigate(parent)
   }
 
-  function openFile(filePath: string, line: number | null = null) {
-    openPath(filePath, root.value, host.value, line)
+  function openFile(filePath: string, line: number | null = null, pane?: string) {
+    openPath(filePath, root.value, host.value, line, pane ?? paneId.value)
   }
 
   /** Open a preview directly, without changing or opening the directory panel. */
-  function openPath(filePath: string, paneRoot: string, paneHost: string, line: number | null) {
+  function openPath(filePath: string, paneRoot: string, paneHost: string, line: number | null, pane?: string) {
     const previewHost = paneHost || 'local'
+    if (pane !== undefined) paneId.value = pane
+    const effectivePane = pane !== undefined ? pane : paneId.value
     const reqId = newReqId()
     const msg: FileRead = { type: 'file_read', path: filePath, host: previewHost, req_id: reqId }
     ws.send(msg)
     preview.value = {
-      path: filePath, root: paneRoot || '/', host: previewHost, reqId,
+      path: filePath, root: paneRoot || '/', host: previewHost, paneId: effectivePane, reqId,
       content: '', encoding: 'utf-8', mimeType: '',
       isText: true, isImage: false, truncated: false, loaded: false, size: 0, targetLine: line,
     }
@@ -200,7 +211,7 @@ export const useFilesStore = defineStore('files', () => {
     if (!p) return
     if (reqId && p.reqId && reqId !== p.reqId) return
     preview.value = null
-    openBrowserAt(p.path, p.root, p.host)
+    openBrowserAt(p.path, p.root, p.host, p.paneId)
   }
 
   function toggleDocked() {
@@ -214,6 +225,7 @@ export const useFilesStore = defineStore('files', () => {
   return {
     browserOpen, browserDocked, host, root, path, entries, loading, listReqId, preview,
     scrollToFile,
+    paneId,
     breadcrumbs, canGoUp,
     openBrowser, openBrowserAt, closeBrowser, closePreview, reset, navigate, goUp, openFile, openPath,
     setListing, setContent, setListError, setPreviewError, previewIsDir, toggleDocked,

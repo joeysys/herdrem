@@ -12,6 +12,7 @@ import { relayFileUrl, relayHttpBase } from '../../utils/relay'
 import { applyHighlights, clearHighlights, matchesQuery, setActiveGroup, MAX_HITS } from '../../utils/domHighlight'
 import FindBar from '../common/FindBar.vue'
 import TermIcon from '../term/TermIcon.vue'
+import LineCommentBar from './LineCommentBar.vue'
 import { addOverlaySource, isShortcutActive, register, shortcutChord, shortcutVersion } from '../../composables/useShortcuts'
 
 const files = useFilesStore()
@@ -81,6 +82,54 @@ function closeMenu() {
   showMenu.value = false
 }
 const tipDismissed = ref(false)
+
+// --- line selection → comment to the agent (C4) ---
+// Click a line-number gutter to select it; Shift+click extends the range.
+// The selection is comment-only state: it never mutates the file (no editor).
+const selAnchor = ref(0)
+const selEnd = ref(0)
+
+// Roving tab stop: only the current line's number button is tabbable (a large
+// file must not add thousands of Tab stops); ArrowUp/Down move the stop,
+// Enter/Space/click select.
+const lnFocus = ref(1)
+
+function moveLnFocus(delta: number, e: KeyboardEvent) {
+  const total = lines.value.length
+  if (!total) return
+  lnFocus.value = Math.min(Math.max(lnFocus.value + delta, 1), total)
+  nextTick(() => {
+    ((e.target as HTMLElement).closest('table')?.querySelector('button.lnb[tabindex="0"]') as HTMLElement | null)?.focus()
+  })
+}
+
+function onLineClick(n: number, e: MouseEvent | KeyboardEvent) {
+  lnFocus.value = n
+  if (e.shiftKey && selAnchor.value) {
+    selEnd.value = n
+    return
+  }
+  selAnchor.value = n
+  selEnd.value = n
+}
+
+function clearSel() {
+  selAnchor.value = 0
+  selEnd.value = 0
+}
+
+function inSel(n: number): boolean {
+  if (!selAnchor.value) return false
+  return n >= Math.min(selAnchor.value, selEnd.value) && n <= Math.max(selAnchor.value, selEnd.value)
+}
+
+// Every open gets a fresh reqId — even a same-path re-read, whose content may
+// differ. A different file or re-read means a different coordinate space:
+// never carry a stale selection, tab stop, or path reference across previews.
+watch(() => preview.value?.reqId, () => {
+  clearSel()
+  lnFocus.value = 1
+})
 
 function fallbackCopy(text: string): boolean {
   try {
@@ -1159,14 +1208,35 @@ function fmtSize(bytes: number): string {
             v-for="(line, i) in lines"
             :key="i"
             :id="`L${i + 1}`"
-            :class="{ target: preview.targetLine === i + 1 }"
+            :class="{ target: preview.targetLine === i + 1, sel: inSel(i + 1) }"
           >
-            <td class="ln">{{ i + 1 }}</td>
+            <td class="ln">
+              <button
+                type="button"
+                class="lnb"
+                :tabindex="lnFocus === i + 1 ? 0 : -1"
+                :title="`Select line ${i + 1}`"
+                :aria-label="`Select line ${i + 1}`"
+                @click="onLineClick(i + 1, $event)"
+                @keydown.enter.prevent="onLineClick(i + 1, $event)"
+                @keydown.space.prevent="onLineClick(i + 1, $event)"
+                @keydown.up.prevent="moveLnFocus(-1, $event)"
+                @keydown.down.prevent="moveLnFocus(1, $event)"
+              >{{ i + 1 }}</button>
+            </td>
             <td class="lc"><div class="lcw" :style="codeCellStyle" v-html="line || '&nbsp;'"></div></td>
           </tr>
         </tbody>
       </table>
     </div>
+    <LineCommentBar
+      v-if="selAnchor && preview"
+      :path="preview.path"
+      :start="selAnchor"
+      :end="selEnd || selAnchor"
+      :pane-id="preview.paneId"
+      @close="clearSel"
+    />
     <FindBar
       v-if="findOpen"
       ref="findRef"
@@ -1422,6 +1492,24 @@ a.fp-btn { text-decoration: none; }
 .fp-code .lc { padding: 0 14px 0 12px; white-space: pre-wrap; word-break: break-word; color: var(--term-fg); }
 .fp-code tr.target .lc { background: rgba(251, 191, 36, 0.12); }
 .fp-code tr.target .ln { color: var(--amber); }
+/* line selection for comment-to-agent: a real <button> inside the number
+   cell; negative margins let it cover the td's padding so the whole gutter
+   stays clickable without making the td itself a button. */
+.fp-code .lnb {
+  all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: auto;
+  margin: 0 -10px 0 -14px;
+  padding: 0 10px 0 14px;
+  color: inherit;
+  font: inherit;
+  text-align: right;
+  cursor: pointer;
+}
+.fp-code .lnb:focus-visible { outline: 1px solid var(--blue); outline-offset: -1px; }
+.fp-code tr.sel .ln { color: var(--blue); font-weight: 700; }
+.fp-code tr.sel .lc { background: var(--blue-soft); }
 
 /* Preview width setting: the fixed char column lives on .lcw, an inner block
    inside the cell — a td's own width is only a floor in auto table layout.

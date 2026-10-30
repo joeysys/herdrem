@@ -19,8 +19,10 @@ const props = defineProps<{
   canCreatePane?: boolean
   canManage?: boolean
   canWorktree?: boolean
+  /** When set, open that workspace's ⋯ menu once mounted/updated (palette). */
+  menuSpaceId?: string | null
 }>()
-const emit = defineEmits<{ openTerminal: [paneId: string]; 'update:modelValue': [value: string | null]; back: []; newTab: [workspaceId: string, host?: string] }>()
+const emit = defineEmits<{ openTerminal: [paneId: string]; 'update:modelValue': [value: string | null]; back: []; newTab: [workspaceId: string, host?: string]; 'menu-opened': [] }>()
 
 interface Space {
   id: string
@@ -276,6 +278,19 @@ function onMenuMove(dir: -1 | 1) {
   sendMove(menu.value.space, dir)
   menu.value = null
 }
+
+// Command palette asks for a workspace's ⋯ menu (e.g. New worktree). The
+// space grid is flat across hosts, so look it up by id on every request.
+watch(
+  () => props.menuSpaceId,
+  (id) => {
+    if (!id) return
+    const s = spaces.value.find((x) => x.id === id)
+    if (s) openWorkspaceMenu(s)
+    emit('menu-opened')
+  },
+  { immediate: true },
+)
 
 let dragFrom = -1
 function onDragStart(index: number, e: DragEvent) {

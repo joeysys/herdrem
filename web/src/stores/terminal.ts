@@ -361,9 +361,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     return true
   }
 
-  function sendText(text: string, submit = true, extra?: { requestId?: string; expectTail?: string }) {
-    if (!activePane.value) return false
-    const msg: SendText = { type: 'send_text', pane_id: activePane.value, text, submit }
+  function sendText(text: string, submit = true, extra?: { requestId?: string; expectTail?: string; paneId?: string }) {
+    const paneId = extra?.paneId || activePane.value
+    if (!paneId) return false
+    const msg: SendText = { type: 'send_text', pane_id: paneId, text, submit }
     // Line breaks would reach the pane as Enter; a bracketed paste inserts them.
     if (/[\r\n]/.test(text) && useConnectionStore().hasFeature('send-text-paste')) msg.paste = true
     if (extra?.requestId) msg.request_id = extra.requestId

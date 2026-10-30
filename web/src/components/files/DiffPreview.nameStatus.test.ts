@@ -100,7 +100,7 @@ describe('DiffPreview name-status', () => {
 
     const opened = vi.spyOn(useFilesStore(), 'openPath').mockImplementation(() => {})
     await w.findAll('.dp-ns-open')[1].trigger('click')
-    expect(opened).toHaveBeenCalledWith('/repo/b.go', '/repo', 'local', null)
+    expect(opened).toHaveBeenCalledWith('/repo/b.go', '/repo', 'local', null, '')
 
     const scrolled: string[] = []
     Element.prototype.scrollIntoView = function () { scrolled.push((this as HTMLElement).dataset.path || '') }

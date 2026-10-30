@@ -689,7 +689,7 @@ function onOpenFile(p: { path: string; line: number | null }) {
 function openFiles() {
   const cwd = pane.value?.cwd || '/'
   const h = pane.value?.host || 'local'
-  files.openBrowser(cwd, h)
+  files.openBrowser(cwd, h, props.paneId)
 }
 
 function openDiff() {
@@ -698,7 +698,7 @@ function openDiff() {
   const h = pane.value?.host || 'local'
   // One entry. Land on status when the relay can show it; the diff tabs are
   // inside the panel.
-  diff.openDiff(cwd, h, conn.hasFeature('git-commit') ? 'status' : 'unstaged')
+  diff.openDiff(cwd, h, conn.hasFeature('git-commit') ? 'status' : 'unstaged', '', '', props.paneId)
 }
 
 // Any zoom other than 100% — larger or smaller — is "zoomed": the menu item

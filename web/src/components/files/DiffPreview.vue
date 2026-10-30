@@ -10,6 +10,7 @@ import { parseNameStatus } from '../../utils/nameStatus';
 import { parseGitLog } from '../../utils/gitLog';
 import { fileIcon } from '../../utils/fileIcons';
 import TermIcon from '../term/TermIcon.vue';
+import LineCommentBar from './LineCommentBar.vue';
 import type { GitLogOptions } from '../../api/types';
 
 const diff = useDiffStore();
@@ -21,6 +22,76 @@ const scrollEl = ref<HTMLElement | null>(null);
 const state = computed(() => diff.state);
 /** Which commit menu is open. commit = the single-commit tab; from/to = the range tab. */
 const openPicker = ref<null | 'commit' | 'from' | 'to'>(null);
+
+// --- line selection → comment to the agent (C4) ---
+// Click a diff row's line-number gutter to select it; Shift+click extends the
+// range. The selection lives inside one file section — a range never spans
+// two files. Comment-only state: it never mutates the diff (no editor).
+const selPath = ref('');
+const selAnchor = ref(0);
+const selEnd = ref(0);
+
+/** Selectable rows: context and added lines (deleted rows reference the old
+ *  file's numbering and would mislead the path:line comment). */
+function pickable(line: DiffLine): boolean {
+  return line.marker !== 'del' && !!line.fileLine;
+}
+
+// Roving tab stop per file section: only one line-number button per section
+// is tabbable (a large diff must not add thousands of Tab stops); ArrowUp/Down
+// move the stop, Enter/Space/click select.
+const lnFocus = ref<Record<string, number>>({});
+
+function firstPick(sec: DiffSection): number {
+  return sec.lines.find(pickable)?.fileLine ?? 0;
+}
+
+function lnTabIndex(sec: DiffSection, line: DiffLine): number {
+  if (!pickable(line)) return -1;
+  return (lnFocus.value[sec.path] ?? firstPick(sec)) === line.fileLine ? 0 : -1;
+}
+
+function moveLnFocus(sec: DiffSection, delta: number, e: KeyboardEvent) {
+  const nums = sec.lines.filter(pickable).map((l) => l.fileLine!);
+  if (!nums.length) return;
+  const cur = lnFocus.value[sec.path] ?? nums[0];
+  const i = Math.max(0, nums.indexOf(cur));
+  const next = nums[Math.min(Math.max(i + delta, 0), nums.length - 1)];
+  lnFocus.value = { ...lnFocus.value, [sec.path]: next };
+  nextTick(() => {
+    ((e.target as HTMLElement).closest('table')?.querySelector('button.lnb[tabindex="0"]') as HTMLElement | null)?.focus();
+  });
+}
+
+function onLineClick(secPath: string, fileLine: number | null, e: MouseEvent | KeyboardEvent) {
+  if (!fileLine) return;
+  lnFocus.value = { ...lnFocus.value, [secPath]: fileLine };
+  if (e.shiftKey && selAnchor.value && selPath.value === secPath) {
+    selEnd.value = fileLine;
+    return;
+  }
+  selPath.value = secPath;
+  selAnchor.value = fileLine;
+  selEnd.value = fileLine;
+}
+
+function clearSel() {
+  selPath.value = '';
+  selAnchor.value = 0;
+  selEnd.value = 0;
+}
+
+function inSel(secPath: string, fileLine: number | null, marker?: string): boolean {
+  if (!selAnchor.value || !fileLine || marker === 'del' || secPath !== selPath.value) return false;
+  return fileLine >= Math.min(selAnchor.value, selEnd.value) && fileLine <= Math.max(selAnchor.value, selEnd.value);
+}
+
+// A different diff (mode switch, reload) renumbers every row — never carry a
+// stale selection (and its stale path reference) across contents.
+watch(() => state.value?.content, () => {
+  clearSel();
+  lnFocus.value = {};
+});
 
 const cwdNav = ref<HTMLElement | null>(null);
 // Full path, scrolled so the repo directory (the last segment) stays in view.
@@ -48,22 +119,27 @@ async function scrollCwdToEnd() {
 }
 watch(() => state.value?.cwd, scrollCwdToEnd, { immediate: true });
 
-// Per-line diff marker (+ / - / space) for row tinting.
-function lineMarker(html: string): '' | 'add' | 'del' | 'hunk' | 'meta' {
+// Per-line diff marker (+ / - / space) for row tinting. `inHunk` is true once
+// the current file section has seen its first `@@`: only there can a content
+// line legitimately start with `---`/`+++` (a deleted `--` comment, an added
+// `++i`), so those prefixes are only meta (file headers) before the hunk.
+function lineMarker(html: string, inHunk: boolean): '' | 'add' | 'del' | 'hunk' | 'meta' {
   // The rendered HTML may start with re-opened spans; the actual diff char is
   // the first *text* character. Strip leading tags to inspect it.
   const text = html.replace(/^<[^>]+>+/, '');
-  if (text.startsWith('+')) return 'add';
-  if (text.startsWith('-')) return 'del';
-  if (text.startsWith('@@')) return 'hunk';
+  // `\ No newline at end of file` annotates the previous row; it is not a
+  // file line itself and must not consume an old/new line number.
+  if (text.startsWith('\\')) return 'meta';
   if (
     text.startsWith('diff ') ||
     text.startsWith('index ') ||
     /^commit /.test(text) ||
-    text.startsWith('---') ||
-    text.startsWith('+++')
+    (!inHunk && (text.startsWith('---') || text.startsWith('+++')))
   )
     return 'meta';
+  if (text.startsWith('+')) return 'add';
+  if (text.startsWith('-')) return 'del';
+  if (text.startsWith('@@')) return 'hunk';
   return '';
 }
 
@@ -107,15 +183,21 @@ function parseHunkHeader(line: string): { oldLine: number; newLine: number } | n
 const sections = computed<DiffSection[]>(() => {
   const s = state.value;
   if (!s || !s.content) return [];
-  const rawLines = s.content.split('\n');
-  const htmlLines = highlight(s.content, 'diff');
+  // Standard git diff ends with a trailing newline; drop the empty trailing line
+  // produced by split so it does not turn into a phantom context line.
+  const text = s.content.replace(/\r?\n$/, '');
+  if (!text) return [];
+  const rawLines = text.split('\n');
+  const htmlLines = highlight(text, 'diff');
   const result: DiffSection[] = [];
   let current: DiffSection | null = null;
   let oldLine = 0;
   let newLine = 0;
   let maxLineNum = 0;
+  let inHunk = false;
   for (let i = 0; i < rawLines.length; i++) {
     const raw = rawLines[i];
+    if (!raw && (i === rawLines.length - 1 || rawLines[i + 1]?.startsWith('diff --git '))) continue;
     if (raw.startsWith('diff --git ')) {
       if (current) {
         current.maxLineNum = maxLineNum;
@@ -125,13 +207,15 @@ const sections = computed<DiffSection[]>(() => {
       oldLine = 0;
       newLine = 0;
       maxLineNum = 0;
+      inHunk = false;
     } else if (!current) {
       current = { path: '', isHeader: true, lines: [], maxLineNum: 0 };
     }
     const html = htmlLines[i] || '';
-    const marker = lineMarker(html);
+    const marker = lineMarker(html, inHunk);
     let fileLine: number | null = null;
     if (marker === 'hunk') {
+      inHunk = true;
       const h = parseHunkHeader(raw);
       if (h) {
         oldLine = h.oldLine;
@@ -289,7 +373,7 @@ function openFilePath(path: string) {
   if (!s || !path) return;
   haptic();
   const full = path.startsWith('/') ? path : (s.cwd.replace(/\/+$/, '') + '/' + path).replace(/\/+/g, '/');
-  files.openPath(full, s.cwd || '/', s.host || 'local', null);
+  files.openPath(full, s.cwd || '/', s.host || 'local', null, s.paneId || '');
 }
 
 // Opened from the status list: bring that file's section into view once the
@@ -578,8 +662,23 @@ watch(openPicker, (open) => {
                 <col />
               </colgroup>
               <tbody>
-                <tr v-for="(line, li) in sec.lines" :key="li" :class="line.marker">
-                  <td v-if="!sec.isHeader" class="ln">{{ line.fileLine ? line.fileLine : '' }}</td>
+                <tr v-for="(line, li) in sec.lines" :key="li" :class="[line.marker, { sel: inSel(sec.path, line.fileLine, line.marker) }]">
+                  <td v-if="!sec.isHeader" class="ln" :class="{ pick: pickable(line) }">
+                    <button
+                      v-if="pickable(line)"
+                      type="button"
+                      class="lnb"
+                      :tabindex="lnTabIndex(sec, line)"
+                      :title="`Select line ${line.fileLine}`"
+                      :aria-label="`Select line ${line.fileLine}`"
+                      @click="onLineClick(sec.path, line.fileLine, $event)"
+                      @keydown.enter.prevent="onLineClick(sec.path, line.fileLine, $event)"
+                      @keydown.space.prevent="onLineClick(sec.path, line.fileLine, $event)"
+                      @keydown.up.prevent="moveLnFocus(sec, -1, $event)"
+                      @keydown.down.prevent="moveLnFocus(sec, 1, $event)"
+                    >{{ line.fileLine }}</button>
+                    <template v-else>{{ line.fileLine ? line.fileLine : '' }}</template>
+                  </td>
                   <td class="lc" v-html="line.html || '&nbsp;'"></td>
                 </tr>
               </tbody>
@@ -588,6 +687,14 @@ watch(openPicker, (open) => {
         </div>
       </div>
     </div>
+    <LineCommentBar
+      v-if="selAnchor && state"
+      :path="selPath"
+      :start="selAnchor"
+      :end="selEnd || selAnchor"
+      :pane-id="state.paneId || ''"
+      @close="clearSel"
+    />
   </section>
 </template>
 
@@ -1070,6 +1177,24 @@ watch(openPicker, (open) => {
 .dp-code tr.hunk .ln {
   color: var(--blue);
 }
+/* line selection for comment-to-agent: a real <button> inside the number
+   cell; negative margins let it cover the td's padding so the whole gutter
+   stays clickable without making the td itself a button. */
+.dp-code .lnb {
+  all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: auto;
+  margin: 0 -10px 0 -14px;
+  padding: 0 10px 0 14px;
+  color: inherit;
+  font: inherit;
+  text-align: right;
+  cursor: pointer;
+}
+.dp-code .lnb:focus-visible { outline: 1px solid var(--blue); outline-offset: -1px; }
+.dp-code tr.sel .lc { box-shadow: inset 0 0 0 999px rgba(96, 165, 250, 0.18); }
+.dp-code tr.sel .ln { color: var(--blue); font-weight: 700; }
 .dp-code tr.meta .lc {
   color: var(--muted);
   font-weight: 600;

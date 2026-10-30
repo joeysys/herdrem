@@ -57,6 +57,7 @@ import DiffPreview from './components/files/DiffPreview.vue';
 import TunnelPanel from './components/tunnel/TunnelPanel.vue';
 import TodoManager from './components/todo/TodoManager.vue';
 import ShortcutHelp from './components/common/ShortcutHelp.vue';
+import CommandPalette from './components/common/CommandPalette.vue';
 
 const conn = useConnectionStore();
 const agents = useAgentsStore();
@@ -100,6 +101,10 @@ const viewMode = ref<'list' | 'spaces'>((safeStorage.getItem('herdrem_viewmode')
 const activeSpaceId = ref<string | null>(null);
 const showSettings = ref(false);
 const showHelp = ref(false);
+const showPalette = ref(false);
+// Set by the palette's "New worktree…" row: SpaceView opens that
+// workspace's ⋯ menu, then reports back via menu-opened.
+const spaceMenuRequest = ref<string | null>(null);
 const showTodoManager = ref(false);
 // When the todo manager is opened while inside a space, scope it to that
 // workspace by default (the workspace select doubles as the list filter).
@@ -280,6 +285,10 @@ function currentStateName(): string {
 
 /** closes a topmost overlay (non-view) layer; returns true if something closed */
 function closeTopLayer(): boolean {
+  if (showPalette.value) {
+    showPalette.value = false;
+    return true;
+  }
   if (closeTopRegisteredLayer()) return true;
   if (showHelp.value) {
     showHelp.value = false;
@@ -583,7 +592,7 @@ function onSpaceNewTab(workspaceId: string, host?: string) {
 }
 
 function overlayOpen(): boolean {
-  return showHelp.value || showTodoManager.value || showSettings.value || showNewPane.value
+  return showPalette.value || showHelp.value || showTodoManager.value || showSettings.value || showNewPane.value
     || ctxOpen.value || showRelaySwitch.value || diff.open || !!files.preview || files.browserOpen;
 }
 
@@ -671,6 +680,7 @@ function bindShortcuts() {
   const off: Array<() => void> = [];
   const add = (def: Parameters<typeof register>[0]) => off.push(register(def));
   add({ id: 'help', label: 'Keyboard shortcuts', scope: 'global', key: '?', when: () => !showHelp.value, run: () => { showHelp.value = true; } });
+  add({ id: 'app.palette', label: 'Command palette', scope: 'global', key: 'k', mod: true, run: () => { showPalette.value = !showPalette.value; } });
   add({ id: 'nav.back', label: 'Close overlay or go back', scope: 'global', key: 'Escape', run: () => onShortcutEsc() });
   add({ id: 'nav.down', label: 'Next card', scope: 'global', key: 'j', when: () => visibleCards().length > 0, run: () => moveCard(1) });
   add({ id: 'nav.up', label: 'Previous card', scope: 'global', key: 'k', when: () => visibleCards().length > 0, run: () => moveCard(-1) });
@@ -789,7 +799,7 @@ function onCtxAction(action: string, pane: Pane) {
       if (conn.hasFeature('git-diff') && pane.cwd) {
         activePaneId.value = pane.pane_id;
         view.value = 'term';
-        diff.openDiff(pane.cwd, pane.host || 'local');
+        diff.openDiff(pane.cwd, pane.host || 'local', 'unstaged', '', '', pane.pane_id);
         pushHistory('term');
       }
       break;
@@ -797,7 +807,7 @@ function onCtxAction(action: string, pane: Pane) {
       if (conn.hasFeature('git-commit') && pane.cwd) {
         activePaneId.value = pane.pane_id;
         view.value = 'term';
-        diff.openDiff(pane.cwd, pane.host || 'local', 'status');
+        diff.openDiff(pane.cwd, pane.host || 'local', 'status', '', '', pane.pane_id);
         pushHistory('term');
       }
       break;
@@ -828,6 +838,23 @@ function createPane(
     label: opts.label,
     ...operationFields(),
   });
+}
+
+// --- command palette ---
+function onPaletteOpenSpace(id: string) {
+  if (view.value === 'term' && !splitMode.value) closeTerminal();
+  setViewMode('spaces');
+  activeSpaceId.value = id;
+}
+function onPaletteCommand(id: string) {
+  if (id === 'new-workspace') createPane('workspace');
+  else if (id === 'new-shell') splitNewShell();
+}
+function onPaletteWorkspaceMenu(id: string) {
+  if (view.value === 'term' && !splitMode.value) closeTerminal();
+  setViewMode('spaces');
+  activeSpaceId.value = null;
+  spaceMenuRequest.value = id;
 }
 
 /** Open the tunnel manager panel from the + dropdown */
@@ -882,7 +909,7 @@ function onOpenFile(p: { path: string; line: number | null; paneId: string }) {
   if (!full.startsWith('/') && pane?.cwd) {
     full = (pane.cwd.replace(/\/+$/, '') + '/' + full).replace(/\/+/g, '/');
   }
-  files.openPath(full, pane?.cwd || '/', pane?.host || 'local', p.line);
+  files.openPath(full, pane?.cwd || '/', pane?.host || 'local', p.line, p.paneId);
 }
 
 // Opening the directory from the preview (path node or toggle) raises it above
@@ -890,7 +917,7 @@ function onOpenFile(p: { path: string; line: number | null; paneId: string }) {
 // (drops the preview z-index), on desktop by rendering the browser as a float
 // overlay (z-index 80 > preview 75) through the docked-prop override below.
 function onOpenPreviewDirectory(p: { path: string; root: string; host: string }) {
-  files.openBrowserAt(p.path, p.root, p.host);
+  files.openBrowserAt(p.path, p.root, p.host, files.preview?.paneId || '');
   directoryOverPreview.value = true;
 }
 
@@ -1338,9 +1365,11 @@ onUnmounted(() => {
               :can-create-pane="conn.hasFeature('pane-create')"
               :can-manage="conn.hasFeature('session-manage')"
               :can-worktree="conn.hasFeature('worktree')"
+              :menu-space-id="spaceMenuRequest"
               @open-terminal="openTerminal"
               @back="onSpaceBack"
               @new-tab="onSpaceNewTab"
+              @menu-opened="spaceMenuRequest = null"
             />
 
             <div v-else class="agent-list">
@@ -1492,6 +1521,17 @@ onUnmounted(() => {
     <TunnelPanel v-if="tunnelsStore.showPanel" />
     <TodoManager v-if="showTodoManager" :initial-binding="todoScope" @close="showTodoManager = false" />
     <ShortcutHelp v-if="showHelp" @close="showHelp = false" />
+    <CommandPalette
+      v-if="showPalette"
+      :panes="agents.agents"
+      :can-create="conn.hasFeature('pane-create')"
+      :can-worktree="conn.hasFeature('worktree')"
+      @close="showPalette = false"
+      @open-pane="openTerminal"
+      @open-space="onPaletteOpenSpace"
+      @command="onPaletteCommand"
+      @workspace-menu="onPaletteWorkspaceMenu"
+    />
 
     <div class="toast-stack" aria-live="polite">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type" @click="notify.dismissToast(t.id)">

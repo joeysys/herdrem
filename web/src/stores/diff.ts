@@ -50,6 +50,8 @@ export interface CommitOutcome {
 export interface DiffState {
   cwd: string;
   host: string;
+  /** pane the diff belongs to; the line-comment send target ('' = unknown). */
+  paneId?: string;
   mode: DiffViewMode;
   /** commit mode's hash, or the range's older ("from") hash */
   commit: string;
@@ -124,11 +126,12 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   /** Open the diff preview for a working directory. Defaults to unstaged. */
-  function openDiff(cwd: string, host: string, mode: DiffViewMode = 'unstaged', commit = '', commit2 = '') {
+  function openDiff(cwd: string, host: string, mode: DiffViewMode = 'unstaged', commit = '', commit2 = '', paneId = '') {
     if (!cwd) return;
     state.value = {
       cwd,
       host: host || 'local',
+      paneId,
       mode,
       commit,
       commit2,

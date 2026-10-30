@@ -123,7 +123,7 @@ describe('GitStatusView', () => {
     const d = useDiffStore()
     const openPath = vi.spyOn(useFilesStore(), 'openPath')
     await w.findAll('.gs-path').find((p) => p.text() === 'new.txt')!.trigger('click')
-    expect(openPath).toHaveBeenCalledWith('/repo/new.txt', '/repo', 'local', null)
+    expect(openPath).toHaveBeenCalledWith('/repo/new.txt', '/repo', 'local', null, '')
     expect(d.state?.mode).toBe('status')
     expect(d.canBack).toBe(false)
 

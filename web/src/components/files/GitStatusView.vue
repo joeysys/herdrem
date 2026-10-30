@@ -131,8 +131,8 @@ function openEntry(e: GitStatusEntry, isStaged: boolean) {
   haptic();
   if (e.status === '?') {
     const full = `${cwd.value.replace(/\/+$/, '')}/${e.path}`.replace(/\/+/g, '/');
-    if (e.path.endsWith('/')) files.openBrowserAt(full.replace(/\/+$/, ''), cwd.value, host.value);
-    else files.openPath(full, cwd.value, host.value, null);
+    if (e.path.endsWith('/')) files.openBrowserAt(full.replace(/\/+$/, ''), cwd.value, host.value, diff.state?.paneId || '');
+    else files.openPath(full, cwd.value, host.value, null, diff.state?.paneId || '');
     return;
   }
   diff.showFileDiff(e.path, isStaged);
