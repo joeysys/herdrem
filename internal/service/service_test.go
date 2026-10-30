@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -56,6 +57,52 @@ func TestWorktreeCreateReplaysOneOperation(t *testing.T) {
 	svc.handleWorktreeCreate(context.Background(), nil, body)
 	if client.WorktreeCreateCount() != 1 {
 		t.Fatalf("creates = %d, want 1", client.WorktreeCreateCount())
+	}
+}
+
+func TestStartAgentAcceptsSettledKindAfterMismatch(t *testing.T) {
+	prev := agentKindSettleFor
+	agentKindSettleFor = 0
+	t.Cleanup(func() { agentKindSettleFor = prev })
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{
+		AgentStartErr: errors.New(`{"error":{"code":"agent_kind_mismatch","message":"expected pi, detected kiro"},"id":"cli:agent:start"}`),
+		Panes:         []herdr.Pane{{PaneID: "pane-new", Agent: "pi", Kind: "agent"}},
+	}
+	svc := New(client, nil, nil, nil, nil, nil, logger)
+	if err := svc.startAgent(context.Background(), "local", "pane-new", "pi"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartAgentKeepsRealKindMismatch(t *testing.T) {
+	prev := agentKindSettleFor
+	agentKindSettleFor = 0
+	t.Cleanup(func() { agentKindSettleFor = prev })
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{
+		AgentStartErr: errors.New("expected pi, detected kiro"),
+		Panes:         []herdr.Pane{{PaneID: "pane-new", Agent: "kiro", Kind: "agent"}},
+	}
+	svc := New(client, nil, nil, nil, nil, nil, logger)
+	err := svc.startAgent(context.Background(), "local", "pane-new", "pi")
+	if err == nil || !strings.Contains(err.Error(), "detected kiro") {
+		t.Fatalf("err = %v, want the kind mismatch", err)
+	}
+}
+
+func TestStartAgentDoesNotHideOtherStartErrors(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &herdr.FakeClient{
+		AgentStartErr: errors.New("timed out waiting for agent startup"),
+		Panes:         []herdr.Pane{{PaneID: "pane-new", Agent: "pi", Kind: "agent"}},
+	}
+	svc := New(client, nil, nil, nil, nil, nil, logger)
+	err := svc.startAgent(context.Background(), "local", "pane-new", "pi")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want the startup timeout", err)
 	}
 }
 

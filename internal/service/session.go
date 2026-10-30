@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"herdrem/internal/herdr"
@@ -307,9 +308,64 @@ func (s *Service) startAgent(ctx context.Context, host, paneID, kind string) err
 		return fmt.Errorf("worktree was created but the agent did not start: %w", err)
 	}
 	if err := s.client.AgentStart(ctx, host, paneID, name, kind); err != nil {
+		// herdr aborts agent start on the first process label that is not the
+		// requested kind. Pi's node launcher is briefly reported as another
+		// agent (kiro) and then settles on pi, with the process already running.
+		if agentStartKindMismatch(err, kind) && s.paneAgentSettles(ctx, host, paneID, kind) {
+			return nil
+		}
 		return fmt.Errorf("worktree was created but the agent did not start: %w", err)
 	}
 	return nil
+}
+
+// agentKindSettleFor is how long to wait after agent_kind_mismatch before
+// trusting that the other label is real. Tests set this to zero.
+var agentKindSettleFor = 2 * time.Second
+
+func agentStartKindMismatch(err error, kind string) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	if strings.Contains(text, "agent_kind_mismatch") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(text), "expected "+kind+", detected ")
+}
+
+// paneAgentSettles reports whether paneID is labeled kind now or within
+// agentKindSettleFor. A label that stays wrong is a real mismatch.
+func (s *Service) paneAgentSettles(ctx context.Context, host, paneID, kind string) bool {
+	deadline := time.Now().Add(agentKindSettleFor)
+	for {
+		if s.paneHasAgent(ctx, host, paneID, kind) {
+			return true
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			return false
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Service) paneHasAgent(ctx context.Context, host, paneID, kind string) bool {
+	panes, err := s.client.ListPanes(ctx, host)
+	if err != nil {
+		return false
+	}
+	for _, pane := range panes {
+		if pane.PaneID == paneID && strings.EqualFold(pane.Agent, kind) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) checkHost(host string) error {

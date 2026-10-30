@@ -738,7 +738,7 @@ const suggest = useHistorySuggest({
       @pick="acceptSuggestion"
     />
 
-    <p v-if="sendNote" class="send-note" role="status">{{ sendNote }}</p>
+    <p v-if="sendNote" class="send-note" role="status" :title="sendNote">{{ sendNote }}</p>
     <form class="input-row" @submit.prevent="submit">
       <span class="prompt" aria-hidden="true">❯</span>
       <input
@@ -845,14 +845,32 @@ const suggest = useHistorySuggest({
   letter-spacing: 0.08em;
   color: var(--green);
 }
-.qa-note,
-.send-note {
+.qa-note {
   margin: 0;
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   color: var(--amber);
 }
-.send-note { margin: 0 0 6px; }
+/* Floats over the terminal edge. A line in the flow would shrink the term. */
+.send-note {
+  position: absolute;
+  right: 12px;
+  bottom: calc(100% + 6px);
+  z-index: 16;
+  max-width: min(72%, 28rem);
+  margin: 0;
+  padding: 2px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--amber);
+  background: var(--surface);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 999px;
+}
 .appr-btn {
   font-family: var(--font-mono);
   font-size: var(--text-sm);

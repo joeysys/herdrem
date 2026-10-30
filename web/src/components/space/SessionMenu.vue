@@ -4,7 +4,7 @@ import { ws } from '../../api/ws'
 import type { Pane } from '../../api/types'
 import { useConnectionStore } from '../../stores/connection'
 import { safeStorage } from '../../utils/storage'
-import { operationFields, sessionError, sessionOK, worktreeLists } from '../../utils/session'
+import { defaultWorktreeName, operationFields, sessionError, sessionOK, worktreeLists } from '../../utils/session'
 
 const props = defineProps<{
   spaceId: string
@@ -16,6 +16,7 @@ const props = defineProps<{
   index: number
   count: number
   canManage: boolean
+  canReorder: boolean
   canWorktree: boolean
 }>()
 const emit = defineEmits<{ close: []; move: [dir: -1 | 1] }>()
@@ -26,6 +27,7 @@ const AGENT_KEY = 'herdrem_worktree_agent'
 type Dialog = '' | 'rename' | 'close' | 'create' | 'open' | 'remove' | 'rename-pane' | 'close-pane'
 const dialog = ref<Dialog>('')
 const draft = ref('')
+const name = ref('')
 const branch = ref('')
 const agent = ref<string>(safeStorage.getItem(AGENT_KEY) || 'shell')
 const waiting = ref('')
@@ -74,6 +76,7 @@ function requireOp() {
 function openDialog(next: Dialog) {
   dialog.value = next
   draft.value = next === 'rename' ? props.label : next === 'rename-pane' ? (props.pane?.label || '') : ''
+  if (next === 'create') name.value = defaultWorktreeName(props.label)
   removeError.value = ''
   formError.value = ''
   waiting.value = ''
@@ -121,6 +124,8 @@ function submitClose() {
 function submitCreate() {
   if (waiting.value === 'worktree_create') return
   formError.value = ''
+  const label = name.value.trim()
+  if (!label) return
   const kind = agent.value || 'shell'
   safeStorage.setItem(AGENT_KEY, kind)
   waiting.value = 'worktree_create'
@@ -128,6 +133,7 @@ function submitCreate() {
     type: 'worktree_create',
     workspace_id: props.spaceId,
     host: props.host,
+    label,
     branch: branch.value.trim() || undefined,
     agent: kind,
     ...operationFields(),
@@ -154,8 +160,8 @@ function submitRemove(force: boolean) {
     <div v-if="!dialog" class="session-sheet" role="menu" aria-label="Workspace actions">
       <template v-if="mode === 'workspace'">
         <button v-if="canManage" type="button" role="menuitem" data-action="rename" @click="openDialog('rename')">Rename</button>
-        <button v-if="canManage && index > 0" type="button" role="menuitem" data-action="move-up" @click="emit('move', -1)">Move up</button>
-        <button v-if="canManage && index < count - 1" type="button" role="menuitem" data-action="move-down" @click="emit('move', 1)">Move down</button>
+        <button v-if="canManage && canReorder && index > 0" type="button" role="menuitem" data-action="move-up" @click="emit('move', -1)">Move up</button>
+        <button v-if="canManage && canReorder && index < count - 1" type="button" role="menuitem" data-action="move-down" @click="emit('move', 1)">Move down</button>
         <button v-if="canWorktree" type="button" role="menuitem" data-action="create-worktree" @click="openDialog('create')">New worktree</button>
         <button v-if="canWorktree" type="button" role="menuitem" data-action="open-worktree" @click="openDialog('open')">Open worktree</button>
         <button v-if="canManage" type="button" role="menuitem" data-action="close" @click="openDialog('close')">Close workspace</button>
@@ -192,6 +198,9 @@ function submitRemove(force: boolean) {
       </div>
 
       <form v-else-if="dialog === 'create'" @submit.prevent="submitCreate">
+        <label class="session-label">Name
+          <input v-model="name" name="label" required maxlength="200" />
+        </label>
         <label class="session-label">Branch
           <input v-model="branch" name="branch" maxlength="200" placeholder="worktree/adjective-noun-hex" />
         </label>

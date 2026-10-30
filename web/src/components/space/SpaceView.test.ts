@@ -216,10 +216,30 @@ describe('SpaceView inside-space cards', () => {
     expect(order).toEqual(['ws-new', 'ws-old'])
   })
 
-  it('sorts by workspace_order when any pane reports one, including 0', () => {
+  it('keeps recency order when panes also carry workspace_order', async () => {
     const wrapper = mount(SpaceView, {
       props: {
         now: Date.now(),
+        canManage: true,
+        agents: [
+          { ...panes[0], pane_id: 'b1', workspace_id: 'ws-late', last_active: 100, workspace_order: 2 },
+          { ...panes[1], pane_id: 'i1', workspace_id: 'ws-early', last_active: 1, workspace_order: 0 },
+        ],
+      },
+    })
+
+    expect(wrapper.findAll('.space-card .sc-id').map((n) => n.text())).toEqual(['ws-late', 'ws-early'])
+    await wrapper.find('button[aria-label="Workspace actions"]').trigger('click')
+    expect(wrapper.find('[data-action="move-up"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="move-down"]').exists()).toBe(false)
+  })
+
+  it('sorts by workspace_order in manual mode, including 0', async () => {
+    localStorage.setItem('herdrem_space_sort', 'manual')
+    const wrapper = mount(SpaceView, {
+      props: {
+        now: Date.now(),
+        canManage: true,
         agents: [
           { ...panes[0], pane_id: 'b1', workspace_id: 'ws-late', last_active: 100, workspace_order: 2 },
           { ...panes[1], pane_id: 'i1', workspace_id: 'ws-early', last_active: 1, workspace_order: 0 },
@@ -228,9 +248,12 @@ describe('SpaceView inside-space cards', () => {
     })
 
     expect(wrapper.findAll('.space-card .sc-id').map((n) => n.text())).toEqual(['ws-early', 'ws-late'])
+    await wrapper.find('[aria-label="Space order"] button[title="Most recently active first"]').trigger('click')
+    expect(wrapper.findAll('.space-card .sc-id').map((n) => n.text())).toEqual(['ws-late', 'ws-early'])
   })
 
   it('move up sends the index in the list before removal', async () => {
+    localStorage.setItem('herdrem_space_sort', 'manual')
     const wrapper = mount(SpaceView, {
       props: {
         now: Date.now(),
@@ -255,6 +278,7 @@ describe('SpaceView inside-space cards', () => {
   })
 
   it('move down sends the index after the target', async () => {
+    localStorage.setItem('herdrem_space_sort', 'manual')
     const wrapper = mount(SpaceView, {
       props: {
         now: Date.now(),

@@ -980,11 +980,12 @@ onUnmounted(() => {
         :active="activeSuggest"
         @pick="setShellText"
       />
+      <!-- Over the output, not a row under it, so sending never resizes the term. -->
+      <p v-if="isShell && shellNote" class="shell-note" role="status" :title="shellNote">{{ shellNote }}</p>
     </div>
 
     <!-- Shell: special keys + quick chips; the ❯ toggle reveals an optional
          input box that shares the inline prompt's draft (v-model). -->
-    <p v-if="isShell && shellNote" class="shell-note" role="status">{{ shellNote }}</p>
     <TermInput v-if="!isShell" ref="termInputEl" :pane="pane" @edit="emit('editCommands', 'skills')" @history="openHistory" />
     <ShellKeys
       v-else
@@ -1198,11 +1199,23 @@ onUnmounted(() => {
   z-index: 15;
 }
 .shell-note {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 14;
+  max-width: min(70%, 28rem);
   margin: 0;
-  padding: 4px 12px 0;
+  padding: 2px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-2xs);
   color: var(--amber);
+  background: var(--surface);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 999px;
 }
 
 .term-scroll {

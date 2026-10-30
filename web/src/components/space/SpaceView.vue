@@ -59,9 +59,7 @@ const spaces = computed<Space[]>(() => {
       linked: panes.some((p) => p.workspace_linked === true),
     }
   })
-  // A reported number, including 0, is herdr's workspace order. Until any
-  // pane carries one, keep the recency sort the grid already had.
-  if (!props.agents.some((p) => typeof p.workspace_order === 'number')) {
+  if (!manualOrder.value) {
     return rows.sort((a, b) => spaceRecency(b.panes) - spaceRecency(a.panes))
   }
   return rows.sort((a, b) => {
@@ -107,6 +105,13 @@ const activeSpace = computed(() => spaces.value.find((s) => s.id === activeSpace
 const groupByBranch = ref(safeStorage.getItem('herdrem_group_by_branch') === 'true')
 watch(groupByBranch, (v) => {
   safeStorage.setItem('herdrem_group_by_branch', String(v))
+})
+
+// Recent activity is the grid default. Herdr's workspace number is the manual
+// order, used only when that sort is selected.
+const manualOrder = ref(safeStorage.getItem('herdrem_space_sort') === 'manual')
+watch(manualOrder, (v) => {
+  safeStorage.setItem('herdrem_space_sort', v ? 'manual' : 'recent')
 })
 
 interface BranchGroup {
@@ -274,7 +279,7 @@ function onMenuMove(dir: -1 | 1) {
 
 let dragFrom = -1
 function onDragStart(index: number, e: DragEvent) {
-  if (!finePointer.value || !props.canManage) {
+  if (!manualOrder.value || !finePointer.value || !props.canManage) {
     e.preventDefault()
     return
   }
@@ -331,7 +336,7 @@ function cancelPress() {
 }
 
 function onPointerDown(index: number, e: PointerEvent) {
-  if (finePointer.value || !props.canManage) return
+  if (!manualOrder.value || finePointer.value || !props.canManage) return
   if (e.pointerType === 'mouse' && e.button !== 0) return
   const target = e.target as HTMLElement | null
   if (target?.closest('.sc-menu, .pane-menu')) return
@@ -501,13 +506,32 @@ function detectFinePointer(): boolean {
   </div>
 
   <!-- spaces grid -->
-  <div v-else class="space-grid view-enter">
+  <div v-else class="space-board view-enter">
+    <div class="space-sort" role="group" aria-label="Space order">
+      <button
+        type="button"
+        class="group-toggle"
+        :class="{ on: !manualOrder }"
+        :aria-pressed="!manualOrder"
+        title="Most recently active first"
+        @click="manualOrder = false"
+      >Recent</button>
+      <button
+        type="button"
+        class="group-toggle"
+        :class="{ on: manualOrder }"
+        :aria-pressed="manualOrder"
+        title="Manual workspace order"
+        @click="manualOrder = true"
+      >Manual</button>
+    </div>
+    <div class="space-grid">
     <article
       v-for="(s, index) in spaces"
       :key="s.id"
       class="space-card"
       :class="s.status"
-      :draggable="finePointer && !!canManage"
+      :draggable="manualOrder && finePointer && !!canManage"
       @dragstart="onDragStart(index, $event)"
       @dragover.prevent
       @drop.prevent="onDrop(index)"
@@ -543,6 +567,7 @@ function detectFinePointer(): boolean {
       >⋯</button>
     </article>
     <div v-if="spaces.length === 0" class="space-empty">No workspaces yet.</div>
+    </div>
   </div>
 
   <SessionMenu
@@ -556,6 +581,7 @@ function detectFinePointer(): boolean {
     :index="menu.index"
     :count="menu.count"
     :can-manage="!!canManage"
+    :can-reorder="manualOrder"
     :can-worktree="!!canWorktree"
     @close="menu = null"
     @move="onMenuMove"
@@ -674,6 +700,9 @@ function detectFinePointer(): boolean {
 .status-badge.done .dot { background: var(--green); }
 
 /* Spaces grid cards */
+.space-board { display: flex; flex-direction: column; gap: 10px; }
+.space-sort { display: flex; justify-content: flex-end; gap: 6px; }
+.space-sort .group-toggle { margin-left: 0; }
 .space-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
 .space-card {
   position: relative; overflow: hidden;

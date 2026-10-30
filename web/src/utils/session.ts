@@ -25,6 +25,19 @@ export function operationFields(): { operation_id?: string; boot_id?: string } {
   return { operation_id: uid(), boot_id: boot }
 }
 
+/** Default workspace name for a new worktree: the current space plus a short suffix. */
+export function defaultWorktreeName(space: string, suffix = worktreeNameSuffix()): string {
+  const tail = suffix.trim() || '0000'
+  const base = (space.trim() || 'worktree').slice(0, Math.max(1, 200 - tail.length - 1))
+  return `${base}-${tail}`
+}
+
+function worktreeNameSuffix(): string {
+  const bytes = new Uint8Array(2)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 /** herdr insert_index is the position in the list before the item is removed.
  *  Moving an item down has to send the index after the target: herdr subtracts
  *  one when the source index is lower than insert_index. The relay forwards
