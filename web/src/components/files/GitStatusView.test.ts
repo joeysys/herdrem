@@ -97,6 +97,45 @@ describe('GitStatusView', () => {
     await w.get('input[aria-label="Select all changes"]').trigger('change')
   })
 
+  it('add modified stages only tracked changes, not new files', async () => {
+    const w = setup(BASIC)
+    await w.findAll('.gs-btn').find((b) => b.text() === 'add modified')!.trigger('click')
+    expect(last()).toMatchObject({
+      type: 'git_stage',
+      paths: ['src/a.go', 'old.txt'],
+      unstage: false,
+    })
+    expect(last().all).toBeUndefined()
+  })
+
+  it('add modified keeps a selection of files it does not stage', async () => {
+    const w = setup(BASIC)
+    const box = w.get('input[aria-label="Select new.txt"]')
+    await box.setValue(true)
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    await w.findAll('.gs-btn').find((b) => b.text() === 'add modified')!.trigger('click')
+    expect(last()).toMatchObject({
+      type: 'git_stage',
+      paths: ['src/a.go', 'old.txt'],
+      unstage: false,
+    })
+    expect((w.get('input[aria-label="Select new.txt"]').element as HTMLInputElement).checked).toBe(true)
+    expect(w.findAll('.gs-btn').find((b) => b.text().startsWith('add selected'))!.text()).toBe('add selected (1)')
+
+    reply({
+      untracked: [{ path: 'new.txt', status: '?' }],
+      staged: [
+        { path: 'src/a.go', status: 'M' },
+        { path: 'old.txt', status: 'D' },
+        { path: 'ready.go', status: 'A' },
+        { path: 'moved.go', status: 'R', orig: 'was.go' },
+      ],
+    })
+    await nextTick()
+    expect((w.get('input[aria-label="Select new.txt"]').element as HTMLInputElement).checked).toBe(true)
+    expect(w.findAll('.gs-btn').find((b) => b.text().startsWith('add selected'))!.text()).toBe('add selected (1)')
+  })
+
   it('adds everything, a single file, or unstages', async () => {
     const w = setup(BASIC)
     await w.findAll('.gs-btn').find((b) => b.text() === 'add all')!.trigger('click')

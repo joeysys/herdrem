@@ -29,6 +29,13 @@ const changes = computed<GitStatusEntry[]>(() => {
 const staged = computed<GitStatusEntry[]>(() => st.value?.staged ?? []);
 const clean = computed(() => !!st.value && !changes.value.length && !staged.value.length);
 
+// Tracked changes only (git add -u): modified/deleted/conflicted, no new files.
+const modified = computed<GitStatusEntry[]>(() => {
+  const s = st.value;
+  if (!s) return [];
+  return [...s.conflicted, ...s.unstaged];
+});
+
 // --- selection (paths of `changes`) ---
 const selected = ref<Set<string>>(new Set());
 watch(changes, (list) => {
@@ -60,6 +67,12 @@ function stageSelected() {
 function stageOne(path: string) {
   haptic();
   diff.stage([path]);
+}
+function stageModified() {
+  haptic();
+  diff.stage(uniquePaths(modified.value));
+  // Do not clear selected. This stages tracked paths only; an untracked
+  // selection must survive. watch(changes) drops paths that leave the list.
 }
 function stageAll() {
   haptic();
@@ -272,9 +285,18 @@ function clearCmd() {
           <button
             type="button"
             class="gs-btn"
+            :class="{ 'gs-btn-mhide': !selected.size }"
             :disabled="!selected.size || diff.staging"
             @click="stageSelected"
           >add selected{{ selected.size ? ` (${selected.size})` : '' }}</button>
+          <button
+            type="button"
+            class="gs-btn"
+            :class="{ 'gs-btn-mhide': selected.size > 0 }"
+            :disabled="!modified.length || diff.staging"
+            title="git add -u"
+            @click="stageModified"
+          >add modified</button>
           <button type="button" class="gs-btn" :disabled="diff.staging" @click="stageAll">add all</button>
         </header>
         <div class="gs-body">
@@ -422,7 +444,7 @@ function clearCmd() {
 
 .gs-sec { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .gs-sec-head {
-  display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border);
   font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
 }
 .gs-sec-head > :first-child { flex: 1; min-width: 0; }
@@ -486,6 +508,11 @@ function clearCmd() {
 }
 .gs-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
 .gs-btn:disabled, .gs-mini:disabled { opacity: 0.4; }
+/* Narrow screens: keep the header to two add buttons — "add selected"
+   yields to "add modified" until a box is ticked, then swaps in. */
+@media (max-width: 899px) {
+  .gs-sec-head .gs-btn-mhide { display: none; }
+}
 .gs-warn { margin: 0; color: var(--orange); font-size: var(--text-xs); }
 
 .gs-commit { display: flex; flex-direction: column; gap: 8px; }

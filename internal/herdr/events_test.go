@@ -32,8 +32,15 @@ func TestSubscribeStatusSocketOmitsPaneUpdated(t *testing.T) {
 		}
 		got <- line
 		_, _ = c.Write([]byte("{\"id\":\"status-1\",\"result\":{\"type\":\"subscription_started\"}}\n"))
-		_, _ = c.Write([]byte("{\"event\":\"pane_agent_status_changed\",\"data\":{\"type\":\"pane_agent_status_changed\",\"pane_id\":\"p1\",\"agent_status\":\"blocked\"}}\n"))
+		// subscription_event: dotted name, data has no type field.
+		_, _ = c.Write([]byte("{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"p1\",\"workspace_id\":\"w1\",\"agent_status\":\"blocked\"}}\n"))
+		// event: snake_case lifecycle names, data.type matches.
 		_, _ = c.Write([]byte("{\"event\":\"pane_created\",\"data\":{\"type\":\"pane_created\",\"pane\":{\"pane_id\":\"p2\"}}}\n"))
+		_, _ = c.Write([]byte("{\"event\":\"pane_closed\",\"data\":{\"type\":\"pane_closed\",\"pane_id\":\"p3\",\"workspace_id\":\"w1\"}}\n"))
+		_, _ = c.Write([]byte("{\"event\":\"pane_exited\",\"data\":{\"type\":\"pane_exited\",\"pane_id\":\"p1\",\"workspace_id\":\"w1\"}}\n"))
+		// Not a pushed format. Dotted lifecycle names are accepted only so a
+		// rename of the event schema cannot starve the status path.
+		_, _ = c.Write([]byte("{\"event\":\"pane.created\",\"data\":{\"pane\":{\"pane_id\":\"p4\"}}}\n"))
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -43,7 +50,7 @@ func TestSubscribeStatusSocketOmitsPaneUpdated(t *testing.T) {
 		OnReady: func() {},
 		OnEvent: func(ev StatusEvent) {
 			gotEvents = append(gotEvents, ev)
-			if len(gotEvents) == 2 {
+			if len(gotEvents) == 5 {
 				cancel()
 			}
 		},
@@ -71,10 +78,19 @@ func TestSubscribeStatusSocketOmitsPaneUpdated(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no subscribe request")
 	}
-	if len(gotEvents) != 2 || gotEvents[0].PaneID != "p1" || gotEvents[0].Kind != "pane_agent_status_changed" {
+	if len(gotEvents) != 5 || gotEvents[0].PaneID != "p1" || gotEvents[0].Kind != "pane.agent_status_changed" {
 		t.Fatalf("events = %+v", gotEvents)
 	}
 	if gotEvents[1].Kind != "pane_created" || gotEvents[1].PaneID != "p2" {
 		t.Fatalf("created event = %+v", gotEvents[1])
+	}
+	if gotEvents[2].Kind != "pane_closed" || gotEvents[2].PaneID != "p3" {
+		t.Fatalf("closed event = %+v", gotEvents[2])
+	}
+	if gotEvents[3].Kind != "pane_exited" || gotEvents[3].PaneID != "p1" {
+		t.Fatalf("exited event = %+v", gotEvents[3])
+	}
+	if gotEvents[4].Kind != "pane.created" || gotEvents[4].PaneID != "p4" {
+		t.Fatalf("defensive dotted lifecycle event = %+v", gotEvents[4])
 	}
 }

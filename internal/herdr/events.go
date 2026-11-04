@@ -166,8 +166,19 @@ func parseStatusEvent(line []byte) (StatusEvent, bool) {
 	if err := json.Unmarshal(line, &env); err != nil || env.Event == "" {
 		return StatusEvent{}, false
 	}
+	// herdr >= 0.9 (the only servers that reach this path) pushes two shapes:
+	//   - subscription_event: dotted, e.g. "pane.agent_status_changed".
+	//     data has pane_id / workspace_id / agent_status and no type field.
+	//   - event: snake_case. Lifecycle is pane_created / pane_closed /
+	//     pane_exited; agent status is also pane_agent_status_changed.
+	//     data.type matches the event name.
+	// Dotted lifecycle names (pane.created / pane.closed / pane.exited) are
+	// the subscription request constants, not a pushed format. Accepting
+	// them is defensive tolerance so a rename cannot starve this path.
 	switch env.Event {
-	case "pane_created", "pane_closed", "pane_exited", "pane_agent_status_changed":
+	case "pane.agent_status_changed",
+		"pane_created", "pane_closed", "pane_exited", "pane_agent_status_changed",
+		"pane.created", "pane.closed", "pane.exited":
 	default:
 		return StatusEvent{}, false
 	}
