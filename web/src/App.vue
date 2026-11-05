@@ -955,14 +955,24 @@ onMounted(() => {
       notify.push({ message: msg.message, type: 'info' });
     }
     if (msg.type === 'todos') todo.setAll(msg.todos);
-    if (msg.type === 'todo_updated') todo.updateItem(msg.todo, msg.deleted);
+    if (msg.type === 'todo_updated') {
+      todo.updateItem(msg.todo, msg.deleted);
+      if (msg.req_id) todo.confirm(msg.req_id);
+    }
+    if (msg.type === 'error' && msg.op === 'todo_set') {
+      todo.fail(msg.req_id, msg.message);
+      notify.push({ message: `todo failed: ${msg.message}`, type: 'info' });
+    }
     if (msg.type === 'history') cmdHistory.applySnapshot(msg.entries);
     if (msg.type === 'history_added') cmdHistory.applyAdded(msg.entry);
     if (msg.type === 'history_removed') cmdHistory.applyRemoved(msg.kind, msg.text);
     if (msg.type === 'history_cleared') cmdHistory.applyCleared(msg.kind, msg.host, msg.workspace_id);
     if (msg.type === 'history_favorited') cmdHistory.applyFavorited(msg.kind, msg.text, msg.favorite, msg.host, msg.workspace_id, msg.everywhere);
     if (msg.type === 'tunnels') tunnelsStore.setTunnels(msg.tunnels || []);
-    if (msg.type === 'tunnel_updated') tunnelsStore.updateTunnel(msg.tunnel);
+    if (msg.type === 'tunnel_updated') {
+      tunnelsStore.updateTunnel(msg.tunnel);
+      if (msg.req_id) tunnelsStore.confirm(msg.req_id);
+    }
     if (msg.type === 'pane_content') {
       // route preview reads to the previews store, terminal reads to the terminal
       if (msg.purpose === 'preview') previews.setPreview(msg.pane_id, msg.content);
@@ -1035,7 +1045,11 @@ onMounted(() => {
       notify.push({ message: `failed to create pane: ${msg.message}`, type: 'info' });
     }
     if (msg.type === 'error' && msg.op === 'tunnel_create') {
-      tunnelsStore.handleCreateError(msg.message);
+      // A req-scoped error belongs to exactly one pending op and surfaces
+      // through it — a stale or foreign req_id must not overwrite the legacy
+      // lastCreateError slot that an unrelated in-flight create reads.
+      if (msg.req_id) tunnelsStore.fail(msg.req_id, msg.message);
+      else tunnelsStore.handleCreateError(msg.message);
       notify.push({ message: `failed to create tunnel: ${msg.message}`, type: 'info' });
     }
   });

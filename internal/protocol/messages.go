@@ -67,6 +67,7 @@ type TodoUpdated struct {
 	Type    string     `json:"type"`
 	Todo    store.Todo `json:"todo"`
 	Deleted bool       `json:"deleted,omitempty"`
+	ReqID   string     `json:"req_id,omitempty"` // echoed from the triggering TodoSet; only on the initiator's copy, never broadcast
 }
 
 // TodosSnapshot carries all todo items.
@@ -234,6 +235,7 @@ type TodoSet struct {
 	Key     string             `json:"key,omitempty"` // legacy pane-scoped clients; rejected by the server
 	Body    string             `json:"body"`
 	Binding *store.TodoBinding `json:"binding,omitempty"`
+	ReqID   string             `json:"req_id,omitempty"` // client-generated; echoed in the initiator's todo_updated / error
 }
 
 // PrefsGet requests all prefs.
@@ -349,6 +351,7 @@ type TunnelCreate struct {
 	Host     string `json:"host,omitempty"`
 	AuthMode string `json:"auth_mode,omitempty"` // "token_gate" | "basic_auth" | "direct"
 	Pin      string `json:"pin,omitempty"`
+	ReqID    string `json:"req_id,omitempty"` // client-generated; echoed in the initiator's tunnel_updated / error
 }
 
 // TunnelClose requests terminating a port tunnel.
@@ -514,6 +517,7 @@ type TunnelsSnapshot struct {
 type TunnelUpdated struct {
 	Type   string     `json:"type"`
 	Tunnel TunnelInfo `json:"tunnel"`
+	ReqID  string     `json:"req_id,omitempty"` // echoed from the triggering TunnelCreate; only on the initiator's copy, never broadcast
 }
 
 // IntPtr returns a pointer to v, for *int fields so that revision 0 survives

@@ -1249,3 +1249,122 @@ func TestRefreshWidensShortObserveCache(t *testing.T) {
 		t.Fatalf("widen calls = %d", sub.widenCalls)
 	}
 }
+
+func TestHandleMessage_ReqEcho(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := hub.New(logger)
+	client := &herdr.FakeClient{}
+
+	tmpDir := t.TempDir()
+	todoStore, err := store.New(tmpDir + "/todo.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(client, nil, todoStore, nil, nil, h, logger)
+	svc.SetTunnels(NewTunnelService(0, nil, logger))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go h.Run(ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		if r.URL.Query().Get("bystander") == "1" {
+			// Registered to the hub so BroadcastJSONExcept reaches it.
+			h.HandleConn(ctx, conn, "", nil)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			svc.HandleMessage(ctx, conn, data)
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	bystander, _, err := websocket.Dial(ctx, wsURL+"?bystander=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bystander.Close(websocket.StatusNormalClosure, "")
+	for i := 0; i < 50 && h.Count() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Count() == 0 {
+		t.Fatal("bystander never registered")
+	}
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	readMsg := func(c *websocket.Conn) map[string]interface{} {
+		t.Helper()
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	// Create: the initiator's copy echoes req_id; the broadcast must not.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"todo_set","req_id":"r-create","body":"echo me","binding":{"host":"local","workspace_id":"ws1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	m := readMsg(conn)
+	if m["type"] != "todo_updated" || m["req_id"] != "r-create" {
+		t.Fatalf("initiator update missing req_id echo: %#v", m)
+	}
+	id := m["todo"].(map[string]interface{})["id"].(string)
+	bm := readMsg(bystander)
+	if bm["type"] != "todo_updated" {
+		t.Fatalf("bystander missed broadcast: %#v", bm)
+	}
+	if rid, present := bm["req_id"]; present && rid != "" {
+		t.Fatalf("broadcast leaked req_id %v", rid)
+	}
+
+	// Delete: same echo rules.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"todo_set","req_id":"r-del","id":"`+id+`","body":""}`)); err != nil {
+		t.Fatal(err)
+	}
+	m = readMsg(conn)
+	if m["req_id"] != "r-del" || m["deleted"] != true {
+		t.Fatalf("delete echo wrong: %#v", m)
+	}
+	bm = readMsg(bystander)
+	if rid, present := bm["req_id"]; present && rid != "" {
+		t.Fatalf("delete broadcast leaked req_id %v", rid)
+	}
+
+	// Error: validation failures echo req_id to the initiator.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"todo_set","req_id":"r-err","id":"missing","body":""}`)); err != nil {
+		t.Fatal(err)
+	}
+	m = readMsg(conn)
+	if m["type"] != "error" || m["op"] != "todo_set" || m["req_id"] != "r-err" {
+		t.Fatalf("todo error did not echo req_id: %#v", m)
+	}
+
+	// tunnel_create: failures echo req_id the same way.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"tunnel_create","req_id":"r-tun","port":99999,"auth_mode":"token_gate"}`)); err != nil {
+		t.Fatal(err)
+	}
+	m = readMsg(conn)
+	if m["type"] != "error" || m["op"] != "tunnel_create" || m["req_id"] != "r-tun" {
+		t.Fatalf("tunnel error did not echo req_id: %#v", m)
+	}
+}

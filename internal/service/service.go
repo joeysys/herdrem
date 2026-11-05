@@ -652,50 +652,59 @@ func (s *Service) handleTodoGet(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (s *Service) handleTodoSet(ctx context.Context, conn *websocket.Conn, data []byte) {
-	if s.todoStore == nil {
-		s.sendError(ctx, conn, "todo_set", "todo store not available")
-		return
-	}
 	var msg protocol.TodoSet
 	if err := json.Unmarshal(data, &msg); err != nil {
 		s.sendError(ctx, conn, "todo_set", "invalid message: "+err.Error())
 		return
 	}
+	// Fail with the request's req_id so a client can match the error to its
+	// pending mutation (feature "req-echo"). Empty req_id omits the field.
+	fail := func(message string) {
+		s.sendErrorKeyReq(ctx, conn, "todo_set", message, "", msg.ReqID)
+	}
+	if s.todoStore == nil {
+		fail("todo store not available")
+		return
+	}
 	if msg.Key != "" {
-		s.sendError(ctx, conn, "todo_set", "outdated pane-scoped todo message")
+		fail("outdated pane-scoped todo message")
 		return
 	}
 	if len(msg.Body) > 64*1024 {
-		s.sendError(ctx, conn, "todo_set", "body too large")
+		fail("body too large")
 		return
 	}
 	if msg.ID != "" && len(msg.ID) != 32 {
-		s.sendError(ctx, conn, "todo_set", "invalid id")
+		fail("invalid id")
 		return
 	}
 	if msg.Binding != nil && (msg.Binding.Host == "" || msg.Binding.WorkspaceID == "") {
-		s.sendError(ctx, conn, "todo_set", "binding requires host and workspace_id")
+		fail("binding requires host and workspace_id")
 		return
 	}
 	if msg.Binding != nil && (len(msg.Binding.Host) > 1024 || len(msg.Binding.WorkspaceID) > 1024 || len(msg.Binding.WorkspaceLabel) > 4096) {
-		s.sendError(ctx, conn, "todo_set", "binding too large")
+		fail("binding too large")
 		return
 	}
 	if msg.Body == "" {
 		if msg.ID == "" {
-			s.sendError(ctx, conn, "todo_set", "missing id")
+			fail("missing id")
 			return
 		}
 		if _, ok := s.todoStore.Get(msg.ID); !ok {
-			s.sendError(ctx, conn, "todo_set", "todo not found")
+			fail("todo not found")
 			return
 		}
 		if err := s.todoStore.Delete(msg.ID); err != nil {
-			s.sendError(ctx, conn, "todo_set", err.Error())
+			fail(err.Error())
 			return
 		}
 		updated := protocol.TodoUpdated{Type: "todo_updated", Todo: store.Todo{ID: msg.ID}, Deleted: true}
-		s.sendJSON(ctx, conn, updated)
+		// The req_id echoes only on the initiator's copy; other clients must
+		// not see it as their own confirmation.
+		direct := updated
+		direct.ReqID = msg.ReqID
+		s.sendJSON(ctx, conn, direct)
 		s.hub.BroadcastJSONExcept(updated, conn)
 		return
 	}
@@ -705,7 +714,7 @@ func (s *Service) handleTodoSet(ctx context.Context, conn *websocket.Conn, data 
 	if msg.ID == "" {
 		id, err := newTodoID()
 		if err != nil {
-			s.sendError(ctx, conn, "todo_set", "could not create todo id")
+			fail("could not create todo id")
 			return
 		}
 		todo.ID = id
@@ -713,15 +722,17 @@ func (s *Service) handleTodoSet(ctx context.Context, conn *websocket.Conn, data 
 	} else if existing, ok := s.todoStore.Get(msg.ID); ok {
 		todo.CreatedAt = existing.CreatedAt
 	} else {
-		s.sendError(ctx, conn, "todo_set", "todo not found")
+		fail("todo not found")
 		return
 	}
 	if err := s.todoStore.Set(todo); err != nil {
-		s.sendError(ctx, conn, "todo_set", err.Error())
+		fail(err.Error())
 		return
 	}
 	updated := protocol.TodoUpdated{Type: "todo_updated", Todo: todo}
-	s.sendJSON(ctx, conn, updated)
+	direct := updated
+	direct.ReqID = msg.ReqID
+	s.sendJSON(ctx, conn, direct)
 	// Broadcast to all other clients (exclude sender to avoid duplicate)
 	s.hub.BroadcastJSONExcept(updated, conn)
 }
@@ -788,13 +799,13 @@ func (s *Service) sendJSON(ctx context.Context, conn *websocket.Conn, v interfac
 }
 
 func (s *Service) handleTunnelCreate(ctx context.Context, conn *websocket.Conn, data []byte) {
-	if s.tunnels == nil {
-		s.sendError(ctx, conn, "tunnel_create", "tunnel service not available")
-		return
-	}
 	var msg protocol.TunnelCreate
 	if err := json.Unmarshal(data, &msg); err != nil {
 		s.sendError(ctx, conn, "tunnel_create", "invalid message: "+err.Error())
+		return
+	}
+	if s.tunnels == nil {
+		s.sendErrorKeyReq(ctx, conn, "tunnel_create", "tunnel service not available", "", msg.ReqID)
 		return
 	}
 	var info *protocol.TunnelInfo
@@ -805,7 +816,7 @@ func (s *Service) handleTunnelCreate(ctx context.Context, conn *websocket.Conn, 
 			host = "local"
 		}
 		if s.files != nil && !s.files.IsFile(ctx, host, msg.FilePath) {
-			s.sendError(ctx, conn, "tunnel_create", "file not found, is a directory, or outside sandbox roots")
+			s.sendErrorKeyReq(ctx, conn, "tunnel_create", "file not found, is a directory, or outside sandbox roots", "", msg.ReqID)
 			return
 		}
 		info, err = s.tunnels.CreateFileTunnel(host, msg.FilePath, msg.AuthMode, msg.Pin)
@@ -813,10 +824,12 @@ func (s *Service) handleTunnelCreate(ctx context.Context, conn *websocket.Conn, 
 		info, err = s.tunnels.CreateTunnel(msg.Port, msg.AuthMode, msg.Pin)
 	}
 	if err != nil {
-		s.sendError(ctx, conn, "tunnel_create", err.Error())
+		s.sendErrorKeyReq(ctx, conn, "tunnel_create", err.Error(), "", msg.ReqID)
 		return
 	}
-	s.sendJSON(ctx, conn, protocol.TunnelUpdated{Type: "tunnel_updated", Tunnel: *info})
+	// tunnel_updated goes only to the initiator, so the req_id echo rides on
+	// the single copy — there is no broadcast variant to keep clean.
+	s.sendJSON(ctx, conn, protocol.TunnelUpdated{Type: "tunnel_updated", Tunnel: *info, ReqID: msg.ReqID})
 }
 
 func (s *Service) handleTunnelClose(ctx context.Context, conn *websocket.Conn, data []byte) {

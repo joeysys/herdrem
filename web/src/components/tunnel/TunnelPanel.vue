@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useConnectionStore } from '../../stores/connection'
-import { useTunnelsStore } from '../../stores/tunnels'
+import { useTunnelsStore, portScope } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
 
 const conn = useConnectionStore()
@@ -11,6 +11,26 @@ const { haptic } = useHaptic()
 const inputPort = ref(5173)
 const authMode = ref<'token_gate' | 'basic_auth' | 'direct'>('token_gate')
 const inputPin = ref('')
+
+const pending = computed(() => tunnels.pendingFor(portScope))
+// reqId → outcome last consumed here, so a late transition (unconfirmed →
+// confirmed) is reprocessed while a repeated same-outcome record is not.
+const handled = new Map<string, string>()
+
+watch(
+  pending,
+  (op) => {
+    if (!op || op.outcome === 'pending' || handled.get(op.reqId) === op.outcome) return
+    handled.set(op.reqId, op.outcome)
+    if (op.outcome === 'confirmed') {
+      // Clear only the PIN that was submitted; anything typed since stays.
+      if (inputPin.value.trim() === op.snapshot) inputPin.value = ''
+    } else if (!inputPin.value.trim()) {
+      inputPin.value = op.snapshot
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   () => conn.hasFeature('tunnel-direct'),
@@ -35,8 +55,9 @@ function startTunnel() {
     if (!ok) return
   }
   haptic()
-  tunnels.createTunnel(inputPort.value, authMode.value, inputPin.value.trim() || undefined)
-  inputPin.value = ''
+  const res = tunnels.createTunnel(inputPort.value, authMode.value, inputPin.value.trim() || undefined)
+  // Echoed sends keep the PIN in the pending row until the receipt arrives.
+  if (res.ok && !res.reqId) inputPin.value = ''
 }
 
 function copyText(text: string, id: string) {
@@ -113,12 +134,16 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
         <div class="tp-form-row">
           <div class="tp-field flex-1">
             <label>Custom PIN / Token (Optional)</label>
-            <input v-model="inputPin" type="text" placeholder="Auto-generated if empty" />
+            <input v-model="inputPin" type="text" placeholder="Auto-generated if empty" :readonly="pending?.outcome === 'pending'" />
           </div>
-          <button class="tp-submit-btn" :disabled="!inputPort" @click="startTunnel">
+          <button class="tp-submit-btn" :disabled="!inputPort || pending?.outcome === 'pending'" @click="startTunnel">
             + Forward Port
           </button>
         </div>
+        <p v-if="pending && (pending.outcome === 'pending' || pending.message)" class="tp-pending" :data-outcome="pending.outcome">
+          <template v-if="pending.outcome === 'pending'">Requesting tunnel…</template>
+          <template v-else>{{ pending.message }}</template>
+        </p>
       </div>
 
       <!-- Tunnel List -->
@@ -251,6 +276,8 @@ function previewTunnel(t: { public_url: string; token?: string; auth_mode: strin
   padding: 8px 16px; white-space: nowrap; height: 33px; cursor: pointer;
 }
 .tp-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.tp-pending { margin: 0; font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--muted); }
+.tp-pending[data-outcome='failed'], .tp-pending[data-outcome='unconfirmed'] { color: var(--red); }
 
 .tp-list { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
 .tp-empty { text-align: center; color: var(--faint); padding: 30px; font-size: var(--text-xs); line-height: 1.6; }

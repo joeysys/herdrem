@@ -6,6 +6,7 @@ import { useRelaysStore } from './relays';
 import type { ServerMessage, Pane, TodoBinding } from '../api/types';
 import { safeStorage } from '../utils/storage';
 import { applyServerMessage, noteDisconnect, syncApprovalNotes } from './sendAck';
+import { notePendingDisconnect } from './pendingOps';
 import { extractRelayCredentials, sessionTokenFor, saveSessionToken } from '../utils/relay';
 
 export const useConnectionStore = defineStore('connection', () => {
@@ -228,6 +229,7 @@ export const useConnectionStore = defineStore('connection', () => {
       if (s === 'disconnected') {
         bootId.value = '';
         noteDisconnect();
+        notePendingDisconnect();
       }
     });
   }

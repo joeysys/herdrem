@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useTodoStore } from '../../stores/todo'
+import { computed, ref, watch } from 'vue'
+import { useTodoStore, addScope, itemScope } from '../../stores/todo'
 import { useHaptic } from '../../composables/useHaptic'
 import type { TodoBinding } from '../../api/types'
 
@@ -14,13 +14,58 @@ const newText = ref('')
 const editingKey = ref<string | null>(null)
 const editText = ref('')
 
+const scope = computed(() => addScope(props.binding))
+const pending = computed(() => todo.pendingFor(scope.value))
+const normalize = (s: string) => s.trim().slice(0, 64 * 1024)
+// reqId → outcome last consumed here, so a late transition (unconfirmed →
+// confirmed) is reprocessed while a repeated same-outcome record is not.
+const handled = new Map<string, string>()
+
 function add() {
-  const body = newText.value.trim()
+  const body = normalize(newText.value)
   if (!body) return
   haptic()
-  todo.addItem(props.binding, body.slice(0, 64 * 1024))
-  newText.value = ''
+  const res = todo.addItem(props.binding, body)
+  // Echoed sends keep the draft in the pending row, not the input box.
+  if (res.ok && !res.reqId) newText.value = ''
 }
+
+function itemPending(id: string) {
+  return todo.pendingFor(itemScope(id))
+}
+
+function itemBusy(id: string): boolean {
+  return itemPending(id)?.outcome === 'pending'
+}
+
+// Resolved ops stay in the store until the next submit replaces them. Each
+// component consumes only the scopes it owns — never acks: acking an op a
+// sibling component shares (same binding) would steal its resolution.
+watch(
+  () => todo.pending,
+  (map) => {
+    for (const op of Object.values(map)) {
+      if (op.outcome === 'pending' || handled.get(op.reqId) === op.outcome) continue
+      if (op.scope === scope.value) {
+        handled.set(op.reqId, op.outcome)
+        if (op.outcome === 'confirmed') {
+          // Clear only what was submitted; anything typed since stays.
+          if (normalize(newText.value) === op.snapshot) newText.value = ''
+        } else if (!normalize(newText.value)) {
+          newText.value = op.snapshot
+        }
+      } else if (op.scope.startsWith('todo:item:')) {
+        const id = op.scope.slice('todo:item:'.length)
+        if (!items.value.some((it) => it.id === id)) continue
+        handled.set(op.reqId, op.outcome)
+        if (op.outcome === 'confirmed' && editingKey.value === id && normalize(editText.value) === op.snapshot) {
+          editingKey.value = null
+        }
+      }
+    }
+  },
+  { deep: true, immediate: true },
+)
 
 function startEdit(id: string, body: string) {
   editingKey.value = id
@@ -28,10 +73,10 @@ function startEdit(id: string, body: string) {
 }
 
 function saveEdit() {
-  const body = editText.value.trim()
+  const body = normalize(editText.value)
   if (editingKey.value && body) {
-    todo.setItem({ id: editingKey.value, body: body.slice(0, 64 * 1024), binding: props.binding })
-    editingKey.value = null
+    const res = todo.setItem({ id: editingKey.value, body, binding: props.binding })
+    if (res.ok && !res.reqId) editingKey.value = null
   }
 }
 
@@ -54,22 +99,32 @@ function fill(body: string) {
     </header>
 
     <div class="tp-list">
-      <div v-if="items.length === 0" class="tp-empty">No notes yet.</div>
+      <div v-if="items.length === 0 && pending?.outcome !== 'pending'" class="tp-empty">No notes yet.</div>
+      <div v-if="pending?.outcome === 'pending'" class="tp-item tp-pending">
+        <pre class="tp-body">{{ pending.snapshot }}</pre>
+        <span class="tp-state">sending…</span>
+      </div>
       <div v-for="it in items" :key="it.id" class="tp-item">
         <template v-if="editingKey === it.id">
-          <textarea v-model="editText" class="tp-edit" rows="3" maxlength="65536"></textarea>
+          <textarea v-model="editText" class="tp-edit" rows="3" maxlength="65536" :readonly="itemBusy(it.id)"></textarea>
           <div class="tp-item-actions">
-            <button class="mini-btn primary" @click="saveEdit">save</button>
-            <button class="mini-btn" @click="editingKey = null">cancel</button>
+            <button class="mini-btn primary" :disabled="itemBusy(it.id)" @click="saveEdit">save</button>
+            <button class="mini-btn" :disabled="itemBusy(it.id)" @click="editingKey = null">cancel</button>
           </div>
+          <span v-if="itemPending(it.id) && (itemPending(it.id)!.outcome === 'pending' || itemPending(it.id)!.message)" class="tp-item-state" :data-outcome="itemPending(it.id)!.outcome">
+            {{ itemPending(it.id)!.outcome === 'pending' ? 'saving…' : itemPending(it.id)!.message }}
+          </span>
         </template>
         <template v-else>
           <pre class="tp-body">{{ it.body }}</pre>
           <div class="tp-item-actions">
-            <button class="mini-btn" title="Fill into input" @click="fill(it.body)">→ input</button>
-            <button class="mini-btn" @click="startEdit(it.id, it.body)">edit</button>
-            <button class="mini-btn danger" aria-label="Delete todo" @click="remove(it.id)">×</button>
+            <button class="mini-btn" title="Fill into input" :disabled="itemBusy(it.id)" @click="fill(it.body)">→ input</button>
+            <button class="mini-btn" :disabled="itemBusy(it.id)" @click="startEdit(it.id, it.body)">edit</button>
+            <button class="mini-btn danger" aria-label="Delete todo" :disabled="itemBusy(it.id)" @click="remove(it.id)">×</button>
           </div>
+          <span v-if="itemPending(it.id) && (itemPending(it.id)!.outcome === 'pending' || itemPending(it.id)!.message)" class="tp-item-state" :data-outcome="itemPending(it.id)!.outcome">
+            {{ itemPending(it.id)!.outcome === 'pending' ? (itemPending(it.id)!.kind === 'delete' ? 'deleting…' : 'saving…') : itemPending(it.id)!.message }}
+          </span>
         </template>
       </div>
     </div>
@@ -81,10 +136,14 @@ function fill(body: string) {
         rows="2"
         maxlength="65536"
         placeholder="add a note / snippet…"
+        :readonly="pending?.outcome === 'pending'"
         @keydown.ctrl.enter.prevent="add"
         @keydown.meta.enter.prevent="add"
       ></textarea>
-      <button class="tp-add-btn" :disabled="!newText.trim()" @click="add">add</button>
+      <button class="tp-add-btn" :disabled="!newText.trim() || pending?.outcome === 'pending'" @click="add">
+        {{ pending?.outcome === 'pending' ? 'adding…' : 'add' }}
+      </button>
+      <p v-if="pending && pending.outcome !== 'pending' && pending.message" class="tp-msg" :data-outcome="pending.outcome">{{ pending.message }}</p>
     </div>
   </div>
 </template>
@@ -127,6 +186,13 @@ function fill(body: string) {
 .mini-btn:hover { color: var(--text); }
 .mini-btn.primary { color: #06281a; background: var(--green); border-color: var(--green); }
 .mini-btn.danger:hover { color: var(--red); border-color: rgba(248,113,113,.5); }
+.tp-pending { border-style: dashed; }
+.tp-pending .tp-body { color: var(--faint); }
+.tp-state { font-size: var(--text-2xs); color: var(--muted); }
+.tp-item-state { display: block; margin-top: 6px; font-size: var(--text-2xs); color: var(--muted); }
+.tp-item-state[data-outcome='failed'], .tp-item-state[data-outcome='unconfirmed'] { color: var(--red); }
+.tp-add { flex-wrap: wrap; }
+.tp-msg { flex-basis: 100%; margin: 0; font-size: var(--text-2xs); color: var(--red); }
 .tp-edit, .tp-new {
   width: 100%; font-family: var(--font-mono); font-size: var(--text-xs);
   background: var(--term-bg); border: 1px solid var(--border); border-radius: var(--radius);

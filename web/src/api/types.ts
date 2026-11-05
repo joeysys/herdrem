@@ -94,6 +94,7 @@ export interface TodoUpdated {
   type: 'todo_updated'
   todo: Todo
   deleted?: boolean
+  req_id?: string // echoed on the initiator's copy only (req-echo)
 }
 
 export interface TodosSnapshot {
@@ -294,6 +295,7 @@ export interface TodoSet {
   id?: string
   body: string
   binding?: TodoBinding
+  req_id?: string // echoed in the initiator's todo_updated / error (req-echo)
 }
 
 export interface MarkPaneRead {
@@ -492,6 +494,7 @@ export interface TunnelsSnapshot {
 export interface TunnelUpdated {
   type: 'tunnel_updated'
   tunnel: TunnelInfo
+  req_id?: string // echoed on the initiator's copy (req-echo)
 }
 
 export interface TunnelCreate {
@@ -501,6 +504,7 @@ export interface TunnelCreate {
   host?: string
   auth_mode?: 'token_gate' | 'basic_auth' | 'direct'
   pin?: string
+  req_id?: string // echoed in the initiator's tunnel_updated / error (req-echo)
 }
 
 export interface TunnelClose {

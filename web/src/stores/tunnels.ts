@@ -2,6 +2,14 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { ws } from '../api/ws'
 import type { TunnelInfo, TunnelCreate, TunnelClose, TunnelsList } from '../api/types'
+import { useConnectionStore } from './connection'
+import { usePendingOps } from './pendingOps'
+import { useNotify } from '../composables/useNotify'
+
+export type SubmitResult = { ok: true; reqId?: string; echoed?: boolean } | { ok: false; reason: 'busy' | 'not connected' }
+
+export const portScope = 'tunnel:port'
+export const fileScope = (host: string, path: string) => `tunnel:file:${host}:${path}`
 
 export const useTunnelsStore = defineStore('tunnels', () => {
   const tunnels = ref<TunnelInfo[]>([])
@@ -34,14 +42,31 @@ export const useTunnelsStore = defineStore('tunnels', () => {
     ws.send(msg)
   }
 
-  function createTunnel(port: number, authMode: 'token_gate' | 'basic_auth' | 'direct' = 'token_gate', pin?: string) {
-    const msg: TunnelCreate = {
-      type: 'tunnel_create',
-      port,
-      auth_mode: authMode,
-      pin,
+  const ops = usePendingOps({
+    unconfirmedMessage: () => 'Unconfirmed — a tunnel may already be starting. Check the list before retrying.',
+    onUnconfirmed: (op) => useNotify().push({ message: op.message, type: 'info' }),
+  })
+  const pending = ops.pending
+
+  // Same submit rules as todo.ts: busy scopes refuse, send failures refuse,
+  // and only a negotiated req-echo parks the op. Without the feature a
+  // successful send clears the caller's PIN immediately, like before.
+  function submitCreate(msg: Omit<TunnelCreate, 'type' | 'req_id'>, scope: string, snapshot: string): SubmitResult {
+    if (ops.isBusy(scope)) return { ok: false, reason: 'busy' }
+    const reqId = useConnectionStore().hasFeature('req-echo') ? ops.newReqId() : undefined
+    const full: TunnelCreate = { type: 'tunnel_create', ...msg }
+    if (reqId) full.req_id = reqId
+    if (!ws.send(full)) {
+      ops.trackFailed(scope, 'tunnel', snapshot, 'not connected — the tunnel request was not sent')
+      return { ok: false, reason: 'not connected' }
     }
-    ws.send(msg)
+    if (!reqId) return { ok: true, echoed: false }
+    ops.track(scope, 'tunnel', snapshot, reqId)
+    return { ok: true, reqId }
+  }
+
+  function createTunnel(port: number, authMode: 'token_gate' | 'basic_auth' | 'direct' = 'token_gate', pin?: string): SubmitResult {
+    return submitCreate({ port, auth_mode: authMode, pin }, portScope, pin ?? '')
   }
 
   const lastCreateError = ref<{ message: string; timestamp: number } | null>(null)
@@ -57,20 +82,15 @@ export const useTunnelsStore = defineStore('tunnels', () => {
     }
   }
 
-  function createFileTunnel(filePath: string, host = 'local', authMode: 'token_gate' | 'basic_auth' | 'direct' = 'token_gate', pin?: string) {
+  function createFileTunnel(filePath: string, host = 'local', authMode: 'token_gate' | 'basic_auth' | 'direct' = 'token_gate', pin?: string): SubmitResult {
+    const scope = fileScope(host, filePath)
+    if (ops.isBusy(scope)) return { ok: false, reason: 'busy' }
     // Purge any existing error entry for this file so retry starts clean
     tunnels.value = tunnels.value.filter(
       (t) => !(t.file_path === filePath && (t.host || 'local') === host && t.status === 'error')
     )
     lastCreateError.value = null
-    const msg: TunnelCreate = {
-      type: 'tunnel_create',
-      file_path: filePath,
-      host,
-      auth_mode: authMode,
-      pin,
-    }
-    ws.send(msg)
+    return submitCreate({ file_path: filePath, host, auth_mode: authMode, pin }, scope, pin ?? '')
   }
 
   function getFileTunnel(filePath: string, host = 'local') {
@@ -135,6 +155,12 @@ export const useTunnelsStore = defineStore('tunnels', () => {
     closeTunnel,
     dismissTunnel,
     lastCreateError,
+    pending,
+    pendingFor: ops.forScope,
+    confirm: ops.confirm,
+    fail: ops.fail,
+    ack: ops.ack,
+    resetPending: ops.reset,
     handleCreateError,
     togglePanel,
     openPreview,

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useFilesStore } from '../../stores/files'
 import { useConnectionStore } from '../../stores/connection'
 import { useTerminalStore } from '../../stores/terminal'
-import { useTunnelsStore } from '../../stores/tunnels'
+import { useTunnelsStore, fileScope } from '../../stores/tunnels'
 import { useHaptic } from '../../composables/useHaptic'
 import { usePreviewWidth } from '../../composables/usePreviewWidth'
 import { renderMarkdown } from '../../utils/markdown'
@@ -413,6 +413,27 @@ function clearTunnelStartingTimer() {
   }
 }
 
+// With req-echo the file-scope op carries the request's fate — including its
+// own 10s timeout — so the local starting spinner must not double as the
+// protocol timeout. It only arms for legacy relays that never echo.
+const filePending = computed(() => {
+  const p = preview.value
+  return p?.path ? tunnels.pendingFor(fileScope(p.host || 'local', p.path)) : undefined
+})
+// `${reqId}:${outcome}` last consumed, so a late transition (unconfirmed →
+// confirmed) is reprocessed while a repeated same-outcome record is not.
+let fileHandledKey = ''
+
+watch(filePending, (op) => {
+  if (!op || op.outcome === 'pending') return
+  const key = `${op.reqId}:${op.outcome}`
+  if (key === fileHandledKey) return
+  fileHandledKey = key
+  tunnelStarting.value = false
+  clearTunnelStartingTimer()
+  if (op.outcome !== 'confirmed') tunnelCreateError.value = op.message
+}, { immediate: true })
+
 function startTunnelPreview() {
   haptic()
   if (!preview.value?.path) return
@@ -425,10 +446,20 @@ function startTunnelPreview() {
   tunnelCreateError.value = null
   tunnelStarting.value = true
   clearTunnelStartingTimer()
-  tunnelStartingTimer = setTimeout(() => {
+  const res = tunnels.createFileTunnel(preview.value.path, preview.value.host || 'local', 'token_gate')
+  if (!res.ok) {
     tunnelStarting.value = false
-  }, 15000)
-  tunnels.createFileTunnel(preview.value.path, preview.value.host || 'local', 'token_gate')
+    clearTunnelStartingTimer()
+    tunnelCreateError.value = res.reason === 'busy'
+      ? 'A tunnel request for this file is already in flight.'
+      : 'not connected — the tunnel request was not sent'
+    return
+  }
+  if (!res.reqId) {
+    tunnelStartingTimer = setTimeout(() => {
+      tunnelStarting.value = false
+    }, 15000)
+  }
 }
 
 function dismissTunnelError() {

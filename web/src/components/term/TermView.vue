@@ -1011,7 +1011,7 @@ onUnmounted(() => {
     <TodoPanel
       v-if="showTodo"
       :binding="todoBinding"
-      :title="`todo · ${title}`"
+      :title="`todo · ${todoBinding.workspace_label || todoBinding.workspace_id}`"
       @close="showTodo = false"
       @fill="onTodoFill"
     />

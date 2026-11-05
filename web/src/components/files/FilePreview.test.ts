@@ -6,7 +6,7 @@ import FilePreview from './FilePreview.vue'
 import { useFilesStore } from '../../stores/files'
 import { usePreviewWidth } from '../../composables/usePreviewWidth'
 
-vi.mock('../../api/ws', () => ({ ws: { send: vi.fn() } }))
+vi.mock('../../api/ws', () => ({ ws: { send: vi.fn(() => true) } }))
 
 describe('FilePreview copy button', () => {
   const originalClipboard = navigator.clipboard
@@ -659,6 +659,39 @@ describe('FilePreview HTML sandbox notice and tunnel preview', () => {
     expect(wrapper.find('.fp-tip-btn.primary').text()).toContain('Public tunnel preview')
 
     wrapper.unmount()
+  })
+
+  it('reports an unsent create immediately instead of waiting out the spinner', async () => {
+    const { ws } = await import('../../api/ws')
+    vi.mocked(ws.send).mockReturnValue(false)
+    const files = useFilesStore()
+    const conn = (await import('../../stores/connection')).useConnectionStore()
+    conn.features = ['tunnels', 'preview-run']
+
+    files.openPath('/workspace/offline.html', '/workspace', 'local', null)
+    files.setContent({
+      type: 'file_content',
+      path: '/workspace/offline.html',
+      content: '<h1>Offline</h1>',
+      encoding: 'utf-8',
+      mime_type: 'text/html',
+      is_text: true,
+      is_image: false,
+      size: 15,
+    })
+
+    const wrapper = mount(FilePreview, {
+      props: { directoryOpen: false },
+    })
+    await nextTick()
+
+    await wrapper.find('.fp-tip-btn.primary').trigger('click')
+    await nextTick()
+
+    expect(wrapper.text()).not.toContain('Starting…')
+    expect(wrapper.text()).toContain('not connected')
+    wrapper.unmount()
+    vi.mocked(ws.send).mockReturnValue(true)
   })
 })
 
