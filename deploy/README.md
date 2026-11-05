@@ -193,6 +193,16 @@ service above.
 
 ```bash
 docker compose up -d --build
+# Name this image's installed PWA (build time; unset stays Herdrem):
+# HERDREM_PWA_NAME='Acme Ops' docker compose up -d --build
+```
+
+`HERDREM_PWA_NAME` is passed as a Docker build arg and written into the
+manifest and home-screen title. It is not read when the container starts.
+A source install bakes the same variable through `make build`:
+
+```bash
+HERDREM_PWA_NAME='Acme Ops' ./deploy/install.sh
 ```
 
 Open `http://<host>:8080`. In the PWA relay switcher, add the separately

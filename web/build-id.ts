@@ -19,6 +19,7 @@ const ROOT_FILES = [
   'index.html',
   'package-lock.json',
   'package.json',
+  'pwa-name.ts',
   'tsconfig.app.json',
   'tsconfig.json',
   'tsconfig.node.json',

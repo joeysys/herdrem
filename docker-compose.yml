@@ -1,6 +1,10 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      args:
+        # Shell HERDREM_PWA_NAME names this image's PWA. Unset stays Herdrem.
+        HERDREM_PWA_NAME: ${HERDREM_PWA_NAME:-}
     image: herdrem-web
     container_name: herdrem-web
     ports:

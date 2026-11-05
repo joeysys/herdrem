@@ -32,8 +32,11 @@ A single Go binary (`Herdrem`) serves a Vue 3 PWA and a WebSocket relay that bri
 ## Quick Start
 
 ```bash
-# Build web + Go binary
+# Build web + Go binary.
+# HERDREM_PWA_NAME is optional and build-time only (default Herdrem).
+# It is the home-screen / install label, not a herdrem.env setting.
 make build
+# HERDREM_PWA_NAME='Acme Ops' make build
 
 # Run the relay locally (loopback only)
 ./herdrem serve --web

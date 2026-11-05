@@ -3,6 +3,7 @@
 build: web
 	go build -o herdrem ./cmd/herdrem
 
+# HERDREM_PWA_NAME names the installed PWA (default Herdrem). Build time only.
 web:
 	cd web && npm install && npm run build
 

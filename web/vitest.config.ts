@@ -20,6 +20,6 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['src/test-setup.ts'],
-    include: ['src/**/*.test.ts', 'build-id.test.ts'],
+    include: ['src/**/*.test.ts', 'build-id.test.ts', 'pwa-name.test.ts'],
   },
 })
