@@ -15,6 +15,10 @@
   attributes when needed.
 - Do not introduce new dependencies without a clear justification.
 
+- Version source of truth is `version/VERSION` (embedded into the Go binary).
+  Bump it with `make bump V=x.y.z`, which also updates `web/package.json` and
+  `web/package-lock.json`. `go test ./version` fails on drift.
+
 ## Verification
 
 - Inspect the root Makefile and web/package.json for supported commands.

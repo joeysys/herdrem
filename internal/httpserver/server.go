@@ -32,6 +32,7 @@ import (
 	"herdrem/internal/service"
 	"herdrem/internal/store"
 	"herdrem/internal/webpush"
+	"herdrem/version"
 )
 
 // Server is the HTTP server with WS + static + health.
@@ -1110,7 +1111,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	hello := protocol.Hello{
 		Type:          "hello",
 		V:             protocol.Version,
-		ServerVersion: "0.1.0",
+		ServerVersion: version.Current,
 		Features: []string{
 			"agents", "terminal", "todo", "blocked", "multi-host",
 			"files", "prefs", "kind-override", "mark-read", "http-file", "tunnels",
