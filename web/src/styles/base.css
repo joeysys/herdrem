@@ -177,10 +177,22 @@ code, pre { font-family: var(--font-mono); }
   flex-shrink: 0;
   display: block;
 }
+/* Long HERDREM_PWA_NAME ellipsizes at a character boundary inside the
+   controls' left edge instead of wrapping or pushing them out. */
 .brand h1 {
+  margin: 0;
   font-size: var(--text-lg);
   font-weight: 700;
   letter-spacing: 0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .brand .tag {
   font-family: var(--font-mono);

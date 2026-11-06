@@ -95,6 +95,8 @@ let unsubMsg: (() => void) | null = null;
 import { safeStorage } from './utils/storage';
 
 // --- view state ---
+// Baked into <title> at build time by HERDREM_PWA_NAME (see pwa-name.ts).
+const appTitle = document.title || 'Herdrem';
 const view = ref<'list' | 'term'>('list');
 const activePaneId = ref('');
 const viewMode = ref<'list' | 'spaces'>((safeStorage.getItem('herdrem_viewmode') as 'list' | 'spaces') || 'list');
@@ -1228,70 +1230,72 @@ onUnmounted(() => {
     >
       <div class="brand">
         <img class="brand-mark" src="/brand-mark.png" alt="" width="24" height="22" aria-hidden="true" />
-        <h1>Herdrem</h1>
+        <h1 :title="appTitle">{{ appTitle }}</h1>
       </div>
 
-      <div class="relay-chip-wrap">
-        <button
-          class="relay-chip"
-          :class="conn.status"
-          aria-label="Switch relay"
-          @click="showRelaySwitch = !showRelaySwitch"
-        >
-          <span class="rc-dot" aria-hidden="true"></span>
-          <span class="rc-name">{{ currentRelayName }}</span>
-          <span class="rc-caret">▾</span>
-        </button>
-        <div v-if="showRelaySwitch" class="relay-pop" @click.stop>
+      <div class="topbar-right">
+        <div class="relay-chip-wrap">
           <button
-            v-for="r in relays.relays"
-            :key="r.id"
-            class="relay-pop-item"
-            :class="{ on: r.id === relays.currentId }"
-            @click="onSwitchRelay(r.id)"
+            class="relay-chip"
+            :class="conn.status"
+            aria-label="Switch relay"
+            @click="showRelaySwitch = !showRelaySwitch"
           >
-            {{ r.name || relayHostLabel(r.url) }}
+            <span class="rc-dot" aria-hidden="true"></span>
+            <span class="rc-name">{{ currentRelayName }}</span>
+            <span class="rc-caret">▾</span>
           </button>
+          <div v-if="showRelaySwitch" class="relay-pop" @click.stop>
+            <button
+              v-for="r in relays.relays"
+              :key="r.id"
+              class="relay-pop-item"
+              :class="{ on: r.id === relays.currentId }"
+              @click="onSwitchRelay(r.id)"
+            >
+              {{ r.name || relayHostLabel(r.url) }}
+            </button>
+            <button
+              class="relay-pop-item manage"
+              @click="
+                showRelaySwitch = false;
+                showSettings = true;
+              "
+            >
+              manage…
+            </button>
+          </div>
+        </div>
+
+        <div v-if="conn.hasFeature('pane-create') || conn.hasFeature('tunnels')" class="new-pane-wrap">
           <button
-            class="relay-pop-item manage"
-            @click="
-              showRelaySwitch = false;
-              showSettings = true;
-            "
+            class="top-icon"
+            :class="{ 'has-badge': tunnelsStore.activeCount > 0 }"
+            aria-label="New pane or tunnel"
+            title="New pane or tunnel"
+            @click="showNewPane = !showNewPane"
           >
-            manage…
+            +
           </button>
+          <div v-if="showNewPane" class="new-pane-pop" @click.stop>
+            <button v-if="conn.hasFeature('pane-create')" class="new-pane-item" @click="createPane('workspace')">
+              <span class="np-icon" aria-hidden="true">⊞</span>
+              <span class="np-label">New workspace</span>
+            </button>
+            <button v-if="conn.hasFeature('pane-create')" class="new-pane-item" @click="splitNewShell">
+              <span class="np-icon" aria-hidden="true">⎇</span>
+              <span class="np-label">New shell</span>
+            </button>
+            <button v-if="conn.hasFeature('tunnels')" class="new-pane-item" @click="openTunnelPanel">
+              <span class="np-icon" aria-hidden="true">⊕</span>
+              <span class="np-label">Tunnel</span>
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div v-if="conn.hasFeature('pane-create') || conn.hasFeature('tunnels')" class="new-pane-wrap">
-        <button
-          class="top-icon"
-          :class="{ 'has-badge': tunnelsStore.activeCount > 0 }"
-          aria-label="New pane or tunnel"
-          title="New pane or tunnel"
-          @click="showNewPane = !showNewPane"
-        >
-          +
-        </button>
-        <div v-if="showNewPane" class="new-pane-pop" @click.stop>
-          <button v-if="conn.hasFeature('pane-create')" class="new-pane-item" @click="createPane('workspace')">
-            <span class="np-icon" aria-hidden="true">⊞</span>
-            <span class="np-label">New workspace</span>
-          </button>
-          <button v-if="conn.hasFeature('pane-create')" class="new-pane-item" @click="splitNewShell">
-            <span class="np-icon" aria-hidden="true">⎇</span>
-            <span class="np-label">New shell</span>
-          </button>
-          <button v-if="conn.hasFeature('tunnels')" class="new-pane-item" @click="openTunnelPanel">
-            <span class="np-icon" aria-hidden="true">⊕</span>
-            <span class="np-label">Tunnel</span>
-          </button>
-        </div>
+        <button v-if="isDesktop" class="top-icon" aria-label="Keyboard shortcuts" :title="helpTitle" @click="showHelp = true">?</button>
+        <button class="top-icon" aria-label="Settings" :title="settingsTitle" @click="showSettings = true">⚙</button>
       </div>
-
-      <button v-if="isDesktop" class="top-icon" aria-label="Keyboard shortcuts" :title="helpTitle" @click="showHelp = true">?</button>
-      <button class="top-icon" aria-label="Settings" :title="settingsTitle" @click="showSettings = true">⚙</button>
     </header>
 
     <main
